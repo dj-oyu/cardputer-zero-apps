@@ -1,0 +1,14 @@
+[package]
+name = "dfabench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+regex-automata = { version = "0.4", default-features = false, features = ["std", "syntax", "dfa-build", "dfa-search", "perf", "unicode-perl", "unicode-gencat", "unicode-word-boundary"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+
+# zcode 本体のワークスペースに含めない (単独でビルドする)
+[workspace]

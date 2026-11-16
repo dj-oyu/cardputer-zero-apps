@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>zcode UI mock</title>
+<style>
+  :root {
+    --bg: #1e1e1e; --side: #252526; --tabbar: #2d2d2d; --tab-active: #1e1e1e;
+    --fg: #d4d4d4; --dim: #858585; --line: #2a2a2a; --sel: #264f78;
+    --status: #007acc; --status-run: #cc6633; --accent: #3dff7a;
+    --kw: #569cd6; --ctl: #c586c0; --str: #ce9178; --num: #b5cea8;
+    --fn: #dcdcaa; --cm: #6a9955; --cls: #4ec9b0; --var: #9cdcfe;
+    --page: #111; --page-fg: #ddd;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--page); color: var(--page-fg); font: 14px/1.6 system-ui, sans-serif; padding: 24px 16px; }
+  h1 { font-size: 18px; margin-bottom: 4px; }
+  p.lead { color: #aaa; margin-bottom: 20px; max-width: 980px; }
+  .grid { display: flex; flex-wrap: wrap; gap: 28px; }
+  figure { width: 960px; max-width: 100%; }
+  figcaption { margin-top: 8px; color: #bbb; font-size: 13px; }
+  figcaption b { color: #fff; }
+  /* 実寸 320x170 を 3 倍で表示 */
+  .lcd-wrap { width: 960px; max-width: 100%; aspect-ratio: 320/170; overflow: hidden; border: 6px solid #000; border-radius: 6px; }
+  .lcd { width: 320px; height: 170px; transform-origin: 0 0; transform: scale(3);
+         background: var(--bg); color: var(--fg); position: relative; overflow: hidden;
+         font-family: "DejaVu Sans Mono", Menlo, Consolas, monospace; font-size: 9px; line-height: 11px; }
+  .tabs { position: absolute; left: 0; right: 0; top: 0; height: 13px; background: var(--tabbar); display: flex; }
+  .tab { padding: 1px 5px 0; color: var(--dim); border-right: 1px solid #252526; white-space: nowrap; }
+  .tab.on { background: var(--tab-active); color: #fff; border-top: 1px solid var(--status); }
+  .tab .dot { color: #fff; }
+  .side { position: absolute; left: 0; top: 13px; bottom: 11px; width: 84px; background: var(--side); border-right: 1px solid #333; }
+  .side .hd { color: var(--dim); font-size: 7px; letter-spacing: .5px; padding: 1px 4px; height: 10px; }
+  .side .it { padding-left: 4px; white-space: nowrap; overflow: hidden; height: 11px; }
+  .side .it.cur { background: #37373d; }
+  .side .it.focus { background: #04395e; outline: 1px solid var(--status); outline-offset: -1px; }
+  .side .d { color: var(--fg); } .side .f { color: #cccccc; } .side .py { color: #e5c07b; }
+  .ed { position: absolute; top: 13px; bottom: 11px; right: 0; overflow: hidden; }
+  .row { height: 11px; display: block; white-space: pre; }
+  .row.cur { background: var(--line); }
+  .gut { display: inline-block; width: 17px; text-align: right; padding-right: 3px; color: #5a5a5a; }
+  .row.cur .gut { color: #c6c6c6; }
+  .cursor { display: inline-block; width: 1px; height: 10px; background: #aeafad; vertical-align: -1px; margin-right: -1px; }
+  .panel { position: absolute; left: 0; right: 0; bottom: 11px; background: var(--bg); border-top: 1px solid #444; }
+  .panel .ph { height: 11px; color: var(--dim); font-size: 7px; padding: 1px 4px; display: flex; gap: 8px; }
+  .panel .ph .on { color: #fff; border-bottom: 1px solid #fff; }
+  .panel .tl { padding-left: 4px; white-space: pre; height: 11px; }
+  .status { position: absolute; left: 0; right: 0; bottom: 0; height: 11px; background: var(--status); color: #fff;
+            display: flex; justify-content: space-between; padding: 0 4px; font-size: 8px; line-height: 11px; }
+  .status.run { background: var(--status-run); }
+  .mod { background: #fff; color: var(--status); padding: 0 2px; border-radius: 2px; margin-left: 3px; font-size: 7px; }
+  .k { color: var(--kw); } .c { color: var(--ctl); } .s { color: var(--str); } .n { color: var(--num); }
+  .fn { color: var(--fn); } .cm { color: var(--cm); } .cl { color: var(--cls); } .v { color: var(--var); }
+  .ok { color: var(--accent); } .err { color: #f48771; } .pr { color: #3b8eea; }
+  /* ショートカット一覧 */
+  .kb { position: absolute; left: 0; right: 0; top: 13px; bottom: 11px; overflow: hidden; }
+  .kb .search { height: 13px; margin: 1px 4px 1px; border: 1px solid #3c3c3c; background: #3c3c3c;
+                padding: 0 3px; line-height: 11px; color: var(--dim); }
+  .kb .search.on { border-color: var(--status); color: var(--fg); }
+  .kb .sec { height: 11px; padding: 0 4px; color: var(--status); font-size: 7px; letter-spacing: .5px; line-height: 12px; }
+  .kb .r { height: 11px; display: flex; align-items: center; padding: 0 6px 0 8px; white-space: nowrap; }
+  .kb .r.sel { background: #04395e; }
+  .kb .r .a { flex: 1; overflow: hidden; font-family: "Noto Sans CJK JP", "Noto Sans JP", sans-serif; font-size: 8px; }
+  .kb .r .hit { color: #ffd479; }
+  .kb .r .h { color: var(--dim); font-size: 7px; margin-right: 4px; }
+  .chip { display: inline-block; height: 9px; line-height: 8px; padding: 0 2px; margin-left: 2px; font-size: 7px;
+          background: #3a3d41; border: 1px solid #555; border-bottom-width: 1px; border-radius: 2px; color: #e8e8e8; }
+  .chip.fn { border-color: #b8860b; }
+  .sb { position: absolute; right: 0; width: 3px; background: #4f4f4f; }
+  /* SKK */
+  .ime { display: inline-block; padding: 0 3px; margin-left: 4px; border-radius: 2px; font-size: 7px; line-height: 9px;
+         font-family: "Noto Sans CJK JP", "Noto Sans JP", sans-serif; }
+  .ime.kana { background: #3dff7a; color: #0b3d1e; }
+  .ime.kata { background: #ffd479; color: #4a3500; }
+  .ime.ascii { background: rgba(255,255,255,.25); color: #fff; }
+  .pre { border-bottom: 1px solid #fff; color: #fff; }
+  .conv { background: #264f78; color: #fff; border-bottom: 1px solid #fff; }
+  .cand { position: absolute; background: #252526; border: 1px solid #454545; box-shadow: 0 2px 4px rgba(0,0,0,.6);
+          font-family: "Noto Sans CJK JP", "Noto Sans JP", sans-serif; font-size: 8px; }
+  .cand .ci { height: 11px; line-height: 11px; padding: 0 6px 0 2px; white-space: nowrap; }
+  .cand .ci.on { background: #04395e; color: #fff; }
+  .cand .ck { display: inline-block; width: 9px; color: var(--status); font-family: "DejaVu Sans Mono", monospace; font-size: 7px; }
+  .cand .cn { color: var(--dim); font-size: 7px; }
+  .cand .cf { height: 10px; line-height: 10px; padding: 0 4px; color: var(--dim); font-size: 6.5px; border-top: 1px solid #3c3c3c; }
+  .mini { position: absolute; left: 0; right: 0; bottom: 11px; height: 13px; background: #252526; border-top: 1px solid var(--status);
+          padding: 1px 4px; line-height: 11px; white-space: nowrap; font-family: "Noto Sans CJK JP", "Noto Sans JP", sans-serif; font-size: 8px; }
+  .mini .lb { color: var(--status); }
+  /* Markdown ライブプレビュー */
+  .md { position: absolute; left: 0; right: 0; top: 13px; bottom: 11px; overflow: hidden; padding: 2px 8px 0 10px;
+        font-family: "Noto Sans CJK JP", "Noto Sans JP", sans-serif; font-size: 8.5px; line-height: 12px; color: #d4d4d4; }
+  .md .l { position: relative; white-space: pre-wrap; }
+  .md .l.cur { background: var(--line); margin: 0 -8px 0 -10px; padding: 0 8px 0 10px; }
+  .md .mk { color: #6b6b6b; font-family: "DejaVu Sans Mono", monospace; font-size: 7.5px; }
+  .md h1 { font-size: 13px; line-height: 17px; color: #fff; border-bottom: 1px solid #3c3c3c; margin-bottom: 2px; font-weight: 700; }
+  .md h2 { font-size: 10.5px; line-height: 15px; color: #fff; font-weight: 700; margin-top: 1px; }
+  .md b { color: #fff; }
+  .md i { font-style: italic; }
+  .md code { font-family: "DejaVu Sans Mono", monospace; font-size: 7.5px; background: #333; color: #ce9178; padding: 0 2px; border-radius: 2px; }
+  .md .pre { display: block; border: none; font-family: "DejaVu Sans Mono", monospace; font-size: 7.5px; line-height: 10px;
+             background: #2a2a2a; border-left: 2px solid var(--status); padding: 1px 4px; margin: 1px 0 2px; color: #d4d4d4; white-space: pre; }
+  .md a { color: #3794ff; text-decoration: underline; }
+  .md .li { padding-left: 9px; }
+  .md .li::before { content: "•"; position: absolute; left: 1px; color: var(--status); }
+  .md .li.raw::before { content: none; }
+  .md .cb { display: inline-block; width: 7px; height: 7px; border: 1px solid #aaa; border-radius: 1px; margin-right: 3px; vertical-align: -1px; }
+  .md .cb.on { background: var(--accent); border-color: var(--accent); }
+  .md .done { color: #777; text-decoration: line-through; }
+  .md .q { border-left: 2px solid #555; padding-left: 5px; color: #aaa; }
+  .md .cursor { background: #fff; }
+  table.keys { border-collapse: collapse; margin-top: 28px; font-size: 13px; }
+  table.keys td, table.keys th { border: 1px solid #333; padding: 4px 10px; text-align: left; }
+  table.keys th { background: #222; }
+  h2 { font-size: 15px; margin-top: 28px; }
+  ul.notes { margin: 8px 0 0 20px; color: #bbb; max-width: 980px; }
+</style>
+</head>
+<body>
+<h1>zcode — CardputerZero 用コードエディタ UI モック</h1>
+<p class="lead">液晶 320×170 の実寸レイアウトを 3 倍で表示。配色は VS Code の Dark+。
+文字は DejaVu Sans Mono 9px（1 文字 約 5.4px 幅 / 行 11px）想定で、エディタ全幅なら 1 行 約 55 文字 × 13 行。</p>
+
+<div class="grid">
+
+<!-- 1. エクスプローラ + エディタ -->
+<figure>
+<div class="lcd-wrap"><div class="lcd">
+  <div class="tabs">
+    <div class="tab" style="margin-left:84px">utils.py</div>
+    <div class="tab on">main.py <span class="dot">●</span></div>
+  </div>
+  <div class="side">
+    <div class="hd">EXPLORER: ~/code</div>
+    <div class="it d">▾ blink</div>
+    <div class="it cur">&nbsp;&nbsp;<span class="py">main.py</span></div>
+    <div class="it">&nbsp;&nbsp;<span class="py">utils.py</span></div>
+    <div class="it d">▸ sensors</div>
+    <div class="it f">README.md</div>
+    <div class="it f">notes.txt</div>
+  </div>
+  <div class="ed" style="left:85px">
+    <div class="row"><span class="gut">1</span><span class="c">import</span> time</div>
+    <div class="row"><span class="gut">2</span><span class="c">from</span> utils <span class="c">import</span> <span class="fn">led</span></div>
+    <div class="row"><span class="gut">3</span></div>
+    <div class="row"><span class="gut">4</span><span class="k">def</span> <span class="fn">main</span>():</div>
+    <div class="row"><span class="gut">5</span>    <span class="cm"># 0.5 秒ごとに点滅</span></div>
+    <div class="row"><span class="gut">6</span>    <span class="c">for</span> <span class="v">i</span> <span class="c">in</span> <span class="fn">range</span>(<span class="n">10</span>):</div>
+    <div class="row cur"><span class="gut">7</span>        <span class="fn">led</span>(<span class="v">i</span> % <span class="n">2</span>)<span class="cursor"></span></div>
+    <div class="row"><span class="gut">8</span>        time.<span class="fn">sleep</span>(<span class="n">0.5</span>)</div>
+    <div class="row"><span class="gut">9</span>    <span class="fn">print</span>(<span class="s">"done"</span>)</div>
+    <div class="row"><span class="gut">10</span></div>
+    <div class="row"><span class="gut">11</span><span class="c">if</span> <span class="v">__name__</span> == <span class="s">"__main__"</span>:</div>
+    <div class="row"><span class="gut">12</span>    <span class="fn">main</span>()</div>
+  </div>
+  <div class="status"><span>main.py ● &nbsp;Ln 7, Col 20</span><span>Python &nbsp;UTF-8<span class="mod">SHIFT</span><span class="ime ascii">A</span></span></div>
+</div></div>
+<figcaption><b>1. エクスプローラ＋エディタ</b> — 左 84px がファイルツリー（Ctrl+B で開閉）。上はタブ、未保存は ●。
+下のステータスバーに行・桁と、ロック中のモディファイア（SHIFT / SYM / FN）を出す。</figcaption>
+</figure>
+
+<!-- 2. エディタ全幅 -->
+<figure>
+<div class="lcd-wrap"><div class="lcd">
+  <div class="tabs">
+    <div class="tab">utils.py</div>
+    <div class="tab on">main.py</div>
+  </div>
+  <div class="ed" style="left:0">
+    <div class="row"><span class="gut">1</span><span class="c">import</span> time</div>
+    <div class="row"><span class="gut">2</span><span class="c">from</span> utils <span class="c">import</span> <span class="fn">led</span></div>
+    <div class="row"><span class="gut">3</span></div>
+    <div class="row"><span class="gut">4</span><span class="k">def</span> <span class="fn">main</span>():</div>
+    <div class="row"><span class="gut">5</span>    <span class="cm"># 0.5 秒ごとに点滅。10 回で終わる</span></div>
+    <div class="row"><span class="gut">6</span>    <span class="c">for</span> <span class="v">i</span> <span class="c">in</span> <span class="fn">range</span>(<span class="n">10</span>):</div>
+    <div class="row"><span class="gut">7</span>        <span class="fn">led</span>(<span class="v">i</span> % <span class="n">2</span>)</div>
+    <div class="row cur"><span class="gut">8</span>        time.<span class="fn">sleep</span>(<span class="n">0.5</span>)<span class="cursor"></span></div>
+    <div class="row"><span class="gut">9</span>    <span class="fn">print</span>(<span class="s">"done"</span>)</div>
+    <div class="row"><span class="gut">10</span></div>
+    <div class="row"><span class="gut">11</span><span class="c">if</span> <span class="v">__name__</span> == <span class="s">"__main__"</span>:</div>
+    <div class="row"><span class="gut">12</span>    <span class="fn">main</span>()</div>
+    <div class="row"><span class="gut">13</span></div>
+  </div>
+  <div class="status"><span>main.py &nbsp;Ln 8, Col 23</span><span>Python &nbsp;UTF-8 &nbsp;Spaces: 4</span></div>
+</div></div>
+<figcaption><b>2. エディタ全幅</b> — ツリーを閉じると 1 行 約 55 文字 × 13 行。普段はこの状態で書く想定。</figcaption>
+</figure>
+
+<!-- 3. F5 実行 + ターミナル -->
+<figure>
+<div class="lcd-wrap"><div class="lcd">
+  <div class="tabs">
+    <div class="tab">utils.py</div>
+    <div class="tab on">main.py</div>
+  </div>
+  <div class="ed" style="left:0; bottom:79px">
+    <div class="row"><span class="gut">6</span>    <span class="c">for</span> <span class="v">i</span> <span class="c">in</span> <span class="fn">range</span>(<span class="n">10</span>):</div>
+    <div class="row"><span class="gut">7</span>        <span class="fn">led</span>(<span class="v">i</span> % <span class="n">2</span>)</div>
+    <div class="row cur"><span class="gut">8</span>        time.<span class="fn">sleep</span>(<span class="n">0.5</span>)</div>
+    <div class="row"><span class="gut">9</span>    <span class="fn">print</span>(<span class="s">"done"</span>)</div>
+    <div class="row"><span class="gut">10</span></div>
+    <div class="row"><span class="gut">11</span><span class="c">if</span> <span class="v">__name__</span> == <span class="s">"__main__"</span>:</div>
+  </div>
+  <div class="panel" style="height:79px">
+    <div class="ph"><span class="on">TERMINAL</span><span>python3 main.py</span><span style="margin-left:auto">Ctrl+C 停止</span></div>
+    <div class="tl"><span class="pr">jimmy@zero</span>:~/code/blink$ python3 main.py</div>
+    <div class="tl">led on</div>
+    <div class="tl">led off</div>
+    <div class="tl">led on</div>
+    <div class="tl">led off</div>
+    <div class="tl">led on<span class="cursor"></span></div>
+  </div>
+  <div class="status run"><span>▶ 実行中 main.py &nbsp;3.1s</span><span>Python &nbsp;UTF-8</span></div>
+</div></div>
+<figcaption><b>3. F5 で実行</b> — 下半分にターミナルが開き、<code>python3 main.py</code> を流す（本物の pty なので入力も可）。
+実行中はステータスバーが橙。Ctrl+C で停止、Ctrl+` でパネル開閉、パネルを全画面にもできる。</figcaption>
+</figure>
+
+<!-- 4. 実行終了（エラー） -->
+<figure>
+<div class="lcd-wrap"><div class="lcd">
+  <div class="tabs">
+    <div class="tab on">main.py</div>
+  </div>
+  <div class="panel" style="top:13px">
+    <div class="ph"><span class="on">TERMINAL</span><span>全画面</span><span style="margin-left:auto">Ctrl+` 戻る</span></div>
+    <div class="tl"><span class="pr">jimmy@zero</span>:~/code/blink$ python3 main.py</div>
+    <div class="tl">Traceback (most recent call last):</div>
+    <div class="tl">  File "main.py", line 12, in &lt;module&gt;</div>
+    <div class="tl">    main()</div>
+    <div class="tl">  File "main.py", line 7, in main</div>
+    <div class="tl">    led(i % 2)</div>
+    <div class="tl"><span class="err">NameError: name 'led' is not defined</span></div>
+    <div class="tl"><span class="dim" style="color:var(--dim)">[終了コード 1]</span></div>
+    <div class="tl"><span class="pr">jimmy@zero</span>:~/code/blink$ <span class="cursor"></span></div>
+  </div>
+  <div class="status" style="background:#a1260d"><span>✕ 終了コード 1 &nbsp;main.py</span><span>Python &nbsp;UTF-8</span></div>
+</div></div>
+<figcaption><b>4. ターミナル全画面・エラー終了</b> — 終了コードをステータスバーに出す（0 なら緑系、非 0 なら赤）。
+シェルはそのまま残るので、続けてコマンドも打てる。</figcaption>
+</figure>
+
+<!-- 5. ショートカット一覧 -->
+<figure>
+<div class="lcd-wrap"><div class="lcd">
+  <div class="tabs">
+    <div class="tab">main.py</div>
+    <div class="tab on">⌨ ショートカット</div>
+  </div>
+  <div class="kb">
+    <div class="search">文字を打つと絞り込み…</div>
+    <div class="sec">ファイル</div>
+    <div class="r sel"><span class="a">保存</span><span class="chip">Ctrl</span><span class="chip">S</span></div>
+    <div class="r"><span class="a">新規ファイル</span><span class="chip">Ctrl</span><span class="chip">N</span></div>
+    <div class="r"><span class="a">タブを閉じる</span><span class="chip">Ctrl</span><span class="chip">W</span></div>
+    <div class="r"><span class="a">次 / 前のタブ</span><span class="chip">Ctrl</span><span class="chip">Tab</span><span class="h">&nbsp;/ +Shift</span></div>
+    <div class="r"><span class="a">zcode を終了</span><span class="chip">Ctrl</span><span class="chip">Q</span></div>
+    <div class="sec">実行</div>
+    <div class="r"><span class="a">保存して実行</span><span class="h">Fn+5</span><span class="chip fn">F5</span></div>
+    <div class="r"><span class="a">実行を止める（ターミナル内）</span><span class="chip">Ctrl</span><span class="chip">C</span></div>
+    <div class="r"><span class="a">ターミナル開閉 / 全画面</span><span class="chip">Ctrl</span><span class="chip">`</span><span class="h">&nbsp;/ +Shift</span></div>
+  </div>
+  <div class="sb" style="top:28px; height:44px"></div>
+  <div class="status"><span>↑↓ 選択 &nbsp;Enter 実行 &nbsp;Esc 閉じる</span><span>1/27</span></div>
+</div></div>
+<figcaption><b>5. ショートカット一覧</b> — F1（Fn+1）でいつでも開く。カテゴリ別に全キーを並べ、
+↑↓ で選んで Enter を押すとその操作をそのまま実行する（コマンドパレット代わり）。
+Fn レイヤーのキーは黄色い枠のキーで示し、左に実際の押し方（Fn+5 など）を薄く添える。</figcaption>
+</figure>
+
+<!-- 6. ショートカット一覧（絞り込み・続き） -->
+<figure>
+<div class="lcd-wrap"><div class="lcd">
+  <div class="tabs">
+    <div class="tab">main.py</div>
+    <div class="tab on">⌨ ショートカット</div>
+  </div>
+  <div class="kb">
+    <div class="search on">選択<span class="cursor"></span></div>
+    <div class="sec">編集</div>
+    <div class="r sel"><span class="a">すべて<span class="hit">選択</span></span><span class="chip">Ctrl</span><span class="chip">A</span></div>
+    <div class="r"><span class="a">文字単位で<span class="hit">選択</span></span><span class="chip">Shift</span><span class="chip fn">← →</span></div>
+    <div class="r"><span class="a">行単位で<span class="hit">選択</span></span><span class="chip">Shift</span><span class="chip fn">↑ ↓</span></div>
+    <div class="r"><span class="a"><span class="hit">選択</span>範囲をコピー</span><span class="chip">Ctrl</span><span class="chip">C</span></div>
+    <div class="r"><span class="a"><span class="hit">選択</span>範囲を切り取り</span><span class="chip">Ctrl</span><span class="chip">X</span></div>
+    <div class="r"><span class="a"><span class="hit">選択</span>範囲をインデント / 戻す</span><span class="chip">Tab</span><span class="h">&nbsp;/ +Shift</span></div>
+    <div class="sec">表示</div>
+    <div class="r"><span class="a">ツリーで<span class="hit">選択</span>中のファイルを開く</span><span class="chip">Enter</span></div>
+  </div>
+  <div class="status"><span>「選択」7 件 &nbsp;BkSp 消す &nbsp;Esc 閉じる</span><span>1/7</span></div>
+</div></div>
+<figcaption><b>6. 絞り込み</b> — 文字を打つと操作名で絞り込み、一致部分を黄色で示す（日本語の操作名でも、
+キー名「ctrl s」でも引ける）。BackSpace で 1 文字戻し、空になると全件表示に戻る。</figcaption>
+</figure>
+
+<!-- 7. SKK: ▽ 変換前 -->
+<figure>
+<div class="lcd-wrap"><div class="lcd">
+  <div class="tabs">
+    <div class="tab">utils.py</div>
+    <div class="tab on">main.py <span class="dot">●</span></div>
+  </div>
+  <div class="ed" style="left:0">
+    <div class="row"><span class="gut">1</span><span class="c">import</span> time</div>
+    <div class="row"><span class="gut">2</span><span class="c">from</span> utils <span class="c">import</span> <span class="fn">led</span></div>
+    <div class="row"><span class="gut">3</span></div>
+    <div class="row"><span class="gut">4</span><span class="k">def</span> <span class="fn">main</span>():</div>
+    <div class="row cur"><span class="gut">5</span>    <span class="cm"># 0.5 秒ごとに</span><span class="pre">▽てんめつ</span><span class="cursor"></span></div>
+    <div class="row"><span class="gut">6</span>    <span class="c">for</span> <span class="v">i</span> <span class="c">in</span> <span class="fn">range</span>(<span class="n">10</span>):</div>
+    <div class="row"><span class="gut">7</span>        <span class="fn">led</span>(<span class="v">i</span> % <span class="n">2</span>)</div>
+    <div class="row"><span class="gut">8</span>        time.<span class="fn">sleep</span>(<span class="n">0.5</span>)</div>
+    <div class="row"><span class="gut">9</span>    <span class="fn">print</span>(<span class="s">"done"</span>)</div>
+  </div>
+  <div class="status"><span>main.py ● &nbsp;Ln 5, Col 22</span><span>Python &nbsp;UTF-8<span class="ime kana">かな</span></span></div>
+</div></div>
+<figcaption><b>7. SKK・▽（変換前）</b> — Ctrl+J でかなモード（ステータスバー右端が緑の「かな」）。
+Shift を 1 回タップして <code>Tenmetu</code> と打つと、大文字の位置から ▽ が付いて読みを入力中になる（下線つき）。
+ここで Enter を押すとひらがなのまま確定、Ctrl+G で取り消し。</figcaption>
+</figure>
+
+<!-- 8. SKK: ▼ 候補選択 -->
+<figure>
+<div class="lcd-wrap"><div class="lcd">
+  <div class="tabs">
+    <div class="tab">utils.py</div>
+    <div class="tab on">main.py <span class="dot">●</span></div>
+  </div>
+  <div class="ed" style="left:0">
+    <div class="row"><span class="gut">1</span><span class="c">import</span> time</div>
+    <div class="row"><span class="gut">2</span><span class="c">from</span> utils <span class="c">import</span> <span class="fn">led</span></div>
+    <div class="row"><span class="gut">3</span></div>
+    <div class="row"><span class="gut">4</span><span class="k">def</span> <span class="fn">main</span>():</div>
+    <div class="row cur"><span class="gut">5</span>    <span class="cm"># 0.5 秒ごとに</span><span class="conv">▼点滅</span><span class="cursor"></span></div>
+    <div class="row"><span class="gut">6</span>    <span class="c">for</span> <span class="v">i</span> <span class="c">in</span> <span class="fn">range</span>(<span class="n">10</span>):</div>
+    <div class="row"><span class="gut">7</span>        <span class="fn">led</span>(<span class="v">i</span> % <span class="n">2</span>)</div>
+    <div class="row"><span class="gut">8</span>        time.<span class="fn">sleep</span>(<span class="n">0.5</span>)</div>
+    <div class="row"><span class="gut">9</span>    <span class="fn">print</span>(<span class="s">"done"</span>)</div>
+  </div>
+  <div class="cand" style="left:98px; top:68px">
+    <div class="ci on"><span class="ck">a</span>点滅</div>
+    <div class="ci"><span class="ck">s</span>明滅<span class="cn"> 〔めいめつ〕</span></div>
+    <div class="ci"><span class="ck">d</span>天滅</div>
+    <div class="ci"><span class="ck">f</span>点めつ</div>
+    <div class="cf">Space 次 &nbsp;x 前 &nbsp;Enter 確定 &nbsp;1/1</div>
+  </div>
+  <div class="status"><span>main.py ● &nbsp;Ln 5, Col 22</span><span>Python &nbsp;UTF-8<span class="ime kana">かな</span></span></div>
+</div></div>
+<figcaption><b>8. SKK・▼（候補選択）</b> — Space で変換。最初の候補を行内に ▼ 付きで出し、
+カーソルの下に候補一覧を開く。a s d f j k l で直接選ぶか、Space / x で次・前へ。
+Enter（またはそのまま次の文字を打つ）で確定。確定した語は個人辞書の先頭に上がる。</figcaption>
+</figure>
+
+<!-- 9. SKK: 辞書登録 -->
+<figure>
+<div class="lcd-wrap"><div class="lcd">
+  <div class="tabs">
+    <div class="tab">utils.py</div>
+    <div class="tab on">main.py <span class="dot">●</span></div>
+  </div>
+  <div class="ed" style="left:0; bottom:24px">
+    <div class="row"><span class="gut">1</span><span class="c">import</span> time</div>
+    <div class="row"><span class="gut">2</span><span class="c">from</span> utils <span class="c">import</span> <span class="fn">led</span></div>
+    <div class="row"><span class="gut">3</span></div>
+    <div class="row"><span class="gut">4</span><span class="k">def</span> <span class="fn">main</span>():</div>
+    <div class="row cur"><span class="gut">5</span>    <span class="cm"># </span><span class="conv">▼かーどぴゅーたー</span></div>
+    <div class="row"><span class="gut">6</span>    <span class="c">for</span> <span class="v">i</span> <span class="c">in</span> <span class="fn">range</span>(<span class="n">10</span>):</div>
+    <div class="row"><span class="gut">7</span>        <span class="fn">led</span>(<span class="v">i</span> % <span class="n">2</span>)</div>
+    <div class="row"><span class="gut">8</span>        time.<span class="fn">sleep</span>(<span class="n">0.5</span>)</div>
+    <div class="row"><span class="gut">9</span>    <span class="fn">print</span>(<span class="s">"done"</span>)</div>
+    <div class="row"><span class="gut">10</span></div>
+    <div class="row"><span class="gut">11</span><span class="c">if</span> <span class="v">__name__</span> == <span class="s">"__main__"</span>:</div>
+  </div>
+  <div class="mini"><span class="lb">[辞書登録] かーどぴゅーたー：</span>カード<span class="pre">▽ぴゅーた</span><span class="cursor"></span></div>
+  <div class="status"><span>Enter 登録 &nbsp;Ctrl+G やめる</span><span>Python &nbsp;UTF-8<span class="ime kana">かな</span></span></div>
+</div></div>
+<figcaption><b>9. SKK・辞書登録</b> — 辞書に候補が無いとき（または候補を最後まで送ったとき）は、
+ステータスバーの上に登録欄が開く。ここでも SKK で入力でき（入れ子の変換も可）、Enter で個人辞書
+<code>~/.skk-uim-jisyo</code> に登録して本文に確定する。uim-skk と同じ辞書なので、ほかのアプリにも反映される。</figcaption>
+</figure>
+
+<!-- 10. Markdown ライブプレビュー -->
+<figure>
+<div class="lcd-wrap"><div class="lcd">
+  <div class="tabs">
+    <div class="tab">main.py</div>
+    <div class="tab on">memo.md <span class="dot">●</span></div>
+  </div>
+  <div class="md">
+    <div class="l"><h1>買い物と作業メモ</h1></div>
+    <div class="l li"><span class="cb on"></span><span class="done">基板を発注する</span></div>
+    <div class="l li cur raw"><span class="mk">- [ ] </span>ケースを <span class="mk">**</span><b>3D 印刷</b><span class="mk">**</span> する<span class="cursor"></span></div>
+    <div class="l li"><span class="cb"></span><code>zcode</code> を実機で試す</div>
+    <div class="l"><h2>メモ</h2></div>
+    <div class="l q">CMA は <b>64MB</b> しかない。<i>カメラ</i>と同時に使うときは注意</div>
+    <div class="l">詳細は <a>development.md</a> を参照</div>
+    <div class="l"><span class="pre"><span class="c">import</span> zero_ui <span class="c">as</span> ui
+ui.<span class="fn">font</span>(<span class="n">12</span>)</span></div>
+  </div>
+  <div class="status"><span>memo.md ● &nbsp;Ln 3, Col 19 &nbsp;プレビュー</span><span>Markdown &nbsp;UTF-8<span class="ime kana">かな</span></span></div>
+</div></div>
+<figcaption><b>10. Markdown・ライブプレビュー</b> — .md を開くと、装飾を付けたまま編集する（見出しは大きく、太字・斜体・
+インラインコード・リンク・チェックボックス・引用・コードブロックを描き分ける）。
+<b>カーソルのある行だけ</b>記号（<code>- [ ] </code>、<code>**</code> など）を薄く見せて、その場で直せるようにする。
+本文はプロポーショナルの Noto Sans CJK、コード部分だけ等幅。</figcaption>
+</figure>
+
+<!-- 11. Markdown ソース表示 -->
+<figure>
+<div class="lcd-wrap"><div class="lcd">
+  <div class="tabs">
+    <div class="tab">main.py</div>
+    <div class="tab on">memo.md <span class="dot">●</span></div>
+  </div>
+  <div class="ed" style="left:0">
+    <div class="row"><span class="gut">1</span><span class="k"># 買い物と作業メモ</span></div>
+    <div class="row"><span class="gut">2</span><span class="c">- [x]</span> 基板を発注する</div>
+    <div class="row cur"><span class="gut">3</span><span class="c">- [ ]</span> ケースを <b style="color:#fff">**3D 印刷**</b> する<span class="cursor"></span></div>
+    <div class="row"><span class="gut">4</span><span class="c">- [ ]</span> <span class="s">`zcode`</span> を実機で試す</div>
+    <div class="row"><span class="gut">5</span><span class="k">## メモ</span></div>
+    <div class="row"><span class="gut">6</span><span class="cm">&gt; CMA は **64MB** しかない。*カメラ*と…</span></div>
+    <div class="row"><span class="gut">7</span>詳細は [<span class="v">development.md</span>](<span class="s">../development.md</span>)</div>
+    <div class="row"><span class="gut">8</span><span class="s">```python</span></div>
+    <div class="row"><span class="gut">9</span><span class="c">import</span> zero_ui <span class="c">as</span> ui</div>
+    <div class="row"><span class="gut">10</span>ui.<span class="fn">font</span>(<span class="n">12</span>)</div>
+    <div class="row"><span class="gut">11</span><span class="s">```</span></div>
+  </div>
+  <div class="status"><span>memo.md ● &nbsp;Ln 3, Col 19 &nbsp;ソース</span><span>Markdown &nbsp;UTF-8<span class="ime kana">かな</span></span></div>
+</div></div>
+<figcaption><b>11. Markdown・ソース表示</b> — Ctrl+Shift+V でプレビュー ⇔ ソースを切り替える（同じバッファ、同じカーソル位置）。
+表など凝った書式を直すときや、記号をまとめて確認したいときはこちら。</figcaption>
+</figure>
+
+</div>
+
+<h2>ショートカット一覧の全項目（案）</h2>
+<table class="keys">
+<tr><th>カテゴリ</th><th>操作</th><th>キー</th></tr>
+<tr><td rowspan="6">ファイル</td><td>保存</td><td>Ctrl+S</td></tr>
+<tr><td>新規ファイル</td><td>Ctrl+N</td></tr>
+<tr><td>タブを閉じる</td><td>Ctrl+W</td></tr>
+<tr><td>次のタブ / 前のタブ</td><td>Ctrl+Tab / Ctrl+Shift+Tab</td></tr>
+<tr><td>ショートカット一覧</td><td>F1（Fn+1）</td></tr>
+<tr><td>zcode を終了</td><td>Ctrl+Q</td></tr>
+<tr><td rowspan="9">編集</td><td>元に戻す / やり直す</td><td>Ctrl+Z / Ctrl+Y</td></tr>
+<tr><td>切り取り / コピー / 貼り付け</td><td>Ctrl+X / Ctrl+C / Ctrl+V</td></tr>
+<tr><td>すべて選択</td><td>Ctrl+A</td></tr>
+<tr><td>文字単位 / 行単位で選択</td><td>Shift+←→ / Shift+↑↓</td></tr>
+<tr><td>インデント / 戻す</td><td>Tab / Shift+Tab</td></tr>
+<tr><td>行を削除</td><td>Ctrl+Shift+K</td></tr>
+<tr><td>行コメント切替</td><td>Ctrl+/</td></tr>
+<tr><td>検索 / 次を検索</td><td>Ctrl+F / Enter</td></tr>
+<tr><td>行へ移動</td><td>Ctrl+G</td></tr>
+<tr><td rowspan="4">移動（Fn）</td><td>カーソル移動</td><td>←↑↓→</td></tr>
+<tr><td>行頭 / 行末</td><td>Home / End</td></tr>
+<tr><td>1 画面上 / 下</td><td>PgUp / PgDn</td></tr>
+<tr><td>ファイル先頭 / 末尾</td><td>Ctrl+Home / Ctrl+End</td></tr>
+<tr><td rowspan="3">表示</td><td>ツリー開閉</td><td>Ctrl+B</td></tr>
+<tr><td>ツリーへ移る / エディタへ戻る</td><td>Ctrl+E / Esc</td></tr>
+<tr><td>ツリーで開く</td><td>Enter</td></tr>
+<tr><td rowspan="3">実行</td><td>保存して実行</td><td>F5（Fn+5）</td></tr>
+<tr><td>実行を止める</td><td>Ctrl+C（ターミナル内）</td></tr>
+<tr><td>ターミナル開閉 / 全画面</td><td>Ctrl+` / Ctrl+Shift+`</td></tr>
+<tr><td rowspan="3">Markdown</td><td>プレビュー ⇔ ソース</td><td>Ctrl+Shift+V</td></tr>
+<tr><td>チェックボックスを切り替え</td><td>Ctrl+Enter（カーソル行）</td></tr>
+<tr><td>太字 / 斜体（選択範囲を囲む）</td><td>Alt+B / Alt+I（Ctrl+B はツリー開閉のまま）</td></tr>
+<tr><td rowspan="9">日本語入力（SKK）</td><td>かなモードへ</td><td>Ctrl+J</td></tr>
+<tr><td>英数モードへ（コードを書く通常の状態）</td><td>l（かなモード中）</td></tr>
+<tr><td>ひらがな ⇔ カタカナ</td><td>q</td></tr>
+<tr><td>変換開始（▽）/ 送り仮名の位置</td><td>大文字で打つ（Shift を 1 回タップ）</td></tr>
+<tr><td>変換 / 次の候補</td><td>Space</td></tr>
+<tr><td>前の候補</td><td>x</td></tr>
+<tr><td>候補を直接選ぶ</td><td>a s d f j k l</td></tr>
+<tr><td>確定</td><td>Enter</td></tr>
+<tr><td>取り消し</td><td>Ctrl+G</td></tr>
+</table>
+<ul class="notes">
+  <li>一覧の項目と実際のキー割り当ては同じ表から作る（一覧だけ古くなることがないように）。</li>
+  <li>Ctrl+/ と Ctrl+` の / と ` は Sym レイヤーのキー。Sym の対応表を実機で確定させたあとで最終決定する。</li>
+  <li>Fn レイヤーの矢印キーの実際の位置（どの刻印のキーか）も実機で確認してから一覧の「Fn+○」表記に入れる。</li>
+</ul>
+
+<h2>キー操作（案）</h2>
+<table class="keys">
+<tr><th>操作</th><th>キー</th><th>補足</th></tr>
+<tr><td>保存</td><td>Ctrl+S</td><td></td></tr>
+<tr><td>実行</td><td>F5（Fn+5）</td><td>保存してから <code>python3 &lt;file&gt;</code>。拡張子で切替（.sh は bash）</td></tr>
+<tr><td>ターミナル開閉 / 全画面</td><td>Ctrl+` / Ctrl+Shift+`</td><td>開いている間はキー入力がターミナルへ</td></tr>
+<tr><td>ツリー開閉 / フォーカス</td><td>Ctrl+B / Ctrl+E</td><td>ツリーでは ↑↓ で選択、Enter で開く</td></tr>
+<tr><td>タブ切替 / 閉じる</td><td>Ctrl+Tab / Ctrl+W</td><td></td></tr>
+<tr><td>カーソル移動</td><td>Fn レイヤーの矢印、Home/End、PgUp/PgDn</td><td>Fn をロックすれば矢印キーとして連続操作できる</td></tr>
+<tr><td>終了</td><td>Ctrl+Q</td><td>未保存があれば確認。Esc はエディタでは終了に使わない</td></tr>
+<tr><td>ショートカット一覧</td><td>F1（Fn+1）</td><td>全項目は下の表。一覧から選んで Enter でも実行できる</td></tr>
+</table>
+
+<h2>未確定・要確認</h2>
+<ul class="notes">
+  <li>Sym レイヤーの記号: キーボードドライバは Sym 中にテンキー系のキーコード（KP7、KPASTERISK など）を送る。
+      どの刻印がどの文字になるかは、実機でキーを押して確かめてから対応表を作る（キー確認モードを最初に実装する）。</li>
+  <li>日本語入力は SKK を zcode に組み込む（uim は fb0 アプリに届かないため）。辞書は実機の
+      <code>/usr/share/skk/SKK-JISYO.L</code> と個人辞書 <code>~/.skk-uim-jisyo</code>（どちらも EUC-JP）を
+      そのまま使い、uim-skk と学習結果を共有する。CJK は Noto Sans Mono CJK で描く。</li>
+  <li>入力モードはステータスバー右端に出す: 緑「かな」/ 黄「カナ」/ 薄い「A」（英数）。起動時は英数。</li>
+  <li>作業フォルダの既定は <code>~/code</code>。</li>
+</ul>
+<script>
+  // 枠の幅に合わせて 320x170 の実寸レイアウトを拡大する
+  function fit() {
+    document.querySelectorAll('.lcd-wrap').forEach(w => {
+      w.querySelector('.lcd').style.transform = 'scale(' + (w.clientWidth / 320) + ')';
+    });
+  }
+  addEventListener('resize', fit); fit();
+</script>
+</body>
+</html>
