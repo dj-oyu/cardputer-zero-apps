@@ -189,8 +189,8 @@ fn ctrl_backtick_opens_a_shell_and_toggles_focus() {
     lp.keys(&mut ed, &[ctrl('`')]);
     assert_eq!(ed.terminal_state(), (true, false, true));
     assert!(screen_has(&ed, "shell-42"));
-    // Ctrl+Shift+` で全画面
-    lp.keys(&mut ed, &[KeyEvent::new(Key::Char('`'), Mods(Mods::CTRL.0 | Mods::SHIFT.0))]);
+    // F11（Fn+O）で全画面
+    lp.keys(&mut ed, &[KeyEvent::new(Key::F(11), Mods::NONE)]);
     assert_eq!(ed.terminal_state(), (true, true, true));
     // exit でシェルが終わると、パネルが閉じてエディタへ戻る
     lp.type_str(&mut ed, "exit\n");
@@ -263,7 +263,7 @@ if __name__ == '__main__':
     let mut lp = Loop::new();
     let mut ed = open(&mut lp, &dir, "main.py");
     lp.keys(&mut ed, &[f5()]);
-    lp.keys(&mut ed, &[KeyEvent::new(Key::Char('`'), Mods(Mods::CTRL.0 | Mods::SHIFT.0))]);
+    lp.keys(&mut ed, &[KeyEvent::new(Key::F(11), Mods::NONE)]);
     lp.until(&mut ed, "終了", |ed| ed.run_state().1.is_some());
     std::thread::sleep(Duration::from_millis(300));
     lp.until(&mut ed, "プロンプト", |ed| ed.terminal_text().is_some_and(|r| r.iter().any(|l| l.ends_with('$') || l.ends_with('#'))));

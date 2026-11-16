@@ -212,7 +212,7 @@
   <div class="status run"><span>▶ 実行中 main.py &nbsp;3.1s</span><span>Python &nbsp;UTF-8</span></div>
 </div></div>
 <figcaption><b>3. F5 で実行</b> — 下半分にターミナルが開き、<code>python3 main.py</code> を流す（本物の pty なので入力も可）。
-実行中はステータスバーが橙。Ctrl+C で停止、Ctrl+` でパネル開閉、パネルを全画面にもできる。</figcaption>
+実行中はステータスバーが橙。Ctrl+C で停止、Ctrl+` でパネル開閉、F11（Fn+O）でパネルを全画面にできる。</figcaption>
 </figure>
 
 <!-- 4. 実行終了（エラー） -->
@@ -257,7 +257,7 @@
     <div class="sec">実行</div>
     <div class="r"><span class="a">保存して実行</span><span class="h">Fn+5</span><span class="chip fn">F5</span></div>
     <div class="r"><span class="a">実行を止める（ターミナル内）</span><span class="chip">Ctrl</span><span class="chip">C</span></div>
-    <div class="r"><span class="a">ターミナル開閉 / 全画面</span><span class="chip">Ctrl</span><span class="chip">`</span><span class="h">&nbsp;/ +Shift</span></div>
+    <div class="r"><span class="a">ターミナル開閉 / 全画面</span><span class="chip">Ctrl</span><span class="chip">`</span><span class="h">&nbsp;/</span><span class="chip fn">F11</span></div>
   </div>
   <div class="sb" style="top:28px; height:44px"></div>
   <div class="status"><span>↑↓ 選択 &nbsp;Enter 実行 &nbsp;Esc 閉じる</span><span>1/27</span></div>
@@ -542,7 +542,7 @@ Esc か候補に無い文字を打つと閉じる。Enter は改行のまま（�
 <tr><td>アウトライン（絞り込んで Enter で移動）</td><td>Ctrl+O</td></tr>
 <tr><td rowspan="3">実行</td><td>保存して実行</td><td>F5（Fn+5）</td></tr>
 <tr><td>実行を止める</td><td>Ctrl+C（ターミナル内）</td></tr>
-<tr><td>ターミナル開閉 / 全画面</td><td>Ctrl+` / Ctrl+Shift+`</td></tr>
+<tr><td>ターミナル開閉 / 全画面</td><td>Ctrl+` / F11（Fn+O）</td></tr>
 <tr><td rowspan="3">Markdown</td><td>プレビュー ⇔ ソース</td><td>Ctrl+Shift+V</td></tr>
 <tr><td>チェックボックスを切り替え</td><td>Ctrl+Enter（カーソル行）</td></tr>
 <tr><td>太字 / 斜体（選択範囲を囲む）</td><td>Alt+B / Alt+I（Ctrl+B はツリー開閉のまま）</td></tr>
@@ -567,7 +567,7 @@ Esc か候補に無い文字を打つと閉じる。Enter は改行のまま（�
 <tr><th>操作</th><th>キー</th><th>補足</th></tr>
 <tr><td>保存</td><td>Ctrl+S</td><td></td></tr>
 <tr><td>実行</td><td>F5（Fn+5）</td><td>保存してから <code>python3 &lt;file&gt;</code>。拡張子で切替（.sh は bash）</td></tr>
-<tr><td>ターミナル開閉 / 全画面</td><td>Ctrl+` / Ctrl+Shift+`</td><td>開いている間はキー入力がターミナルへ</td></tr>
+<tr><td>ターミナル開閉 / 全画面</td><td>Ctrl+` / F11（Fn+O）</td><td>開いている間はキー入力がターミナルへ</td></tr>
 <tr><td>ツリー開閉 / フォーカス</td><td>Ctrl+B / Ctrl+E</td><td>ツリーでは ↑↓ で選択、Enter で開く</td></tr>
 <tr><td>タブ切替 / 閉じる</td><td>Ctrl+Tab / Ctrl+W</td><td></td></tr>
 <tr><td>カーソル移動</td><td>Fn レイヤーの矢印、Home/End、PgUp/PgDn</td><td>Fn をロックすれば矢印キーとして連続操作できる</td></tr>
