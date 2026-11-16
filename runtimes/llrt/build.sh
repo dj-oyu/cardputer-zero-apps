@@ -109,6 +109,10 @@ fi
 mkdir -p /out
 name="llrt-${LLRT_TAG#v}-linux-a53-$VARIANT"
 cp "$B" "/out/$name"
-(cd /out && sha256sum "$name" > "$name.sha256" && cat "$name.sha256")
-ls -l "/out/$name"
-log "できた: $name"
+# 型定義（types/ の *.d.ts）を tar に（zcode の TS / JS の型検査が使う。zcode/tools/install-runtimes.sh）。
+# 名前の順・時刻・持ち主・権限をそろえるので、中身が同じなら SHA-256 も同じ
+types="llrt-types-${LLRT_TAG#v}.tar"
+(cd types && find . -name '*.d.ts' -printf '%P\n' | LC_ALL=C sort | tar --format=gnu --mtime=@0 --owner=0 --group=0 --numeric-owner --mode=a+rX,go-w --no-recursion -cf "/out/$types" -T -)
+(cd /out && sha256sum "$name" > "$name.sha256" && sha256sum "$types" > "$types.sha256" && cat "$name.sha256" "$types.sha256")
+ls -l "/out/$name" "/out/$types"
+log "できた: $name $types"
