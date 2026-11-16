@@ -1,0 +1,23 @@
+[package]
+name = "zcode"
+description = "CardputerZero 用の VS Code 風コードエディタ (main: イベントループ・コマンド表・設定・保存)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "zcode"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zcode"
+path = "src/main.rs"
+
+[dependencies]
+zc-core.workspace = true
+zc-display.workspace = true
+zc-font.workspace = true
+zc-input.workspace = true
+zc-ui.workspace = true
+libc.workspace = true
