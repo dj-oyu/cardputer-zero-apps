@@ -198,6 +198,35 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   ので、`cargo test -p zcode --test terminal -- --ignored` で `out/terminal-error.png` に描いて
   目で見る
 
+## 段階 4 の zc-skk で分かったこと（2026-11-17）
+
+- 使い方（打鍵 → `lookup` を assist で引く → `candidates_ready`、`take_changes` を zc-store の
+  `DictChange::Learn` に、フォーカスが移ったら `reset`）とキーの表・本物の SKK との違いは
+  `crates/zc-skk/src/lib.rs` の先頭。試験は辞書を EUC-JP で作って回る（`cargo test -p zc-skk`）
+- **探索の結果を渡すまで、続く打鍵はエディタが取っておく**（「Space の直後の a」を正しく扱う
+  ため）。取っておかなくても Skk が取っておくが、その打鍵で確定した文字列は次の打鍵まで遅れる
+- ▼ では `asdfjkl` と `x` が候補の操作なので、`k` などは確定しない（SKK と同じ）。続けて
+  打つなら Enter で確定する
+- 実機の SKK-JISYO.L: 冷えた状態の `open` 約 19ms・1 回目の探索約 35ms、温まれば 1 回 0.01ms。
+  全 175,786 項目が二分探索で見つかる（並びの前提は正しい）。`docs/measurements.md` §11
+
+## 段階 4 の組み込みで決めたこと（2026-11-17、モック 7〜9）
+
+- エディタとターミナルの打鍵は、まず `zc_skk::Skk` を通す（ツリー・入力欄・アウトラインでは通さない）。
+  確定した文字は文書（ターミナルなら `send_text`）へ入れ、SKK が使わなかった打鍵はふつうに処理する。
+  英数モードで SKK が使うのは Ctrl+J だけ
+- 辞書引きは assist スレッド。システム辞書は最初に引くとき（またはかなモードに入ったとき、先読み
+  つきで）開く。結果を待つ間の打鍵は取っておき、結果の後に流す（「Space の直後の a」）。
+  試験では `ZCODE_SKK_DICT` で小さな辞書を指す
+- 学習した語は 5 分ためて（`TimerId::SkkFlush`）と Ctrl+Q での終了時に、zc-store の
+  `SkkSync`（uim-skk と同じロック → 読み直し → 重ねて書く）で書く。SD に毎回書かないため。
+  **Esc の長押し（ランチャーの強制終了）や電源断では、ためていた分は書かれない**
+- 個人辞書 `~/.skk-uim-jisyo` は起動時にメインで読む（数 KB）。2 号機には無い（最初の学習で作られる）
+- 表示: 本文の未確定は `EditorView::set_preedit`（▽ は下線、▼ は青地、送り仮名は `*` の後ろに薄く）。
+  候補一覧は ▼ の語の下（下に入らなければ上）、登録欄はステータスバーの上に 1 行で、その分エディタ・
+  ツリー・ターミナルを縮める。登録中は本文に ▼ 読みを残す。ターミナルでの未確定はステータスバーの左に出す
+- 正解画像: `skk-reading.png` / `skk-converting.png` / `skk-registration.png`（`cargo test -p zcode --test skk`）
+
 ## 次にやること
 
 - 段階 3 を実機の「zcode (dev)」で確かめる: F5・Ctrl+C・F12・F11、端末の出力が流れている間の

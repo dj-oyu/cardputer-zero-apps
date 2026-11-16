@@ -25,8 +25,11 @@ zc-highlight.workspace = true
 zc-store.workspace = true
 zc-intel.workspace = true
 zc-term.workspace = true
+zc-skk.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
 # keylog のテストが、出力をキー配列として読み直す
 zc-input = { workspace = true, features = ["parse"] }
+# SKK の試験で小さな辞書（EUC-JP）を作る
+encoding_rs.workspace = true

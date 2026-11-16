@@ -8,3 +8,5 @@ publish.workspace = true
 
 [dependencies]
 zc-core.workspace = true
+libc.workspace = true
+encoding_rs.workspace = true
