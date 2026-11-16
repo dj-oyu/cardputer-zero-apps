@@ -161,10 +161,27 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - `--lib es2022,dom` は実機の Go 版 tsc で約 3.8 秒・約 91MB（実測）。LLRT のグローバルだけの
   小さな ambient `.d.ts` にすれば減らせる。ランタイムを入れるときに見直す
 
+## 段階 3 の zc-term で分かったこと（2026-11-17）
+
+- 使い方（fd の poll・`closed` で poll から外す・`try_wait`・`take_events`・画面の約束）は
+  `crates/zc-term/src/lib.rs` の先頭。試験は本物の pty で回る（`cargo test -p zc-term`）
+- **F5 の包み方**: `bash -c 'trap : INT; <cmd>; printf "\e]777;zcode-exit;%d\a" $?; exec bash -i'`。
+  `trap : INT` が無いと Ctrl+C で外側の bash も死に、終了コードもシェルも残らない
+  （`trap '' INT` は無視が子に引き継がれて Ctrl+C が効かなくなるので不可）
+- **`send_text` は貼り付けの扱い**: bash 5.2 / Python 3.13 の REPL は括弧付き貼り付けを
+  有効にするので、改行入りの文字列は囲まれて「実行されない」（貼り付けの安全策どおり）。
+  コマンドを実行させたいときは `send_text(cmd)` のあと `send_key(Enter)`
+- ロケールが空（C）だと readline が UTF-8 の字幅を数え違えて日本語の行の折り返しが崩れる。
+  子に `LANG` / `LC_CTYPE` / `LC_ALL` が無ければ `LC_CTYPE=C.UTF-8` を足す（APPLaunch から
+  起動した zcode の環境にロケールがあるかは未確認）
+- zcode は SIGPIPE を無視している。子では全シグナルを既定に戻し、マスクも空にしてから exec
+  する（しないと `yes | head` が終わらない）
+- 解析の速さは実機で 8.6〜12MB/s（`docs/measurements.md` §10）。2ms の予算で 16KB 前後
+
 ## 次にやること
 
 - 段階 2 を実機の「zcode (dev)」で確かめる（`dev/README.md`）: Python を開いて編集・保存、
   補完・構文チェック・アウトライン、打鍵の遅延（目標内か）、実行ファイルが約 3.1MB に
   増えた分の起動時間。SSH から直接起動すると APPLaunch と画面・キーボードを取り合う
 - ハイライトの実機の計測（`zc-highlight` の `hlbench`。`docs/measurements.md` §6）
-- 段階 3（ターミナル・F5 実行）
+- 段階 3（ターミナル・F5 実行）: `zc-term` はできた。zc-ui のパネルと zcode のループ・F5 への組み込み

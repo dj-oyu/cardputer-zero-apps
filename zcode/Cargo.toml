@@ -35,6 +35,9 @@ regex-automata = { version = "0.4", default-features = false, features = ["std"]
 # zc-store: CRC32 つきの独自形式、SKK 個人辞書 (EUC-JP)
 crc32fast = "1"
 encoding_rs = "0.8"
+# zc-term: エスケープシーケンスの解釈と文字幅
+vte = "0.15"
+unicode-width = "0.2"
 
 [profile.release]
 opt-level = 3
