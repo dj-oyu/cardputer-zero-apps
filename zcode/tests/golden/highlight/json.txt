@@ -1,0 +1,41 @@
+# JSON (json) — zc-highlight の見本の正解。ZCODE_UPDATE_GOLDEN=1 で作り直す
+   1| {
+    : punctuation "{"
+   2|   // JSONC 風のコメントも塗る
+    : comment "// JSONC 風のコメントも塗る"
+   3|   "name": "zcode",
+    : key "\"name\"" · punctuation ":" · string "\"zcode\"" · punctuation ","
+   4|   "version": "0.1.0",
+    : key "\"version\"" · punctuation ":" · string "\"0.1.0\"" · punctuation ","
+   5|   "private": true,
+    : key "\"private\"" · punctuation ":" · constant "true" · punctuation ","
+   6|   "license": null,
+    : key "\"license\"" · punctuation ":" · constant "null" · punctuation ","
+   7|   "port": 8080,
+    : key "\"port\"" · punctuation ":" · number "8080" · punctuation ","
+   8|   "ratio": -1.5e-3,
+    : key "\"ratio\"" · punctuation ":" · number "-1.5e-3" · punctuation ","
+   9|   "tags": ["editor", "rust", "日本語"],
+    : key "\"tags\"" · punctuation ":" · punctuation "[" · string "\"editor\"" · punctuation "," · string "\"rust\"" · punctuation "," · string "\"日本語\"" · punctuation "],"
+  10|   "escapes": "tab\t quote\" slash\/",
+    : key "\"escapes\"" · punctuation ":" · string "\"tab" · escape "\\t" · string " quote" · escape "\\\"" · string " slash" · escape "\\/" · string "\"" · punctuation ","
+  11|   "nested": {
+    : key "\"nested\"" · punctuation ":" · punctuation "{"
+  12|     "empty": {},
+    : key "\"empty\"" · punctuation ":" · punctuation "{},"
+  13|     "list": [1, 2, {"deep": [false, "x"]}],
+    : key "\"list\"" · punctuation ":" · punctuation "[" · number "1" · punctuation "," · number "2" · punctuation "," · punctuation "{" · key "\"deep\"" · punctuation ":" · punctuation "[" · constant "false" · punctuation "," · string "\"x\"" · punctuation "]}],"
+  14|     "matrix": [
+    : key "\"matrix\"" · punctuation ":" · punctuation "["
+  15|       [0, 1],
+    : punctuation "[" · number "0" · punctuation "," · number "1" · punctuation "],"
+  16|       [2, 3]
+    : punctuation "[" · number "2" · punctuation "," · number "3" · punctuation "]"
+  17|     ] /* 末尾のコメント */
+    : punctuation "]" · comment "/* 末尾のコメント */"
+  18|   },
+    : punctuation "},"
+  19|   "last": "value"
+    : key "\"last\"" · punctuation ":" · string "\"value\""
+  20| }
+    : punctuation "}"
