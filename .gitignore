@@ -16,3 +16,6 @@ zcode/out/
 # Claude Code のエージェント用 worktree
 .claude/worktrees/
 zcode/packaging/zcode.png
+
+# runtimes/: 実機向けにビルドした実行ファイル
+runtimes/*/out/
