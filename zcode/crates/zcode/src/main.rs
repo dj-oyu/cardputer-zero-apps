@@ -1,7 +1,8 @@
 //! zcode の入口。引数にモードが無ければエディタを開く（`zcode [ファイル...]`）。
 //! ほかに、キー確認・フォント比較・計測の画面がある。
 
-use std::path::PathBuf;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 use zc_core::time::now_us;
@@ -148,9 +149,29 @@ fn parse_args() -> Result<Args, String> {
     Ok(a)
 }
 
+/// `PATH` の先頭に `<home>/.local/bin` を足した値。もう入っていれば `None`（変えない）。
+///
+/// 実行環境（`llrt`・`tsc`）と `zc-remote` は `~/.local/bin` に入れる
+/// （`tools/install-runtimes.sh`。docs/stage3-design.md §10.3）。APPLaunch から起動したときの
+/// `PATH` にはそこが入っていないので、F5 の `run`・保存時の `check`・`zc-remote serve` の
+/// 起動が「コマンドが無い」にならないように、起動時に足す。
+fn path_with_local_bin(path: Option<&OsStr>, home: Option<&OsStr>) -> Option<OsString> {
+    let home = home.filter(|h| !h.is_empty())?;
+    let bin = Path::new(home).join(".local/bin");
+    let old: Vec<PathBuf> = path.map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
+    if old.contains(&bin) {
+        return None;
+    }
+    std::env::join_paths(std::iter::once(bin).chain(old)).ok()
+}
+
 fn real_main(t_start_us: u64) -> Result<(), String> {
     let mut stats = zcode::stats::Stats::new(t_start_us);
     stats.mark("main");
+    // スレッドを作る前に変える（環境変数の書き換えは、ほかのスレッドが読んでいると危ない）
+    if let Some(path) = path_with_local_bin(std::env::var_os("PATH").as_deref(), std::env::var_os("HOME").as_deref()) {
+        std::env::set_var("PATH", path);
+    }
     let a = parse_args()?;
     stats.mark("args parsed");
     if let Some(path) = &a.keymap_from_log {
@@ -214,5 +235,22 @@ fn main() -> ExitCode {
             eprintln!("zcode: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_bin_goes_first_once() {
+        let f = |path: Option<&str>, home: Option<&str>| path_with_local_bin(path.map(OsStr::new), home.map(OsStr::new)).map(|p| p.into_string().unwrap());
+        assert_eq!(f(Some("/usr/bin:/bin"), Some("/home/u")).as_deref(), Some("/home/u/.local/bin:/usr/bin:/bin"));
+        // もう入っていれば変えない（どの位置でも）
+        assert_eq!(f(Some("/usr/bin:/home/u/.local/bin"), Some("/home/u")), None);
+        // PATH が無い・HOME が無い
+        assert_eq!(f(None, Some("/home/u")).as_deref(), Some("/home/u/.local/bin"));
+        assert_eq!(f(Some("/usr/bin"), None), None);
+        assert_eq!(f(Some("/usr/bin"), Some("")), None);
     }
 }

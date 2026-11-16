@@ -5,7 +5,9 @@
 //!            └ 起きたら、溜まっている入力を全部処理してから 1 回だけ描く
 //!   flush  : Display が持つ（fb0 への書き込みと fsync）
 //!   assist : 字形のラスタライズ（最初の依頼で起動）
-//!   batch / storage : 段階 2 以降の依頼用。枠だけ用意してある（[`Workers`]）
+//!   batch / storage / check : 最初の依頼で起動（[`Workers`]）。check は保存時の実機の
+//!            構文チェック専用（数秒かかる tsc で batch を塞がない）
+//!   zc-remote : ビルド係の相手をする専用スレッド（[`crate::remote`]。画面が持つ）
 //!   結果   : どのワーカーも MainSender<AppEvent>（mpsc + eventfd 1 本）でメインへ
 //! ```
 //!
@@ -39,8 +41,11 @@ pub enum AppEvent {
     /// batch がファイルを読み終えた（[`crate::editor::EditorScreen::open_path`]）。
     /// 単語補完の索引も batch で作っておく。
     Opened { doc: DocId, result: Result<(Box<dyn crate::doc::TextDoc + Send>, zc_intel::WordIndex), String> },
-    /// batch が保存時の構文チェックを終えた（§10.2）。
-    Checked { doc: DocId, result: Result<Vec<zc_intel::Diagnostic>, String> },
+    /// `check` ワーカーが実機の構文チェックを終えた（docs/stage3-design.md §8.3・§9）。
+    /// 結果は出どころ `Syntax` の [`zc_core::DiagnosticSet`]: ファイルは 1 つ、パスは
+    /// チェックしたファイルの絶対パス、`base` は保存した版。画面が置き場の鍵に直し、
+    /// 届くまでの編集のぶんをずらしてから `zc_intel::DiagStore` に取り込む。
+    Checked { doc: DocId, result: Result<zc_core::DiagnosticSet, crate::intel::CheckFail> },
     /// 保存が終わった（[`crate::save::Saver`]）。`version` は書き出した中身の版。
     Saved { doc: DocId, version: Version, result: Result<crate::save::SaveOk, String> },
     /// 書き込み層（`zc-store`）からの、保存以外の返事（控え・SKK 個人辞書）。
@@ -128,7 +133,7 @@ impl Timers {
 pub struct Workers {
     /// 字形のラスタライズ、SKK 辞書の探索（mmap に触る仕事）。
     pub assist: Arc<Worker>,
-    /// ファイルを開く、ハイライトの残り、検索、構文チェック（nice +10）。
+    /// ファイルを開く、ハイライトの残り、検索（nice +10）。
     pub batch: Arc<Worker>,
     /// 保存（nice +10）。終了時は join して書き切る。
     pub storage: Arc<Worker>,

@@ -85,6 +85,8 @@ pub enum Command {
     /// 保存して実行（F5）。
     Run,
     StopRun,
+    /// 試験をビルド係で実行し、結果を一覧に出す（F6。docs/stage3-design.md §8.5）。
+    RunTests,
     ToggleTerminal,
     ToggleTerminalFullscreen,
 

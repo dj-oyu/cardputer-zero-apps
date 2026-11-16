@@ -12,20 +12,28 @@
 //! - 文書は [`TextDoc`]（本番は `zc_buffer::Buffer`）。ファイルを開くのは batch
 //!   スレッド、保存は [`Saver`]（storage スレッド）。メインでは読み書きしない
 //! - ステータスバーの行・桁は、打鍵の 50ms 後にまとめて更新する（§5.2）
+//! - 診断（波線・タブ名の赤・`⊗ n`）は、作業フォルダに 1 つの置き場（`zc_intel::DiagStore`）に
+//!   出どころごとに持つ。保存したら、言語に `remote` があればビルド係の check を専用スレッド
+//!   （[`RemoteLink`]）に頼み、対象でない・届かないときは実機の構文チェックを `check`
+//!   ワーカーで走らせる。遅れて届いた結果は、タブごとの編集の記録（`ShiftLog`）で今の行へ
+//!   ずらしてから取り込む（docs/stage3-design.md §8・§9）
 //! - カーソルの点滅は、最後の打鍵から約 10 秒で止める（点いたまま。待機中の CPU を 0% に）
 
 use crate::app::{AppEvent, LoopCx, Screen, TimerId};
 use crate::commands;
 use crate::doc::{DocBackend, TextDoc};
-use crate::intel;
+use crate::intel::{self, CheckFail};
+use crate::remote::{RemoteClient, RemoteEvent, RemoteJob, RemoteReq};
 use crate::save::{SaveOk, SaveRequest, Saver, StoreSaver};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use zc_core::time::now_us;
-use zc_core::{palette, CancelToken, Color, Command, Damage, DocId, Key, KeyEvent, LineChange, Mods, Motion, Pos, Rect, Span, Version};
+use zc_core::{palette, CancelToken, Color, Command, Damage, DiagSource, DiagnosticSet, DocId, FileDiagnostics, Key, KeyEvent, LineChange, Mods, Motion, Pos, Rect, Span, Version};
 use zc_font::TextStyle;
 use zc_highlight::{Highlighter, LanguageId, LanguageInfo, Registry};
-use zc_intel::{Completion, CompletionKind, Diagnostic, Severity, WordIndex};
+use zc_intel::{Completion, CompletionKind, DiagStore, Diagnostic, Severity, ShiftLog, WordIndex};
+use zc_remote_ipc::{DoneStatus, FileDiags, JobKind, JobTag, Phase, RemoteLang, SubmitFlags, TestReport};
 use zc_input::{Keyboard, RawRecord};
 use zc_ui::layout::{Regions, SIDE_W, UI_PX};
 use zc_term::{ReadBudget, Term, TermCommand, TermEvent};
@@ -45,6 +53,81 @@ const STATUS_ERROR: Color = Color::hex(0xa1260d);
 const STATUS_OK: Color = Color::hex(0x16825d);
 /// 実行中の経過時間の表示を更新する間隔。
 const RUN_TICK: Duration = Duration::from_secs(1);
+/// 控えておく「ジョブ → 保存済みの版」の数の上限（終わったジョブの分は消す。これは、
+/// 終わりの知らせが届かなかったときの歯止め）。
+const MAX_BINDINGS: usize = 16;
+
+/// ビルド係（`zc-remote` の相手をする専用スレッド）への口。画面は依頼を渡すだけで待たない。
+/// 結果は [`AppEvent::Remote`] で届く。既定は本物の [`RemoteClient`]（最初の依頼で作る）。
+/// 試験では偽物に差し替える（[`EditorScreen::set_remote`]）。
+pub trait RemoteLink {
+    /// ジョブを頼む。最後に必ず [`RemoteEvent::Done`] が 1 回届く。
+    fn submit(&mut self, job: RemoteJob, cx: &mut LoopCx<'_>) -> RemoteReq;
+}
+
+/// 本物の専用スレッド。最初の依頼まで作らない（ビルド係を使わない人には、スレッドも
+/// `zc-remote serve` も増えない）。
+#[derive(Default)]
+struct LazyRemote(Option<RemoteClient>);
+
+impl RemoteLink for LazyRemote {
+    fn submit(&mut self, job: RemoteJob, cx: &mut LoopCx<'_>) -> RemoteReq {
+        self.0.get_or_insert_with(|| RemoteClient::new(cx.results.clone(), None)).submit(job)
+    }
+}
+
+/// 自分が専用スレッドに頼んだジョブ。
+struct MyJob {
+    req: RemoteReq,
+    kind: JobKind,
+    doc: DocId,
+    /// 頼んだときの「保存済みの版」（check が実機に回るとき、まだその版のままかを見る）。
+    version: Version,
+    started_us: u64,
+    /// 試験の結果（`RemoteEvent::Tests`）を受け取った。
+    got_report: bool,
+}
+
+/// ジョブの走査が済んだ時点の、開いていたタブの「保存済みの版」（§9.3）。ビルド係の診断の
+/// 位置が指しているのは、この版の中身。
+struct Binding {
+    tag: JobTag,
+    root: PathBuf,
+    /// 届いた順の通し番号（serve が再起動すると `tag` は振り直されるので、新旧はこれで比べる）。
+    seq: u64,
+    bases: Vec<(DocId, Version)>,
+}
+
+/// ステータスバーの右に出している、自分のジョブの進み具合。
+struct Progress {
+    req: RemoteReq,
+    kind: JobKind,
+    phase: Phase,
+    done: u32,
+    total: u32,
+    started_us: u64,
+}
+
+/// 「1 回だけ知らせる」の控え（§11.1）。同じ理由が続く間は繰り返さない。ビルド係の
+/// ジョブが 1 つ普通に終わったら、ビルド係の分は忘れる（次に同じ理由が起きたらまた知らせる）。
+#[derive(Default)]
+struct Notices {
+    unavailable: bool,
+    auth: bool,
+    clock: bool,
+    error: bool,
+    /// 実機の `check` の道具が無いと知らせた言語。
+    check_missing: Vec<String>,
+}
+
+/// 開いている試験の結果の一覧（モック 15）。
+struct TestsState {
+    root: PathBuf,
+    report: TestReport,
+    query: String,
+    rows: Vec<intel::TestRow>,
+    sel: usize,
+}
 
 /// F5 の実行で、新しい端末の bash に渡す台本。実行するコマンドは環境変数 `ZCODE_RUN` で
 /// 渡す（引用符の付け直しを避ける）。プロンプト風の 1 行（フォルダとコマンド）を出してから実行し、終了コードを
@@ -141,8 +224,15 @@ struct DocTab {
     loading: bool,
     /// 単語補完の索引（§10.2）。
     words: WordIndex,
-    /// 保存時の構文チェックの結果（編集に合わせて行をずらす）。
+    /// 診断の置き場の鍵（パスがあるとき。作業フォルダからの相対）。
+    key: Option<Arc<Path>>,
+    /// 置き場にあるこのファイルの診断の写し（全部の出どころを合わせたもの。表示用）。
+    /// 置き場が変わるたびに [`DocTab::refresh_diags`] で作り直す。
     diags: Vec<Diagnostic>,
+    /// 行の増減の記録（遅れて届いた診断を、今の行へずらす）。
+    shift: ShiftLog,
+    /// ディスクの中身と同じだった最後の版（開いた・保存した版）。
+    saved: Option<Version>,
 }
 
 /// 描画に渡すトークンの出どころ。
@@ -165,9 +255,49 @@ impl SpanSource for TabSpans<'_> {
 impl DocTab {
     fn new(id: DocId, path: Option<PathBuf>, title: String, doc: Box<dyn TextDoc + Send>) -> DocTab {
         let words = WordIndex::build(doc.as_lines(), &CancelToken::never()).unwrap_or_else(|_| WordIndex::new());
-        let mut t = DocTab { id, path, title, doc, view: EditorView::code(), lang: Lang::detect(None, ""), hl: None, custom_spans: None, loading: false, words, diags: Vec::new() };
+        let saved = path.is_some().then(|| doc.version());
+        let mut t = DocTab {
+            id,
+            path,
+            title,
+            doc,
+            view: EditorView::code(),
+            lang: Lang::detect(None, ""),
+            hl: None,
+            custom_spans: None,
+            loading: false,
+            words,
+            key: None,
+            diags: Vec::new(),
+            shift: ShiftLog::new(),
+            saved,
+        };
         t.detect_language();
         t
+    }
+    /// 置き場の鍵を決め直して（パスが決まった・変わった）、診断を置き場から写す。
+    fn rekey(&mut self, workspace: &Path, store: &DiagStore) {
+        self.key = self.path.as_deref().map(|p| intel::diag_key(workspace, p));
+        self.refresh_diags(store);
+    }
+    /// 置き場から診断を写し直し、波線を付け直す。
+    fn refresh_diags(&mut self, store: &DiagStore) {
+        self.diags.clear();
+        if let Some(k) = &self.key {
+            store.file(k, &mut self.diags);
+        }
+        if !self.loading {
+            // 置き場は文書の長さを知らない。行は文書の中に収める
+            let last = self.doc.len_lines().saturating_sub(1);
+            for d in &mut self.diags {
+                d.line = d.line.min(last);
+            }
+        }
+        self.view.set_marks(intel::marks_of(&self.diags, self.doc.len_lines()));
+    }
+    /// ビルド係での扱い（`language.toml` の `remote`）。
+    fn remote_lang(&self) -> Option<RemoteLang> {
+        self.lang.info().and_then(|i| i.remote).and_then(RemoteLang::parse)
     }
     /// 言語を決め直し、ハイライトを最初から作る。
     fn detect_language(&mut self) {
@@ -177,17 +307,22 @@ impl DocTab {
         self.hl = self.lang.id.map(|lang| Hl { lang, hl: Highlighter::new(Some(lang)), dirty: true, rest_pending: None });
         self.view.recheck_all();
     }
-    /// 編集のあと: ハイライトとビューに、変わった行を知らせる。
-    fn edited(&mut self, change: LineChange) {
+    /// 編集のあと: ハイライトとビューに、変わった行を知らせる。診断は置き場の中でずらす。
+    fn edited(&mut self, change: LineChange, store: &mut DiagStore) {
         if let Some(h) = self.hl.as_mut() {
             h.hl.edited(change);
             h.dirty = true;
         }
         self.view.lines_changed(change);
         self.words.edited(self.doc.as_lines(), change);
+        // 編集の後の版で記録する（遅れて届く診断を、今の行へずらすため。O(1)）
+        self.shift.record(self.doc.version(), change);
+        // 診断のあるファイルだけ、置き場の分をずらして写し直す（無ければ何もしない）
         if !self.diags.is_empty() {
-            intel::shift_diagnostics(&mut self.diags, change);
-            self.view.set_marks(intel::marks_of(&self.diags));
+            if let Some(k) = &self.key {
+                store.shift_file(k, change);
+            }
+            self.refresh_diags(store);
         }
     }
     /// 構文チェックでエラーがあるか（タブの名前を赤くする）。
@@ -316,8 +451,32 @@ pub struct EditorScreen {
     term_grid: (u16, u16),
     /// 保存が終わったら実行する文書（F5 で未保存だったとき）。
     pending_run: Option<DocId>,
-    /// 実行の結果（ステータスバーの文と色。次の打鍵まで出す。モック 4）。
+    /// 実行・試験の結果（ステータスバーの文と色。次の打鍵まで出す。モック 4・15）。
     run_status: Option<(String, Color)>,
+    /// 診断の置き場（作業フォルダに 1 つ。開いていないファイルの分も持つ）。
+    diag_store: DiagStore,
+    /// ビルド係への口。
+    remote: Box<dyn RemoteLink>,
+    /// 自分が頼んで、まだ終わっていないジョブ。
+    jobs: Vec<MyJob>,
+    /// 走査が済んだジョブと、そのときの保存済みの版（届いた順）。
+    bindings: Vec<Binding>,
+    bind_seq: u64,
+    /// プロジェクトの根ごとの、最後に取り込んだビルド係の結果の通し番号（古い結果を捨てる）。
+    applied: Vec<(PathBuf, u64)>,
+    notices: Notices,
+    /// ステータスバーの右に出す進み具合。
+    progress: Option<Progress>,
+    /// 試験の結果の一覧（開いているあいだは本文の全体を覆う。モック 15）。
+    tests: Option<TestsState>,
+    /// まだ一覧で見ていない試験の結果（F6 で開く）。
+    test_unseen: Option<(PathBuf, TestReport)>,
+    /// 保存が終わったら試験を頼む文書（F6 で未保存だったとき）。
+    pending_test: Option<DocId>,
+    /// F6 のあと打鍵していない（結果が届いたら、そのまま一覧を出してよい）。
+    test_waiting: bool,
+    /// 読み込みが終わったら移動する行（試験の一覧から、開いていないファイルへ飛んだとき）。
+    pending_goto: Option<(DocId, u32)>,
     /// タブバーに出した内容（変わったときだけ作り直す）: 文書・未保存・エラー。
     tabs_shown: Vec<(DocId, bool, bool)>,
     tabs_dirty: bool,
@@ -364,6 +523,19 @@ impl EditorScreen {
             term_grid: (56, 6),
             pending_run: None,
             run_status: None,
+            diag_store: DiagStore::new(),
+            remote: Box::<LazyRemote>::default(),
+            jobs: Vec::new(),
+            bindings: Vec::new(),
+            bind_seq: 0,
+            applied: Vec::new(),
+            notices: Notices::default(),
+            progress: None,
+            tests: None,
+            test_unseen: None,
+            pending_test: None,
+            test_waiting: false,
+            pending_goto: None,
             tabs_shown: Vec::new(),
             tabs_dirty: true,
             blinks_left: 0,
@@ -378,6 +550,10 @@ impl EditorScreen {
     /// 保存の出口を差し替える（既定は [`StoreSaver`]）。
     pub fn set_saver(&mut self, saver: Box<dyn Saver>) {
         self.saver = saver;
+    }
+    /// ビルド係への口を差し替える（既定は本物の専用スレッド。試験用）。
+    pub fn set_remote(&mut self, remote: Box<dyn RemoteLink>) {
+        self.remote = remote;
     }
     /// ファイルツリー。
     pub fn tree_mut(&mut self) -> &mut FileTree {
@@ -462,9 +638,17 @@ impl EditorScreen {
     pub fn run_state(&self) -> (bool, Option<&str>) {
         (self.term.as_ref().is_some_and(|t| t.running.is_some()), self.run_status.as_ref().map(|s| s.0.as_str()))
     }
-    /// 選択中の文書の診断（テスト用）。
+    /// 選択中の文書の診断（全部の出どころを合わせたもの。テスト用）。
     pub fn diagnostics(&self) -> &[Diagnostic] {
         self.tabs.get(self.active).map_or(&[], |t| &t.diags)
+    }
+    /// 開いている試験の一覧の行（名前、通ったか）と選んでいる位置（テスト用）。
+    pub fn test_list(&self) -> Option<(Vec<(String, bool)>, usize)> {
+        self.tests.as_ref().map(|t| (t.rows.iter().map(|r| (r.row.name.clone(), t.report.cases[r.case].passed)).collect(), t.sel))
+    }
+    /// ステータスバーの右に出している、ビルド係の進み具合（テスト用）。
+    pub fn remote_progress(&self) -> Option<String> {
+        self.progress.as_ref().map(|p| intel::progress_text(p.kind, p.phase, p.done, p.total, 0))
     }
 
     fn set_focus(&mut self, focus: Focus) {
@@ -528,6 +712,8 @@ impl EditorScreen {
         let id = self.alloc_id();
         let mut tab = DocTab::new(id, path, title.into(), doc);
         tab.custom_spans = spans;
+        // 開いていない間に届いていた診断を付ける
+        tab.rekey(&self.cfg.root, &self.diag_store);
         tab.sync_cursor();
         self.tabs.push(tab);
         self.activate(self.tabs.len() - 1);
@@ -546,6 +732,7 @@ impl EditorScreen {
         let title = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "?".into());
         let mut tab = DocTab::new(id, Some(path.clone()), title, self.cfg.backend.empty());
         tab.loading = true;
+        tab.rekey(&self.cfg.root, &self.diag_store);
         self.tabs.push(tab);
         self.activate(self.tabs.len() - 1);
         let (backend, tx) = (self.cfg.backend, cx.results.clone());
@@ -575,6 +762,18 @@ impl EditorScreen {
         let tab = self.tabs.remove(index);
         if let Some(p) = &tab.path {
             self.saver.closed(p);
+        }
+        // 閉じた文書の「保存済みの版」は、もう診断の基準にしない
+        for b in &mut self.bindings {
+            b.bases.retain(|(d, _)| *d != tab.id);
+        }
+        // 未保存の編集に合わせてずらした診断は、ディスクの中身に合わない。捨てる
+        // （保存済みのまま閉じたファイルの分は残す。開き直したときに付く）
+        if let (true, Some(k)) = (tab.doc.is_modified(), &tab.key) {
+            self.diag_store.forget(k);
+        }
+        if self.pending_goto.is_some_and(|(d, _)| d == tab.id) {
+            self.pending_goto = None;
         }
         let next = if index < self.active || (index == self.active && index == self.tabs.len()) { self.active.saturating_sub(1) } else { self.active };
         self.activate(next);
@@ -615,6 +814,8 @@ impl EditorScreen {
         if self.message.take().is_some() {
             self.status_due = true;
         }
+        // 打鍵があったら、試験の結果が届いても一覧で打鍵を奪わない（F6 は exec で立て直す）
+        self.test_waiting = false;
         if self.focus == Focus::Terminal {
             self.terminal_key(ev, cx);
             return;
@@ -628,6 +829,10 @@ impl EditorScreen {
         }
         if self.outline.is_some() {
             self.outline_key(ev);
+            return;
+        }
+        if self.tests.is_some() {
+            self.tests_key(ev, cx);
             return;
         }
         let Some(cmd) = commands::lookup(ev) else { return };
@@ -893,7 +1098,7 @@ impl EditorScreen {
         let start = Pos::new(h.line, h.col.saturating_sub(c.prefix.chars().count() as u32));
         tab.doc.break_undo_group();
         if let Some(ch) = tab.doc.replace_range(start, h, &item.label) {
-            tab.edited(ch);
+            tab.edited(ch, &mut self.diag_store);
         }
         tab.doc.break_undo_group();
         tab.sync_cursor();
@@ -933,6 +1138,11 @@ impl EditorScreen {
 
     fn close_outline(&mut self) {
         self.outline = None;
+        self.restore_body();
+    }
+
+    /// 本文を覆っていた一覧（アウトライン・試験の結果）を閉じたあと、下の画面を描き直させる。
+    fn restore_body(&mut self) {
         self.panel.invalidate();
         self.tree.invalidate();
         self.tabbar.invalidate();
@@ -946,6 +1156,8 @@ impl EditorScreen {
     fn sync_picker(&mut self) {
         if let Some(o) = &self.outline {
             self.picker.set(&o.query, o.rows.iter().map(|r| r.row.clone()).collect(), o.sel);
+        } else if let Some(t) = &self.tests {
+            self.picker.set(&t.query, t.rows.iter().map(|r| r.row.clone()).collect(), t.sel);
         }
     }
 
@@ -1065,6 +1277,7 @@ impl EditorScreen {
             // 候補は打鍵の処理の最後で出す（handle_key）
             Command::Complete => {}
             Command::Run => self.run_active(cx),
+            Command::RunTests => self.run_tests(cx),
             Command::ToggleTerminal => self.toggle_terminal(),
             Command::ToggleTerminalFullscreen => {
                 if self.panel_open {
@@ -1206,7 +1419,7 @@ impl EditorScreen {
             }
         };
         if let Some(c) = change {
-            tab.edited(c);
+            tab.edited(c, &mut self.diag_store);
         }
         tab.sync_cursor();
     }
@@ -1249,7 +1462,14 @@ impl EditorScreen {
         self.status_due = true;
         let Some(p) = self.prompt.as_mut() else { return };
         match ev.key {
-            Key::Esc => self.prompt = None,
+            Key::Esc => {
+                // 名前を付けずにやめた: 保存を待っていた実行・試験もやめる
+                if p.kind == PromptKind::SaveAs {
+                    self.pending_run = None;
+                    self.pending_test = None;
+                }
+                self.prompt = None;
+            }
             Key::Backspace => {
                 p.text.pop();
             }
@@ -1281,6 +1501,7 @@ impl EditorScreen {
                             tab.title = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| name.into());
                             tab.path = Some(path);
                             tab.detect_language();
+                            tab.rekey(&self.cfg.root, &self.diag_store);
                             self.tabs_dirty = true;
                             self.save_active(cx);
                         }
@@ -1295,6 +1516,424 @@ impl EditorScreen {
                 }
             }
         }
+    }
+
+    // --- 診断・ビルド係（docs/stage3-design.md §8・§9。モック 13・15） ---
+
+    /// 置き場の中身が変わったファイルを開いているタブの、波線・タブ名・件数を作り直す。
+    fn diags_changed(&mut self, changed: &[Arc<Path>]) {
+        if changed.is_empty() {
+            return;
+        }
+        for t in self.tabs.iter_mut().filter(|t| t.key.as_ref().is_some_and(|k| changed.contains(k))) {
+            t.refresh_diags(&self.diag_store);
+        }
+        self.tabs_dirty = true;
+        self.status_due = true;
+    }
+
+    /// 保存した中身を検査する（§8.3）。言語に `remote` があればビルド係の check を頼み、
+    /// 無ければ実機の構文チェック。ビルド係が「対象ではない・届かない」と返したら、
+    /// そのとき実機に回す（[`EditorScreen::check_done`]）。
+    fn check_after_save(&mut self, doc: DocId, cx: &mut LoopCx<'_>) {
+        let Some(t) = self.tabs.iter().find(|t| t.id == doc) else { return };
+        let (Some(path), Some(version)) = (t.path.clone(), t.saved) else { return };
+        match t.remote_lang() {
+            Some(lang) => {
+                // 同じプロジェクトの前の check は serve が取り消す（その終わりの知らせで控えから消える）
+                let req = self.remote.submit(RemoteJob { kind: JobKind::Check, lang, flags: SubmitFlags::NONE, file: path }, cx);
+                self.jobs.push(MyJob { req, kind: JobKind::Check, doc, version, started_us: now_us(), got_report: false });
+            }
+            None => self.start_local_check(doc, cx),
+        }
+    }
+
+    /// 実機の構文チェック（`language.toml` の `check`）を `check` ワーカーで走らせる。
+    /// 数秒かかる道具（`tsc`）もあるので、ファイルを開く batch には載せない。
+    fn start_local_check(&mut self, doc: DocId, cx: &mut LoopCx<'_>) {
+        let Some(t) = self.tabs.iter().find(|t| t.id == doc) else { return };
+        let (Some((cmd, pat)), Some(path)) = (t.lang.info().and_then(intel::check_command), t.path.clone()) else { return };
+        let (base, tx) = (t.saved, cx.results.clone());
+        // 同じ文書のチェックがまだ実行待ちなら、新しい方に置き換える（保存を続けても溜まらない）
+        cx.workers.check.submit_keyed(doc.0 as u64, move || {
+            let result = intel::run_local_check(cmd, pat, &path, &CancelToken::never())
+                .map(|diags| DiagnosticSet { source: DiagSource::Syntax, complete: false, files: vec![FileDiagnostics { path: Arc::from(path.as_path()), base, diags }] });
+            tx.send(AppEvent::Checked { doc, result });
+        });
+    }
+
+    /// 実機の構文チェックの結果を取り込む。パスを置き場の鍵に直し、保存した版からの編集の
+    /// ぶんをずらしてから。構文チェックは 1 ファイルしか見ないので、ほかのファイルの分も、
+    /// ビルド係の分も消さない。
+    fn apply_syntax(&mut self, doc: DocId, mut set: DiagnosticSet) {
+        let had = self.tabs.iter().find(|t| t.id == doc).is_some_and(|t| !t.diags.is_empty());
+        set.complete = false;
+        for f in &mut set.files {
+            let abs = f.path.clone();
+            if let Some(t) = self.tabs.iter().find(|t| !t.loading && t.path.as_deref() == Some(&*abs)) {
+                if let Some(base) = f.base {
+                    t.shift.shift(base, t.doc.len_lines(), &mut f.diags);
+                }
+            }
+            f.path = intel::diag_key(&self.cfg.root, &abs);
+        }
+        let changed = self.diag_store.apply(set);
+        self.diags_changed(&changed);
+        // 最初のエラーを右に出す（モック 13）。無くなったら、そう知らせる
+        let first = self.tabs.iter().find(|t| t.id == doc).and_then(|t| t.diags.first()).map(|d| format!("{} 行: {}", d.line + 1, d.message));
+        if let Some(m) = first {
+            self.say_right(m, true);
+        } else if had {
+            self.say("構文エラーは無くなった", false);
+        }
+    }
+
+    /// 専用スレッドからの知らせ。
+    fn on_remote(&mut self, ev: RemoteEvent, cx: &mut LoopCx<'_>) {
+        match ev {
+            // zc-remote が入っていない・版が違う。1 回だけ、静かに知らせる。このあとの依頼は
+            // 「対象ではない」で返るので、実機の構文チェックに回る
+            RemoteEvent::Unavailable(why) => {
+                if !std::mem::replace(&mut self.notices.unavailable, true) {
+                    self.say(format!("ビルド係を使えない: {why}"), false);
+                }
+            }
+            RemoteEvent::Phase { req, tag, root, phase, done, total } => {
+                if phase == Phase::Scanned {
+                    self.bind(tag, root);
+                }
+                // 進み具合を出すのは自分の依頼だけ（F5 のビルドは端末に流れている）
+                if let Some(job) = req.and_then(|r| self.jobs.iter().find(|j| j.req == r)) {
+                    self.progress = Some(Progress { req: job.req, kind: job.kind, phase, done, total, started_us: job.started_us });
+                    self.status_due = true;
+                    if cx.timers.deadline(TimerId::Tick).is_none() {
+                        cx.timers.set_after(TimerId::Tick, RUN_TICK);
+                    }
+                }
+            }
+            RemoteEvent::Diagnostics { tag, root, complete, files, .. } => self.remote_diagnostics(tag, &root, complete, files),
+            RemoteEvent::Tests { req, root, report } => self.tests_arrived(req, root, report),
+            RemoteEvent::Done { req, tag, status, message, .. } => self.remote_done(req, tag, status, &message, cx),
+            // ログは頼んでいない。成果物は F5（端末の zc-remote run）が自分で受け取る
+            RemoteEvent::Log { .. } | RemoteEvent::Artifact { .. } => {}
+        }
+    }
+
+    /// ジョブの走査が済んだ: `root` の下の開いているタブの「保存済みの版」を控える（§9.3）。
+    /// このジョブの診断の位置が指すのは、その版の中身。
+    fn bind(&mut self, tag: JobTag, root: PathBuf) {
+        let mut bases = Vec::new();
+        for t in self.tabs.iter().filter(|t| !t.loading) {
+            if let (Some(p), Some(v)) = (t.path.as_deref(), t.saved) {
+                if p.starts_with(&root) {
+                    bases.push((t.id, v));
+                }
+            }
+        }
+        self.bind_seq += 1;
+        // 同じジョブが走査し直した（受付が忘れていて、目録からやり直した）ら、控えも取り直す
+        self.bindings.retain(|b| b.tag != tag);
+        if self.bindings.len() >= MAX_BINDINGS {
+            self.bindings.remove(0);
+        }
+        self.bindings.push(Binding { tag, root, seq: self.bind_seq, bases });
+    }
+
+    /// ビルド係の診断を取り込む。
+    ///
+    /// - 置き換わった古いジョブの結果は捨てる: 同じ根で、後から走査したジョブの結果をもう
+    ///   取り込んでいたら捨てる。取り消されて途中までの結果（`complete` でない）も、後から
+    ///   走査したジョブがあれば捨てる（置き場は順番を見ないので、ここで見る）
+    /// - 開いているファイルの分は、控えた「保存済みの版」から今までの編集のぶんをずらす
+    /// - `complete` のときは、**この根の下で**今回出てこなかったファイルのビルド係の分を消す
+    ///   （置き場は作業フォルダ全体で 1 つ。ほかのプロジェクトの分を消さない）
+    fn remote_diagnostics(&mut self, tag: JobTag, root: &Path, complete: bool, files: Vec<FileDiags>) {
+        let bound = self.bindings.iter().position(|b| b.tag == tag && b.root == root);
+        // 走査の知らせを受けていないジョブ（途中からつないだ）は、いちばん新しい扱い
+        let seq = match bound {
+            Some(i) => self.bindings[i].seq,
+            None => {
+                self.bind_seq += 1;
+                self.bind_seq
+            }
+        };
+        let newer_applied = self.applied.iter().any(|(r, s)| r == root && *s > seq);
+        let newer_scanned = self.bindings.iter().any(|b| b.root == root && b.seq > seq);
+        if newer_applied || (!complete && newer_scanned) {
+            return;
+        }
+        let mut set = DiagnosticSet { source: DiagSource::Remote, complete: false, files: Vec::with_capacity(files.len()) };
+        // 位置なしの診断（パスが空）は、ステータスバーにだけ出す（§8.6）
+        let mut loose: Option<String> = None;
+        for FileDiags { path, mut diags } in files {
+            if path.is_empty() {
+                loose = loose.or_else(|| diags.first().map(|d| d.message.clone()));
+                continue;
+            }
+            let abs = root.join(&path);
+            let mut base = None;
+            if let Some(t) = self.tabs.iter().find(|t| !t.loading && t.path.as_deref() == Some(abs.as_path())) {
+                // 走査のあとで開いたファイルは、開いたとき（= ディスクの中身）の版が基準
+                base = bound.and_then(|i| self.bindings[i].bases.iter().find(|(d, _)| *d == t.id)).map(|(_, v)| *v).or(t.saved);
+                if let Some(b) = base {
+                    t.shift.shift(b, t.doc.len_lines(), &mut diags);
+                }
+            }
+            set.files.push(FileDiagnostics { path: intel::diag_key(&self.cfg.root, &abs), base, diags });
+        }
+        if complete {
+            for (p, _) in self.diag_store.files() {
+                // 鍵は作業フォルダからの相対（外のファイルは絶対パスで、join してもそのまま）
+                if self.cfg.root.join(&p).starts_with(root) && !set.files.iter().any(|f| f.path == p) {
+                    set.files.push(FileDiagnostics { path: p, base: None, diags: Vec::new() });
+                }
+            }
+        }
+        let active_key = self.tabs.get(self.active).and_then(|t| t.key.clone());
+        let had = self.tabs.get(self.active).is_some_and(|t| !t.diags.is_empty());
+        let changed = self.diag_store.apply(set);
+        self.diags_changed(&changed);
+        match self.applied.iter_mut().find(|(r, _)| r == root) {
+            Some(slot) => slot.1 = seq,
+            None => {
+                if self.applied.len() >= MAX_BINDINGS {
+                    self.applied.remove(0);
+                }
+                self.applied.push((root.to_path_buf(), seq));
+            }
+        }
+        // 今のタブの最初の診断を右に出す（モック 13）。今のタブに関係なければ黙っている
+        if let Some(m) = loose {
+            self.say_right(m, true);
+        } else if active_key.is_some_and(|k| changed.contains(&k)) {
+            let first = self.tabs.get(self.active).and_then(|t| t.diags.first()).map(|d| format!("{} 行: {}", d.line + 1, d.message));
+            if let Some(m) = first {
+                self.say_right(m, true);
+            } else if had {
+                self.say("エラーは無くなった", false);
+            }
+        }
+    }
+
+    /// ジョブが終わった。
+    fn remote_done(&mut self, req: Option<RemoteReq>, tag: JobTag, status: DoneStatus, message: &str, cx: &mut LoopCx<'_>) {
+        // つなげなかったときの終わりの知らせは tag が 0（どのジョブでもない）。控えは消さない
+        if tag != JobTag(0) {
+            self.bindings.retain(|b| b.tag != tag);
+        }
+        let Some(i) = req.and_then(|r| self.jobs.iter().position(|j| j.req == r)) else { return };
+        let job = self.jobs.remove(i);
+        if self.progress.as_ref().is_some_and(|p| p.req == job.req) {
+            self.progress = None;
+            self.status_due = true;
+        }
+        if matches!(status, DoneStatus::Ok | DoneStatus::Failed) {
+            // ビルド係は動いている。前に知らせた理由は終わったので、次に起きたらまた知らせる
+            self.notices.auth = false;
+            self.notices.clock = false;
+            self.notices.error = false;
+        }
+        match job.kind {
+            JobKind::Check => self.check_done(&job, status, message, cx),
+            JobKind::Test => self.tests_done(&job, status, message),
+            JobKind::Build => {}
+        }
+    }
+
+    /// 保存時の check が終わった（§8.3・§11.1）。
+    fn check_done(&mut self, job: &MyJob, status: DoneStatus, message: &str, cx: &mut LoopCx<'_>) {
+        match status {
+            DoneStatus::Ok | DoneStatus::Failed => {
+                // この保存の検査はビルド係がした。前に実機の構文チェックに回したときの結果は
+                // 古い中身のものなので、このファイルの分だけ消す（残すと波線が消えなくなる）
+                if let Some(key) = self.tabs.iter().find(|t| t.id == job.doc).and_then(|t| t.key.clone()) {
+                    let stale = DiagnosticSet { source: DiagSource::Syntax, complete: false, files: vec![FileDiagnostics { path: key, base: None, diags: Vec::new() }] };
+                    let changed = self.diag_store.apply(stale);
+                    self.diags_changed(&changed);
+                }
+            }
+            // 新しい保存に置き換わった・上限: 何も出さない（波線はそのまま）
+            DoneStatus::Cancelled | DoneStatus::Limit => {}
+            DoneStatus::NotApplicable | DoneStatus::Offline | DoneStatus::Auth | DoneStatus::Clock | DoneStatus::Error => {
+                // 認証・時計・ビルド係の失敗は 1 回だけ知らせる。対象でない・オフラインは黙っている
+                let flag = match status {
+                    DoneStatus::Auth => Some(&mut self.notices.auth),
+                    DoneStatus::Clock => Some(&mut self.notices.clock),
+                    DoneStatus::Error => Some(&mut self.notices.error),
+                    _ => None,
+                };
+                if flag.is_some_and(|f| !std::mem::replace(f, true)) {
+                    if let Some(m) = intel::done_text(status, message) {
+                        self.say(m, false);
+                    }
+                }
+                // 実機の構文チェックに回す。そのあと保存し直していたら、新しい保存の依頼に任せる
+                if self.tabs.iter().any(|t| t.id == job.doc && t.saved == Some(job.version)) {
+                    self.start_local_check(job.doc, cx);
+                }
+            }
+        }
+    }
+
+    // --- 試験を実行（§8.5。モック 15） ---
+
+    /// F6: 保存してから、ビルド係で試験を走らせる。まだ見ていない結果があれば、その一覧を開く。
+    fn run_tests(&mut self, cx: &mut LoopCx<'_>) {
+        if let Some((root, report)) = self.test_unseen.take() {
+            self.open_tests(root, report);
+            return;
+        }
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        if tab.loading {
+            return;
+        }
+        if tab.remote_lang().is_none() {
+            let msg = format!("{} は試験を実行できない（language.toml に remote が無い）", tab.lang.name);
+            self.say(msg, false);
+            return;
+        }
+        // 結果が届くまで打鍵が無ければ、届いたときにそのまま一覧を出す
+        self.test_waiting = true;
+        if self.jobs.iter().any(|j| j.kind == JobKind::Test) {
+            self.say("試験は実行中", false);
+            return;
+        }
+        if tab.path.is_none() || tab.doc.is_modified() {
+            self.pending_test = Some(tab.id);
+            self.save_active(cx);
+            return;
+        }
+        self.start_tests(cx);
+    }
+
+    /// 選択中の文書のプロジェクトの試験を、いまのディスクの中身で頼む。
+    fn start_tests(&mut self, cx: &mut LoopCx<'_>) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let (Some(path), Some(lang)) = (tab.path.clone(), tab.remote_lang()) else { return };
+        let (doc, version) = (tab.id, tab.saved.unwrap_or_else(|| tab.doc.version()));
+        let req = self.remote.submit(RemoteJob { kind: JobKind::Test, lang, flags: SubmitFlags::NONE, file: path }, cx);
+        let started_us = now_us();
+        self.jobs.push(MyJob { req, kind: JobKind::Test, doc, version, started_us, got_report: false });
+        self.test_unseen = None;
+        self.progress = Some(Progress { req, kind: JobKind::Test, phase: Phase::Connecting, done: 0, total: 0, started_us });
+        self.status_due = true;
+        cx.timers.set_after(TimerId::Tick, RUN_TICK);
+    }
+
+    /// 試験の結果が届いた。全部通っていれば、ステータスバーに出すだけ。落ちた試験があれば
+    /// 一覧を出す。ただし、F6 のあとに打鍵していたら（書いている途中に打鍵を奪わない）
+    /// 知らせるだけにして、次の F6 で開く。
+    fn tests_arrived(&mut self, req: RemoteReq, root: PathBuf, report: TestReport) {
+        let Some(job) = self.jobs.iter_mut().find(|j| j.req == req && j.kind == JobKind::Test) else { return };
+        job.got_report = true;
+        self.status_due = true;
+        let summary = intel::test_summary(&report);
+        if report.failed == 0 {
+            self.run_status = Some((format!("✓ 試験 {summary}"), STATUS_OK));
+        } else if self.test_waiting && self.focus != Focus::Terminal && self.prompt.is_none() && self.outline.is_none() {
+            self.open_tests(root, report);
+        } else {
+            self.run_status = Some((format!("✕ 試験 {summary}  F6 で一覧"), STATUS_ERROR));
+            self.test_unseen = Some((root, report));
+        }
+    }
+
+    /// 試験のジョブが終わった。結果（[`RemoteEvent::Tests`]）が届いていれば、もう出してある。
+    fn tests_done(&mut self, job: &MyJob, status: DoneStatus, message: &str) {
+        match status {
+            DoneStatus::Ok | DoneStatus::Failed if job.got_report => {}
+            DoneStatus::Ok => self.say("試験: 結果が無い", false),
+            DoneStatus::Failed => {
+                // 試験をコンパイルできなかった（診断は波線になっている）
+                let why = message.lines().next().map(str::trim).filter(|m| !m.is_empty()).unwrap_or("ビルドできなかった");
+                self.run_status = Some((format!("✕ 試験: {why}"), STATUS_ERROR));
+                self.status_due = true;
+            }
+            // 自分で頼んだ操作なので、理由は毎回出す
+            _ => {
+                if let Some(m) = intel::done_text(status, message) {
+                    self.say(m, status != DoneStatus::Cancelled);
+                }
+            }
+        }
+    }
+
+    fn open_tests(&mut self, root: PathBuf, report: TestReport) {
+        let rows = intel::test_rows(&report, "");
+        let title = format!("試験 — {}", intel::test_summary(&report));
+        self.picker.set_title(&title);
+        self.picker.set_empty_text("一致する試験が無い");
+        self.tests = Some(TestsState { root, report, query: String::new(), rows, sel: 0 });
+        self.completion = None;
+        self.sync_picker();
+        self.picker.invalidate();
+        self.status_due = true;
+    }
+
+    fn close_tests(&mut self) {
+        self.tests = None;
+        self.restore_body();
+    }
+
+    /// 試験の一覧が開いているあいだの打鍵。
+    fn tests_key(&mut self, ev: &KeyEvent, cx: &mut LoopCx<'_>) {
+        self.status_due = true;
+        // 一覧の中の F6 は、もう一度実行
+        if commands::lookup(ev) == Some(Command::RunTests) {
+            self.close_tests();
+            self.run_tests(cx);
+            return;
+        }
+        let Some(t) = self.tests.as_mut() else { return };
+        let n = t.rows.len();
+        match ev.key {
+            Key::Esc => {
+                self.close_tests();
+                return;
+            }
+            Key::Enter => {
+                // 落ちた場所が分かっていれば、その行へ（通った試験では何もしない）
+                let target = t.rows.get(t.sel).and_then(|r| t.report.cases[r.case].location.as_ref()).map(|(p, l)| (t.root.join(p), *l));
+                if let Some((path, line)) = target {
+                    self.close_tests();
+                    self.goto_file_line(&path, line, cx);
+                }
+                return;
+            }
+            Key::Up if n > 0 => t.sel = (t.sel + n - 1) % n,
+            Key::Down if n > 0 => t.sel = (t.sel + 1) % n,
+            Key::Backspace => {
+                t.query.pop();
+                t.rows = intel::test_rows(&t.report, &t.query);
+                t.sel = 0;
+            }
+            _ => {
+                let Some(c) = ev.text.filter(|c| !c.is_control()) else { return };
+                if ev.mods.ctrl() {
+                    return;
+                }
+                t.query.push(c);
+                t.rows = intel::test_rows(&t.report, &t.query);
+                t.sel = 0;
+            }
+        }
+        self.sync_picker();
+    }
+
+    /// ファイルを開いて（開いていればそのタブへ）、`line` 行目（0 始まり）へ移る。
+    fn goto_file_line(&mut self, path: &Path, line: u32, cx: &mut LoopCx<'_>) {
+        self.open_path(path, cx);
+        self.set_focus(Focus::Editor);
+        let Some(t) = self.tabs.get_mut(self.active) else { return };
+        if t.loading {
+            // 読み込みが終わってから移る
+            self.pending_goto = Some((t.id, line));
+            return;
+        }
+        let pos = Pos::new(line.min(t.doc.len_lines().saturating_sub(1)), 0);
+        t.doc.break_undo_group();
+        t.doc.set_selection(pos, pos);
+        t.sync_cursor();
     }
 
     // --- ハイライト ---
@@ -1340,6 +1979,24 @@ impl EditorScreen {
             self.status.set_left("アウトライン");
             self.status.set_right("Enter 移動  Esc 閉じる");
             self.status.set_chips(Vec::new());
+        } else if let Some(t) = &self.tests {
+            // 選んでいる試験が落ちていれば、そのメッセージ（モック 15）
+            let failed = t.rows.get(t.sel).map(|r| &t.report.cases[r.case]).filter(|c| !c.passed);
+            let left = match failed {
+                Some(c) => {
+                    let mut lines = c.message.lines().map(str::trim).filter(|l| !l.is_empty());
+                    // Rust の「thread '…' panicked at …」の行より、その次の理由の行を出す
+                    let first = lines.clone().find(|l| !l.starts_with("thread '")).or_else(|| lines.next());
+                    first.unwrap_or("失敗（メッセージなし）").to_string()
+                }
+                None => format!("試験  {}", intel::test_summary(&t.report)),
+            };
+            self.status.set_left(&left);
+            self.status.set_right("Enter 移動  Esc 閉じる");
+            self.status.set_chips(Vec::new());
+            if t.report.failed > 0 {
+                bg = STATUS_ERROR;
+            }
         } else if let Some(p) = &self.prompt {
             let label = match p.kind {
                 PromptKind::GotoLine => "行へ移動",
@@ -1365,8 +2022,10 @@ impl EditorScreen {
                         ime: Some(ImeMode::Ascii),
                     };
                     st.apply(&mut self.status);
-                    if !t.diags.is_empty() {
-                        let left = format!("{}  ⊗ {}", self.status.left(), t.diags.len());
+                    // 件数は今のタブの分（重なりは 1 つに数える。§8.6）
+                    let counts = t.key.as_deref().map(|k| self.diag_store.counts(k)).unwrap_or_default();
+                    if counts.errors + counts.warnings > 0 {
+                        let left = format!("{}  ⊗ {}", self.status.left(), counts.errors + counts.warnings);
                         self.status.set_left(&left);
                     }
                     // カーソルがエラーの行にあれば、そのメッセージを右に出す（モック 13）
@@ -1380,6 +2039,11 @@ impl EditorScreen {
                     self.status.set_right("Ctrl+E ツリー  Ctrl+N 新規  Ctrl+Q 終了");
                     self.status.set_chips(Vec::new());
                 }
+            }
+            // ビルド係の進み具合は右に（§8.6）
+            if let Some(p) = &self.progress {
+                let secs = now_us().saturating_sub(p.started_us) / 1_000_000;
+                self.status.set_right(&intel::progress_text(p.kind, p.phase, p.done, p.total, secs));
             }
             // 実行中は橙、終わったら終了コード（モック 3・4）
             if let Some(run) = self.term.as_ref().and_then(|t| t.running.as_ref()) {
@@ -1431,6 +2095,19 @@ impl Screen for EditorScreen {
                         t.loading = false;
                         t.detect_language();
                         t.view.invalidate();
+                        // 読んだ中身がディスクの中身。空の仮の文書のときの記録と控えは捨てる
+                        t.saved = Some(t.doc.version());
+                        t.shift = ShiftLog::new();
+                        let id = t.id;
+                        for b in &mut self.bindings {
+                            b.bases.retain(|(d, _)| *d != id);
+                        }
+                        let t = &mut self.tabs[i];
+                        t.refresh_diags(&self.diag_store);
+                        if let Some((_, line)) = self.pending_goto.take_if(|(d, _)| *d == id) {
+                            let pos = Pos::new(line.min(t.doc.len_lines().saturating_sub(1)), 0);
+                            t.doc.set_selection(pos, pos);
+                        }
                         t.sync_cursor();
                         self.status_due = true;
                     }
@@ -1446,26 +2123,32 @@ impl Screen for EditorScreen {
                 match result {
                     Ok(ok) => {
                         // 保存を頼んだあとに編集していたら、未保存のまま
-                        if t.doc.version() == version {
+                        let current = t.doc.version() == version;
+                        if current {
                             t.doc.mark_saved();
                         }
-                        // F5 で保存を待っていたら実行する（保存した版のままのときだけ）
-                        let run_now = self.pending_run == Some(doc) && t.doc.version() == version;
+                        // ディスクの中身はこの版（遅れて届く診断の基準。§9.3）
+                        t.saved = Some(version);
+                        // F5・F6 で保存を待っていたら実行する（保存した版のままのときだけ）
+                        let run_now = self.pending_run == Some(doc) && current;
                         if self.pending_run == Some(doc) {
                             self.pending_run = None;
                         }
-                        // 保存した中身で構文チェック（batch で使い捨て。§10.2）
-                        if let (Some((cmd, pat)), Some(path)) = (t.lang.info().and_then(intel::check_command), t.path.clone()) {
-                            let tx = cx.results.clone();
-                            cx.workers.batch.submit(move || {
-                                let result = zc_intel::run_check(cmd, pat, &path, &CancelToken::never()).map_err(|e| e.to_string());
-                                tx.send(AppEvent::Checked { doc, result });
-                            });
+                        let test_now = self.pending_test == Some(doc) && current;
+                        if self.pending_test == Some(doc) {
+                            self.pending_test = None;
                         }
+                        let builds_remotely = t.lang.info().and_then(|i| i.run).is_some_and(|r| r.starts_with("zc-remote run"));
                         let title = t.title.clone();
                         let path = t.path.clone();
+                        let active = self.tabs.get(self.active).is_some_and(|a| a.id == doc);
+                        // 保存した中身を検査する（§8.3）。このあとすぐビルド係でビルド・試験をするなら、
+                        // その診断が届くので、同じ木の check を重ねて頼まない
+                        if !(active && (test_now || (run_now && builds_remotely))) {
+                            self.check_after_save(doc, cx);
+                        }
                         self.tree.refresh();
-                        if self.tabs.get(self.active).is_some_and(|a| a.id == doc) {
+                        if active {
                             self.tree.set_current(path.as_deref());
                         }
                         match ok {
@@ -1475,8 +2158,11 @@ impl Screen for EditorScreen {
                             }
                             SaveOk::Unchanged => self.say(format!("変更なし: {title}"), false),
                         }
-                        if run_now && self.tabs.get(self.active).is_some_and(|a| a.id == doc) {
+                        if run_now && active {
                             self.start_run(cx);
+                        }
+                        if test_now && active {
+                            self.start_tests(cx);
                         }
                     }
                     Err(e) => {
@@ -1485,26 +2171,19 @@ impl Screen for EditorScreen {
                     }
                 }
             }
-            AppEvent::Checked { doc, result } => {
-                let Some(t) = self.tabs.iter_mut().find(|t| t.id == doc) else { return };
-                match result {
-                    Ok(diags) => {
-                        let first = diags.first().map(|d| format!("{} 行: {}", d.line + 1, d.message));
-                        let had = !t.diags.is_empty();
-                        t.diags = diags;
-                        t.view.set_marks(intel::marks_of(&t.diags));
-                        self.tabs_dirty = true;
-                        self.status_due = true;
-                        if let Some(m) = first {
-                            self.say_right(m, true);
-                        } else if had {
-                            self.say("構文エラーは無くなった", false);
-                        }
+            AppEvent::Checked { doc, result } => match result {
+                Ok(set) => self.apply_syntax(doc, set),
+                // チェックの道具が無い: 波線はそのまま。同じ言語では 1 回だけ知らせる
+                Err(CheckFail::Unavailable(why)) => {
+                    let lang = self.tabs.iter().find(|t| t.id == doc).map(|t| t.lang.name.clone()).unwrap_or_default();
+                    if !self.notices.check_missing.contains(&lang) {
+                        self.notices.check_missing.push(lang);
+                        self.say(format!("構文チェックできない: {why}"), false);
                     }
-                    // チェックの道具が無い・時間切れ: 波線はそのまま、知らせるだけ
-                    Err(e) => self.say(format!("構文チェックできない: {e}"), false),
                 }
-            }
+                // 時間切れ・書き方の誤り: 波線はそのまま、知らせるだけ
+                Err(CheckFail::Other(e)) => self.say(format!("構文チェックできない: {e}"), false),
+            },
             AppEvent::HighlightRest { doc, rest } => {
                 let Some(t) = self.tabs.iter_mut().find(|t| t.id == doc) else { return };
                 let version = t.doc.version();
@@ -1515,8 +2194,7 @@ impl Screen for EditorScreen {
                     }
                 }
             }
-            // 課題 Z3 がつなぐ（docs/stage3-design.md §8）
-            AppEvent::Remote(_) => {}
+            AppEvent::Remote(ev) => self.on_remote(ev, cx),
             AppEvent::Flushed(_) | AppEvent::Store(_) => {}
         }
         self.pump_highlight(Some(cx));
@@ -1526,7 +2204,8 @@ impl Screen for EditorScreen {
         match id {
             TimerId::StatusDelay => self.status_due = true,
             TimerId::Tick => {
-                if self.term.as_ref().is_some_and(|t| t.running.is_some()) {
+                // 実行中の経過時間と、ビルド係の「実行中 n 秒」
+                if self.term.as_ref().is_some_and(|t| t.running.is_some()) || self.progress.is_some() {
                     self.status_due = true;
                     cx.timers.set_after(TimerId::Tick, RUN_TICK);
                 }
@@ -1581,8 +2260,8 @@ impl Screen for EditorScreen {
             self.status_due = true;
         }
         damage |= self.tabbar.render(cx, regions.tabs);
-        if self.outline.is_some() {
-            // 本文（ツリーとエディタ）の全体を覆う（モック 14）
+        if self.outline.is_some() || self.tests.is_some() {
+            // 本文（ツリーとエディタ）の全体を覆う（モック 14・15）
             let body = Rect::new(0, regions.tabs.bottom() as i16, Rect::SCREEN.w, (regions.status.y as i32 - regions.tabs.bottom()) as u16);
             damage |= self.picker.render(cx, body);
             if self.status_due {
