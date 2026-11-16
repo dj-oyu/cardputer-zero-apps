@@ -38,7 +38,12 @@ if ($here.StartsWith($Repo, [System.StringComparison]::OrdinalIgnoreCase)) {
     if ($rel) { $workdir = "/work/$rel" }
 }
 
-$runArgs = @('run', '--rm', '-v', "${Repo}:/work", '-w', $workdir)
+# Rust の crate キャッシュとビルド成果物は名前付きボリュームに置く
+# (Windows 側のマウント越しだと遅い。コンテナを消しても残る)
+$runArgs = @('run', '--rm', '-v', "${Repo}:/work",
+             '-v', 'cz-cargo-registry:/opt/cargo/registry',
+             '-v', 'cz-cargo-target:/cargo-target',
+             '-w', $workdir)
 if ($Command) {
     # 引数は 1 本のシェルコマンドにして bash に渡す
     $quoted = $Command | ForEach-Object { "'" + ($_ -replace "'", "'\''") + "'" }

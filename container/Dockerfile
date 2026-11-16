@@ -29,5 +29,27 @@ RUN apt-get update \
 #   zxing-cpp: デコードエンジン / segno: テスト用 QR の生成
 RUN pip3 install --no-cache-dir --break-system-packages zxing-cpp segno
 
+# Rust アプリ用: rustup の stable と aarch64 クロスリンカ。
+# 実機と同じ trixie の glibc でリンクするので、出来たバイナリはそのまま動く。
+# --render-test 用に x86_64 のネイティブビルドもできる。
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl gcc libc6-dev \
+      gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+      fonts-dejavu-core \
+ && rm -rf /var/lib/apt/lists/*
+ENV RUSTUP_HOME=/opt/rustup \
+    CARGO_HOME=/opt/cargo \
+    PATH=/opt/cargo/bin:$PATH \
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal \
+      --default-toolchain stable --target aarch64-unknown-linux-gnu \
+ && rustup component add clippy rustfmt \
+ && chmod -R a+rwX /opt/cargo /opt/rustup
+# crate のキャッシュとビルド成果物は、dev.ps1 が名前付きボリュームとして
+# /opt/cargo/registry と /cargo-target にマウントする (Windows 側の
+# マウント越しにビルドすると遅いため)
+ENV CARGO_TARGET_DIR=/cargo-target
+
 WORKDIR /work
 CMD ["bash"]
