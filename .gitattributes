@@ -1,0 +1,6 @@
+# 中身はすべて Linux (実機 / コンテナ) で使うので、Windows で
+# チェックアウトしても LF のままにする。CRLF の build.sh は bash で
+# 動かず、CRLF の postinst / sudoers は .deb に入ると壊れる。
+* text=auto eol=lf
+*.png binary
+*.ps1 text eol=crlf
