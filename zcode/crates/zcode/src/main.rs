@@ -149,7 +149,10 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn real_main(t_start_us: u64) -> Result<(), String> {
+    let mut stats = zcode::stats::Stats::new(t_start_us);
+    stats.mark("main");
     let a = parse_args()?;
+    stats.mark("args parsed");
     if let Some(path) = &a.keymap_from_log {
         let log = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         print!("{}", keylog::keymap_lines(&keylog::parse_guide(&log), &Keymap::builtin()));
@@ -189,13 +192,14 @@ fn real_main(t_start_us: u64) -> Result<(), String> {
         }
         Some(Mode::Bench(kind)) => Box::new(Bench::new(kind, a.frames)),
     };
+    stats.mark("screen built");
     if let Some(out) = &a.render_test {
         let canvas = render_screen(screen.as_mut(), fonts).map_err(|e| e.to_string())?;
         zc_display::png::write_png(&canvas, out).map_err(|e| format!("{}: {e}", out.display()))?;
         println!("{}", out.display());
         return Ok(());
     }
-    let stats = app::run(&a.opts, screen.as_mut(), t_start_us).map_err(|e| e.to_string())?;
+    let stats = app::run(&a.opts, screen.as_mut(), stats).map_err(|e| e.to_string())?;
     if a.opts.print_stats {
         eprint!("{}", stats.report());
     }

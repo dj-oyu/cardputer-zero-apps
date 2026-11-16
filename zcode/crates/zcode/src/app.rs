@@ -237,12 +237,14 @@ impl Default for Options {
 }
 
 /// 実機で画面を動かす。戻るときには、キーボードの独占を放し、液晶を元に戻してある。
-pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Result<Stats> {
-    let mut stats = Stats::new(t_start_us);
+/// `stats` には、`main` の始まりの時刻と、ここに来るまでの区切り（引数・画面の用意）を入れて渡す。
+pub fn run(opts: &Options, screen: &mut dyn Screen, mut stats: Stats) -> io::Result<Stats> {
+    stats.mark("run entered");
     let (results_tx, results_rx): (MainSender<AppEvent>, MainReceiver<AppEvent>) = main_channel()?;
     crash::install(results_rx.fd());
     let workers = Workers::new();
     let mut timers = Timers::new()?;
+    stats.mark("workers started");
 
     // 入力を先に開く（開けなければ、画面に触る前に終わる）
     // Sym レイヤーの記号はドライバの付属ファイルが正本（ランチャーと同じ）。あれば上書き
@@ -320,6 +322,7 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
             let mut cx = LoopCx { timers: &mut timers, workers: &workers, results: &results_tx, now_us: wake_us, quit: false, force_present: false };
             screen.start(&mut cx);
             cx_quit |= cx.quit;
+            stats.mark("screen started");
         } else {
             timers.arm();
             let timeout = match next_watch {
@@ -409,6 +412,9 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
         fonts.begin_frame();
         let damage = screen.render(&mut RenderCx::new(&mut canvas, &mut fonts, &theme));
         let t1 = now_us();
+        if first {
+            stats.mark("first frame rendered");
+        }
         let info = if force_present {
             force_present = false;
             Some(display.present_forced(&canvas))
