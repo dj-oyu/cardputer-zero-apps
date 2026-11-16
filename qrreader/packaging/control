@@ -1,0 +1,16 @@
+Package: qrreader-lcd
+Version: 3.5
+Section: utils
+Priority: optional
+Architecture: arm64
+Maintainer: Uchida <uchida@local>
+Depends: python3
+Description: QR reader for CardputerZero APPLaunch
+ v3.5: still results show the cropped source region with the decoded
+ code framed in green (Left/Right switches between multiple codes);
+ flow navigation (hint chip, stepper, phase cards) for the still flow.
+ v3.4: full-resolution still shutter (Enter/Space) and main-resolution
+ finder guidance; heavy scan/decode run in worker processes.
+ Burst-stacking QR reader with manga-tone attention visualization,
+ drawn directly on the built-in LCD (fb0). Engine shared with the
+ desktop version; ZXing via python3 zxing-cpp (user site).

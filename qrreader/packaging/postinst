@@ -1,0 +1,4 @@
+#!/bin/sh
+# ランチャーに新しい .desktop を拾わせる (ユーザーサービスなので sudo 不要)
+runuser -u jimmy -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart APPLaunch.service || true
+exit 0

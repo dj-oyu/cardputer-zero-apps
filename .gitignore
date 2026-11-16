@@ -1,0 +1,5 @@
+__pycache__/
+*.deb
+# 生成アセット (tools/ のスクリプトで作る)
+qrreader/qrreader_test_qr.png
+qrreader/packaging/qrreader.png

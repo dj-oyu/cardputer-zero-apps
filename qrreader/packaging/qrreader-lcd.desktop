@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=QR Reader
+Comment=QR reader with burst stacking and manga-tone attention view
+Exec=/usr/share/APPLaunch/bin/qrreader-lcd
+Icon=share/images/qrreader.png
+Terminal=false
+Categories=Utility;
+StartupNotify=false
