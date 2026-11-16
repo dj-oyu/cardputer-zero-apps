@@ -49,6 +49,10 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
 - 開発コンテナでできるのは .deb ビルド・`--render-test`・selftest まで。
   カメラ / fb0 / キー / BlueZ は実機で確認する（詳細は `container/README.md`）
 - 改行は `.gitattributes` で LF 固定。CRLF の sh / postinst / sudoers は壊れる
+- 実行するスクリプト（`build.sh`、`postinst`、起動スクリプト）は git に実行権限
+  （100755）で入れる。Windows では `core.filemode=false` のうえ、WSL コンテナの
+  マウントは全部を実行可能に見せるので気づかない。足したら
+  `git update-index --chmod=+x <ファイル>` を付ける（CI の Linux では権限で落ちる）
 - リリースはアプリごとのタグ（例: `qrreader-v3.5.1`）。`.deb` は
   そのタグの GitHub Release に添付
 - CI（`.github/workflows/ci.yml`）は PR と main への push で、**変更のあったアプリだけ**を
