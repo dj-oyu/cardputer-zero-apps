@@ -17,7 +17,7 @@
 use crate::app::{AppEvent, LoopCx, Screen, TimerId};
 use crate::commands;
 use crate::doc::{DocBackend, TextDoc};
-use crate::save::{AtomicFileSaver, SaveRequest, Saver};
+use crate::save::{SaveOk, SaveRequest, Saver, StoreSaver};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use zc_core::{palette, CancelToken, Color, Command, Damage, DocId, KeyEvent, LineChange, Mods, Motion, Pos, Rect, Span, Version};
@@ -239,7 +239,7 @@ impl EditorScreen {
             tree_open: no_files,
             focus: if no_files { Focus::Tree } else { Focus::Editor },
             status: StatusBar::new(),
-            saver: Box::new(AtomicFileSaver),
+            saver: Box::new(StoreSaver::from_env()),
             clipboard: String::new(),
             prompt: None,
             last_find: String::new(),
@@ -258,7 +258,7 @@ impl EditorScreen {
         s
     }
 
-    /// 保存の出口を差し替える（既定は [`AtomicFileSaver`]）。
+    /// 保存の出口を差し替える（既定は [`StoreSaver`]）。
     pub fn set_saver(&mut self, saver: Box<dyn Saver>) {
         self.saver = saver;
     }
@@ -378,9 +378,17 @@ impl EditorScreen {
         self.tabs.push(tab);
         self.activate(self.tabs.len() - 1);
         let (backend, tx) = (self.cfg.backend, cx.results.clone());
+        let note = self.saver.load_note();
         cx.workers.batch.submit(move || {
             let result = match backend.load(&path, &CancelToken::never()) {
-                Ok(doc) => Ok(doc),
+                Ok(doc) => {
+                    // 書き込み層に読んだ中身を知らせる（保存時の「変わっていなければ書かない」
+                    // 「ほかのプログラムが変えた」の判定）。読んだ直後なのでページキャッシュから読める
+                    if let (Some(note), Ok(bytes)) = (note, std::fs::read(&path)) {
+                        note(&path, &bytes);
+                    }
+                    Ok(doc)
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(backend.empty()),
                 Err(e) => Err(e.to_string()),
             };
@@ -392,7 +400,10 @@ impl EditorScreen {
         if index >= self.tabs.len() {
             return;
         }
-        self.tabs.remove(index);
+        let tab = self.tabs.remove(index);
+        if let Some(p) = &tab.path {
+            self.saver.closed(p);
+        }
         let next = if index < self.active || (index == self.active && index == self.tabs.len()) { self.active.saturating_sub(1) } else { self.active };
         self.activate(next);
         if self.tabs.is_empty() && self.tree_open {
@@ -844,7 +855,7 @@ impl Screen for EditorScreen {
             AppEvent::Saved { doc, version, result } => {
                 let Some(t) = self.tabs.iter_mut().find(|t| t.id == doc) else { return };
                 match result {
-                    Ok(()) => {
+                    Ok(ok) => {
                         // 保存を頼んだあとに編集していたら、未保存のまま
                         if t.doc.version() == version {
                             t.doc.mark_saved();
@@ -855,7 +866,13 @@ impl Screen for EditorScreen {
                         if self.tabs.get(self.active).is_some_and(|a| a.id == doc) {
                             self.tree.set_current(path.as_deref());
                         }
-                        self.say(format!("保存した: {title}"), false);
+                        match ok {
+                            SaveOk::Written { overwrote_external_change: false } => self.say(format!("保存した: {title}"), false),
+                            SaveOk::Written { overwrote_external_change: true } => {
+                                self.say(format!("保存した: {title}（ほかで変更されていた内容を上書きした）"), true)
+                            }
+                            SaveOk::Unchanged => self.say(format!("変更なし: {title}"), false),
+                        }
                     }
                     Err(e) => {
                         let title = t.title.clone();
@@ -873,7 +890,7 @@ impl Screen for EditorScreen {
                     }
                 }
             }
-            AppEvent::Flushed(_) => {}
+            AppEvent::Flushed(_) | AppEvent::Store(_) => {}
         }
         self.pump_highlight(Some(cx));
     }

@@ -22,6 +22,7 @@ zc-markdown = { path = "crates/zc-markdown" }
 zc-skk = { path = "crates/zc-skk" }
 zc-term = { path = "crates/zc-term" }
 zc-intel = { path = "crates/zc-intel" }
+zc-store = { path = "crates/zc-store" }
 zc-ui = { path = "crates/zc-ui" }
 # 外部の crate は pure Rust だけ (C ライブラリに依存するものは使わない)
 libc = "0.2"

@@ -484,3 +484,34 @@ fn perf_keystroke() {
     }
     eprintln!("全画面の描き直し（段階 1 の描き方）: p50 {} ns", median(&mut full));
 }
+
+both!(save_skips_unchanged_and_warns_on_external_change, save_skips_unchanged_simple, save_skips_unchanged_buffer);
+fn save_skips_unchanged_and_warns_on_external_change(backend: DocBackend) {
+    let dir = tmp_dir("store");
+    let p = dir.join("a.py");
+    fs::write(&p, "a = 1\n").unwrap();
+    let mut lp = Loop::new();
+    let mut ed = EditorScreen::new(EditorConfig { backend, root: dir.clone(), files: vec![p.clone()] });
+    lp.with(|cx| ed.start(cx));
+    lp.pump(&mut ed);
+    // 何も変えずに保存: 書き込み層が「前回と同じ」と判断して書かない（SD に書かない）
+    let before = fs::metadata(&p).unwrap().modified().unwrap();
+    lp.keys(&mut ed, &[ctrl('s')]);
+    lp.pump(&mut ed);
+    assert!(ed.message().unwrap().contains("変更なし"), "{:?}", ed.message());
+    assert_eq!(fs::metadata(&p).unwrap().modified().unwrap(), before);
+    // ほかのプログラムが書き換えた後に保存すると、上書きしたことを知らせる
+    fs::write(&p, "a = 2  # outside\n").unwrap();
+    lp.keys(&mut ed, &[key(Key::End)]);
+    lp.type_str(&mut ed, "  # mine");
+    lp.keys(&mut ed, &[ctrl('s')]);
+    lp.pump(&mut ed);
+    assert!(fs::read_to_string(&p).unwrap().starts_with("a = 1  # mine"));
+    assert!(ed.message().unwrap().contains("上書き"), "{:?}", ed.message());
+    // その後の保存は、ふつうの「保存した」
+    lp.type_str(&mut ed, "!");
+    lp.keys(&mut ed, &[ctrl('s')]);
+    lp.pump(&mut ed);
+    assert!(ed.message().unwrap().starts_with("保存した"), "{:?}", ed.message());
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -22,6 +22,7 @@ zc-input.workspace = true
 zc-ui.workspace = true
 zc-buffer.workspace = true
 zc-highlight.workspace = true
+zc-store.workspace = true
 libc.workspace = true
 
 [dev-dependencies]

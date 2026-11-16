@@ -39,7 +39,9 @@ pub enum AppEvent {
     /// batch がファイルを読み終えた（[`crate::editor::EditorScreen::open_path`]）。
     Opened { doc: DocId, result: Result<Box<dyn crate::doc::TextDoc + Send>, String> },
     /// 保存が終わった（[`crate::save::Saver`]）。`version` は書き出した中身の版。
-    Saved { doc: DocId, version: Version, result: Result<(), String> },
+    Saved { doc: DocId, version: Version, result: Result<crate::save::SaveOk, String> },
+    /// 書き込み層（`zc-store`）からの、保存以外の返事（控え・SKK 個人辞書）。
+    Store(zc_store::StoreResponse),
     /// batch がハイライトの残り（行頭の文脈）を計算し終えた。
     HighlightRest { doc: DocId, rest: Versioned<zc_highlight::RestStates> },
 }
@@ -50,6 +52,7 @@ impl std::fmt::Debug for AppEvent {
             AppEvent::Flushed(r) => f.debug_tuple("Flushed").field(r).finish(),
             AppEvent::Opened { doc, result } => write!(f, "Opened({doc:?}, {:?})", result.as_ref().map(|_| "..")),
             AppEvent::Saved { doc, version, result } => write!(f, "Saved({doc:?}, {version:?}, {result:?})"),
+            AppEvent::Store(r) => f.debug_tuple("Store").field(r).finish(),
             AppEvent::HighlightRest { doc, rest } => write!(f, "HighlightRest({doc:?}, {:?}, from {})", rest.version, rest.value.from_line),
         }
     }
