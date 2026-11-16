@@ -757,10 +757,13 @@ sudo を使わない。置き場は jimmy のホームの下。
 
 ### 12.1 Cloudflare
 
-前提: Cloudflare のアカウント、Cloudflare に載っているドメイン（`<your-domain>`）。
+前提: Cloudflare のアカウント。**独自ドメインは使わない**（2026-11-17 ユーザーの決定: 持っていない）。入口は `workers.dev`。
+Worker 単位の Access（「Protect this Worker」）は WebSocket の Upgrade が 403 になる（公式の文書）ので使わず、
+ホスト名に対する self-hosted の Access のアプリケーションを手で作る。`wrangler.jsonc` は `workers_dev: true`・`preview_urls: false`。
+人向けの手順は `docs/setup-remote-build.md`。
 
 1. **Workers の有料プラン**（月 5 ドル）にする。Containers は有料プランだけ
-2. ビルド係のホスト名を決める: `<build-host>` = `zcode-build.<your-domain>`
+2. ビルド係のホスト名を決める: `<build-host>` = `zcode-build.<subdomain>.workers.dev`
 3. **Zero Trust** を有効にする（無料の枠でよい）。チーム名 `<team-name>` を控える
    （`<team-name>.cloudflareaccess.com`）
 4. **サービストークンを実機ごとに作る**（Zero Trust → Access → Service Auth → Service Tokens）:
@@ -779,7 +782,7 @@ sudo を使わない。置き場は jimmy のホームの下。
    cd zcode/remote/worker
    npm ci
    npx wrangler login
-   npx wrangler deploy --domain <build-host>
+   npx wrangler deploy
    ```
    （`--domain` が使えない版では、手元だけの設定ファイル `wrangler.local.jsonc` に `routes` を
    書いて `-c` で渡す。git には入れない）

@@ -13,7 +13,7 @@ zcode の「外でビルド・試験・型検査する仕組み」を使える�
 
 | 順 | やること | 要るもの | 所要の目安 |
 |---|---|---|---|
-| 1 | Cloudflare の準備（プラン・Zero Trust・トークン・Access） | Cloudflare のアカウントと、Cloudflare に載っているドメイン | 30 分 |
+| 1 | Cloudflare の準備（プラン・Zero Trust・トークン・Access） | Cloudflare のアカウント（独自ドメインは要らない。`workers.dev` を使う） | 30 分 |
 | 2 | Worker とビルド係の deploy | 手元の PC に Node と `docker` | 30 分〜（初回のイメージ作り） |
 | 3 | PC をビルド係にする（任意） | Tailscale の管理画面、Windows の管理者権限 | 15 分 |
 | 4 | 実機ごとの設定 | ssh で実機に入れること | 1 台 10 分 |
@@ -23,16 +23,21 @@ zcode の「外でビルド・試験・型検査する仕組み」を使える�
 
 ## 1. Cloudflare の準備
 
-### 1.1 プランとドメイン
+### 1.1 プランと入口のホスト名
 
 - [ ] **Workers の有料プラン（Workers Paid、月 5 ドル）** にする。Containers は有料プランでしか
       使えない。料金の中身は `remote-build.html` §9（含まれる分を超えるのは、ビルド係を長く
       温めておいたとき）
-- [ ] Cloudflare に載っているドメインを 1 つ決める（`<your-domain>`）。ビルド係の入口は
-      **`<build-host>` = `zcode-build.<your-domain>`** にする
+- [ ] 独自ドメインは使わない（2026-11-17 決定: 持っていない）。入口は Cloudflare が配る
+      **`<build-host>` = `zcode-build.<subdomain>.workers.dev`**
+  - `<subdomain>` はアカウントの workers.dev のサブドメイン（Workers & Pages の画面の右側、
+    または初めて deploy したときに決める）
 
-> ドメインを持っていない場合: `workers.dev` のホスト名でも動かせるが、設定が少し変わる
-> （設計の未決事項。決めたら知らせてほしい）。
+> **Worker の「Access」タブの「Protect this Worker behind Access」（ワンクリックの保護）は
+> 使わない。** Worker 単位の Access は WebSocket に対応しておらず、Upgrade が 403 で失敗する
+> と公式の文書に書かれている（[Cloudflare Access for Workers](https://developers.cloudflare.com/workers/configuration/cloudflare-access/)）。
+> 代わりに 1.4 で、ホスト名に対する Access のアプリケーションを手で作る（文書が勧める回避策）。
+> アカウント全体の「すべての Worker を保護する」設定も同じ理由で入れない。
 
 ### 1.2 Zero Trust を有効にする
 
@@ -63,7 +68,8 @@ Cloudflare Access（入口の門番）を使うために要る。無料の枠で
 
 場所: Zero Trust → Access → Applications → Add an application → **Self-hosted**
 
-- [ ] 名前 **`zcode-build`**、ドメイン **`<build-host>`**
+- [ ] 名前 **`zcode-build`**、ドメイン **`<build-host>`**（`zcode-build.<subdomain>.workers.dev`。
+      ホスト名に対するアプリケーションなので WebSocket も通る）
 - [ ] ポリシーを **1 つだけ** 作る:
   - 名前 `devices`
   - **Action = Service Auth**（ここが大事。Allow にすると人のログイン画面が出てしまい、実機の
@@ -93,13 +99,14 @@ Cloudflare Access（入口の門番）を使うために要る。無料の枠で
 cd zcode/remote/worker
 npm ci
 npx wrangler login          # ブラウザで Cloudflare にログインする
-npx wrangler deploy --domain <build-host>
+npx wrangler deploy         # zcode-build.<subdomain>.workers.dev に出る
 ```
 
 - 初回はイメージ（Rust・クロスコンパイラ・Node 入りで GB 級）を作って送るので時間がかかる
-- `--domain` が使えない版の wrangler では、手元だけの設定ファイル `wrangler.local.jsonc` に
-  `routes` を書いて `npx wrangler deploy -c wrangler.local.jsonc` とする。**このファイルは
-  git に入れない**（`.gitignore` 済み）
+- 設定（`wrangler.jsonc`）は `workers_dev: true`、**`preview_urls: false`**。プレビュー用の URL
+  （`<版>-zcode-build.<subdomain>.workers.dev`）は 1.4 の Access のアプリケーションの外なので
+  出さない（出ても Worker 自身が Access の JWT を確かめるので通らないが、入口は 1 つにする）
+- deploy が終わったら、1.4 のアプリケーションのドメインが実際の URL と一致しているか確かめる
 
 ### 2.3 秘密の値を入れる
 
