@@ -1,0 +1,122 @@
+# Markdown（ソース表示のハイライト）。色は VS Code の Dark+（markdown）に寄せてある:
+# 見出し = heading、太字・斜体 = keyword / constant（Dark+ では同じ青）、インラインコードと
+# コードブロック = string、リンク先 = link、リストの記号 = keyword、引用の記号 = comment。
+#
+# 限界:
+# - 字下げコードブロック（空白 4 つ）は塗らない（リストの続きと区別できない）
+# - 太字・斜体・インラインコードは 1 行の中だけ（複数行にまたがる強調は塗らない）
+# - コードブロックの中身は言語を問わず 1 色（言語ごとの再ハイライトはしない）
+# - フェンスは ``` と ~~~ のどちらでも閉じる（開いた記号と同じかは見ない。後方参照が無いため）
+# - 見出しの下線形式（===・---）、表の整形は見ない（`|` だけ区切りとして塗る）
+
+name = "Markdown"
+extensions = ["md", "markdown"]
+indent = "  "
+
+[outline]
+heading_char = "#"
+
+[variables]
+word = '[A-Za-z0-9{{nonascii}}][A-Za-z0-9_{{nonascii}}]*'
+
+[default_token]
+fence = "string"
+htmlcomment = "comment"
+
+[[contexts.main]]
+# フェンス付きコードブロック（開き行に言語名が付いてよい）
+match = '^[ \t]*(?:```|~~~).*'
+token = "string"
+push = "fence"
+[[contexts.main]]
+match = '^#{1,6}[ \t].*'
+token = "heading"
+[[contexts.main]]
+match = '^#{1,6}$'
+token = "heading"
+[[contexts.main]]
+match = '^[ \t]{0,3}(?:-[ \t]*-[ \t]*-[-\t ]*|\*[ \t]*\*[ \t]*\*[*\t ]*|_[ \t]*_[ \t]*_[_\t ]*)$'
+token = "punctuation"
+[[contexts.main]]
+match = '^[ \t]*>[> \t]*'
+token = "comment"
+[[contexts.main]]
+match = '^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?'
+token = "keyword"
+# 参照リンクの定義 `[id]: url`
+[[contexts.main]]
+match = '^[ \t]{0,3}\[[^\]\n]+\]:'
+token = "string"
+push = "refdef"
+[[contexts.main]]
+match = '<!--'
+token = "comment"
+push = "htmlcomment"
+[[contexts.main]]
+match = '\\[-\\`*_{}\[\]()#+.!<>|~]'
+token = "escape"
+[[contexts.main]]
+match = '`[^`\n]+`|``[^\n]+``'
+token = "string"
+[[contexts.main]]
+match = '\*\*[^*\n]+\*\*|__[^_\n]+__'
+token = "keyword"
+[[contexts.main]]
+match = '\*[^*\n \t][^*\n]*\*|_[^_\n \t][^_\n]*_'
+token = "constant"
+# [テキスト](url) と ![alt](url)。テキストは string、(url) は link
+[[contexts.main]]
+match = '!?\[[^\]\n]*\]'
+followed_by = '\('
+token = "string"
+push = "link_url"
+[[contexts.main]]
+match = '!?\[[^\]\n]*\]'
+followed_by = '\['
+token = "string"
+[[contexts.main]]
+match = '<https?://[^>\n]+>|https?://[^ \t\n)>\]{{nonascii}}]+'
+token = "link"
+# HTML のタグ
+[[contexts.main]]
+match = '</?[A-Za-z][^>\n]*>'
+token = "keyword"
+[[contexts.main]]
+match = '\|'
+token = "punctuation"
+# 単語はまとめて取る（snake_case の `_` を斜体の開始と見ないため）
+[[contexts.main]]
+match = '{{word}}'
+token = "text"
+
+[[contexts.link_url]]
+match = '\([^)\n]*\)'
+token = "link"
+pop = true
+[[contexts.link_url]]
+match = ''
+pop = true
+
+[[contexts.refdef]]
+match = '[ \t]+'
+token = "text"
+[[contexts.refdef]]
+match = '[^ \t\n]+'
+token = "link"
+pop = true
+[[contexts.refdef]]
+match = ''
+pop = true
+
+[[contexts.fence]]
+match = '^[ \t]*(?:```|~~~).*'
+token = "string"
+pop = true
+[[contexts.fence]]
+match = '[^\n]+'
+
+[[contexts.htmlcomment]]
+match = '-->'
+pop = true
+[[contexts.htmlcomment]]
+match = '[^-\n]+|-'
