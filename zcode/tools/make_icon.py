@@ -82,7 +82,8 @@ def gloss(img, box, radius, strength=150):
 
 # 文字の光（ブルーム）は弱めにして、明るさの段階を減らす（わずかに縞が出る程度）。
 # なめらかで強い光は文字の輪郭をぼかして読みにくくした
-GLOW_ALPHA = 120
+GLOW_ALPHA = 120          # 名前とカーソル（読みやすさ優先で弱め）
+CODE_GLOW_ALPHA = 170     # </>（印象を強く。段階を減らす効果はこちらにもかける）
 GLOW_LEVELS = 6
 
 
@@ -207,8 +208,8 @@ def code_glyph(img, center, half_w, half_h, width, outline):
 
     # 光
     g = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    strokes(ImageDraw.Draw(g), width + 2 * outline + 3 * S, GREEN_GLOW + (GLOW_ALPHA,))
-    img.alpha_composite(banded_glow(g, 2 * S))
+    strokes(ImageDraw.Draw(g), width + 2 * outline + 6 * S, GREEN_GLOW + (CODE_GLOW_ALPHA,))
+    img.alpha_composite(banded_glow(g, 3 * S))
     # 縁取り（一定の太さ）
     strokes(ImageDraw.Draw(img), width + 2 * outline, GREEN_DARK + (255,))
     # 中身（縦グラデーション）
