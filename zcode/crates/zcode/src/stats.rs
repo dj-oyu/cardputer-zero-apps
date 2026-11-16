@@ -80,11 +80,15 @@ pub struct Stats {
     pub verify_checks: u32,
     pub verify_mismatch: u32,
     pub verify_max_rows: u16,
+    /// 上書きされていた行をすべて含む行範囲。
+    pub verify_bounds: zc_core::RowRange,
     pub fonts: FontStats,
     pub t_end_us: u64,
     pub rss_kb: u32,
     pub rss_peak_kb: u32,
     pub threads: u32,
+    /// 起動の区切り（名前, 開始からの µs）。
+    pub startup: Vec<(&'static str, u64)>,
     /// フレームの通し番号 → (起床時刻, 渡し終えた時刻)。flush の記録と突き合わせる。
     recent: VecDeque<(u64, u64, u64)>,
 }
@@ -92,6 +96,11 @@ pub struct Stats {
 impl Stats {
     pub fn new(t_start_us: u64) -> Stats {
         Stats { t_start_us, ..Stats::default() }
+    }
+
+    /// 起動の区切りを記録する。
+    pub fn mark(&mut self, name: &'static str) {
+        self.startup.push((name, now_us().saturating_sub(self.t_start_us)));
     }
 
     /// 1 フレームぶん。`wake`: 起床、`t0`: 描画開始、`t1`: 描画終了、`handoff`: 渡し終えた時刻。
@@ -123,10 +132,11 @@ impl Stats {
         }
     }
 
-    pub fn verify(&mut self, mismatched_rows: u16) {
+    pub fn verify(&mut self, mismatched_rows: u16, bounds: zc_core::RowRange) {
         self.verify_checks += 1;
         if mismatched_rows > 0 {
             self.verify_mismatch += 1;
+            self.verify_bounds = self.verify_bounds.union(bounds);
             self.verify_max_rows = self.verify_max_rows.max(mismatched_rows);
         }
     }
@@ -163,6 +173,8 @@ impl Stats {
             ms(self.first_fsync_us, self.t_start_us),
             ms(self.t_end_us, self.t_start_us) / 1000.0
         );
+        let marks: Vec<String> = self.startup.iter().map(|(n, t)| format!("{n} {:.1}", *t as f64 / 1000.0)).collect();
+        let _ = writeln!(o, "  startup marks (ms): {}", marks.join(" / "));
         let _ = writeln!(o, "  frames={} flushes={} keys={} key_batches={} syn_dropped={}", self.frames, self.flush_count, self.keys, self.key_batches, self.syn_dropped);
         let _ = writeln!(o, "  rows/frame       : n={} p50={} max={}", self.rows.len(), self.rows.quantile(0.5), self.rows.quantile(1.0));
         let _ = writeln!(o, "  input handling   : {}", self.input.summary());
@@ -174,8 +186,8 @@ impl Stats {
         let _ = writeln!(o, "  fsync duration   : {}", self.fsync.summary());
         let _ = writeln!(
             o,
-            "  fb readback      : checks={} overwritten={} max_rows={}",
-            self.verify_checks, self.verify_mismatch, self.verify_max_rows
+            "  fb readback      : checks={} overwritten={} max_rows={} rows={}..{}",
+            self.verify_checks, self.verify_mismatch, self.verify_max_rows, self.verify_bounds.start, self.verify_bounds.end
         );
         let _ = writeln!(
             o,

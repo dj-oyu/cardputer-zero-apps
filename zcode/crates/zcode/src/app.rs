@@ -197,7 +197,10 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
     let mut timers = Timers::new()?;
 
     // 入力を先に開く（開けなければ、画面に触る前に終わる）
-    let mut kb = Keyboard::open(opts.kbd.as_deref(), Keymap::builtin(), RepeatConfig::default())?;
+    let keymap = Keymap::builtin();
+    stats.mark("keymap parsed");
+    let mut kb = Keyboard::open(opts.kbd.as_deref(), keymap, RepeatConfig::default())?;
+    stats.mark("keyboard opened");
     let mode = if opts.inline_raster {
         RasterMode::Inline
     } else {
@@ -208,6 +211,7 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
         }
     };
     let mut fonts = Fonts::load(&opts.fonts, mode)?;
+    stats.mark("fonts loaded");
     for w in fonts.warnings() {
         eprintln!("zcode: {w}");
     }
@@ -220,6 +224,7 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
             tx.send(AppEvent::Flushed(*r));
         });
     }
+    stats.mark("fb0 opened");
     if !opts.no_grab {
         kb.grab()?;
         kb.resync()?;
@@ -288,6 +293,7 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
 
         // 溜まっていた入力を全部処理してから、1 回だけ描く
         let t0 = now_us();
+        fonts.begin_frame();
         let damage = screen.render(&mut RenderCx::new(&mut canvas, &mut fonts, &theme));
         let t1 = now_us();
         let info = if force_present {
@@ -305,11 +311,12 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
         if first {
             first = false;
             stats.first_frame_us = now_us();
+            stats.mark("first frame handed off");
         }
 
         // ほかのプロセスに画面を上書きされていないか（計測用）
-        if let Some(n) = display.take_verify() {
-            stats.verify(n);
+        if let Some((n, bounds)) = display.take_verify() {
+            stats.verify(n, bounds);
         }
         if let (Some(t), Some(every)) = (next_watch, opts.watch_fb) {
             if now_us() >= t {

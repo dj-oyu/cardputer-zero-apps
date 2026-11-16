@@ -54,7 +54,8 @@ pub enum RasterMode {
     /// assist スレッドに頼み、最大 `wait` だけ待つ。
     Assist {
         worker: Arc<Worker>,
-        /// 1 字あたりの待ち時間の上限（設計値は 2ms）。
+        /// 1 字あたりの待ち時間の上限（設計値は 2ms）。1 フレームの合計にも上限が
+        /// ある（[`FRAME_WAIT_FACTOR`]）。
         wait: Duration,
         /// 待ち時間を過ぎてから字形ができたときに、メインを起こす通知口。
         notifier: Option<Notifier>,
@@ -74,6 +75,12 @@ pub struct FontStats {
     pub cache_bytes: u32,
 }
 
+/// 1 フレームで字形を待つ時間の合計の上限（1 字あたりの待ち時間の何倍か）。
+/// 初めての字が多い画面（日本語のファイルを開いた直後など）で、1 字ごとに 2ms ずつ
+/// 待って 1 フレームが 100ms を超えるのを防ぐ。上限を使い切ったら、残りの字は待たずに
+/// 頼むだけにして空白で描き、届いてから描き直す。
+pub const FRAME_WAIT_FACTOR: u32 = 3;
+
 type Reply = (GlyphKey, Glyph);
 
 /// フォント一式とグリフキャッシュ。メインスレッドが持つ。
@@ -87,6 +94,8 @@ pub struct Fonts {
     rx: mpsc::Receiver<Reply>,
     warnings: Vec<String>,
     stats: FontStats,
+    /// このフレームで、あとどれだけ待ってよいか。
+    frame_budget: Duration,
 }
 
 impl Fonts {
@@ -115,7 +124,16 @@ impl Fonts {
             rx,
             warnings,
             stats: FontStats::default(),
+            frame_budget: Duration::MAX,
         })
+    }
+
+    /// フレームの描き始めに呼ぶ（そのフレームで字形を待つ時間の合計の上限を戻す）。
+    /// 呼ばなければ、合計の上限は無い（1 字あたりの上限だけ）。
+    pub fn begin_frame(&mut self) {
+        if let RasterMode::Assist { wait, .. } = &self.mode {
+            self.frame_budget = *wait * FRAME_WAIT_FACTOR;
+        }
     }
 
     /// 読み込みで出た警告（CJK フォントが無い、など）。
@@ -166,7 +184,7 @@ impl Fonts {
                 true
             }
             RasterMode::Assist { worker, wait, notifier } => {
-                let wait = *wait;
+                let wait = (*wait).min(self.frame_budget);
                 if self.pending.insert(key) {
                     let (files, tx, notifier) = (self.files.clone(), self.tx.clone(), notifier.clone());
                     let deadline = Instant::now() + wait;
@@ -181,7 +199,14 @@ impl Fonts {
                         }
                     });
                     self.stats.rasterized += 1;
-                    let deadline = Instant::now() + wait;
+                    let started = Instant::now();
+                    let deadline = started + wait;
+                    let budget = &mut self.frame_budget;
+                    let mut spend = || {
+                        if *budget != Duration::MAX {
+                            *budget = budget.saturating_sub(started.elapsed());
+                        }
+                    };
                     loop {
                         let left = deadline.saturating_duration_since(Instant::now());
                         match self.rx.recv_timeout(left) {
@@ -189,12 +214,14 @@ impl Fonts {
                                 self.pending.remove(&k);
                                 self.cache.insert(k, g);
                                 if k == key {
+                                    spend();
                                     return true;
                                 }
                             }
                             Err(_) => break,
                         }
                     }
+                    spend();
                 }
                 self.stats.late += 1;
                 false
@@ -369,6 +396,33 @@ mod tests {
         }
         assert!(!a.has_pending());
         assert_eq!(a.stats().late, 0);
+    }
+
+    #[test]
+    fn frame_budget_caps_total_wait() {
+        let worker = Arc::new(Worker::new(WorkerConfig::ASSIST));
+        let mode = RasterMode::Assist { worker: worker.clone(), wait: Duration::from_millis(40), notifier: None };
+        let Some(mut f) = fonts(mode) else { return };
+        let st = TextStyle::mono(10.0);
+        f.metrics(&st);
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        worker.submit(move || {
+            let _ = gate_rx.recv();
+        });
+        // assist が塞がっている間に 10 字: 1 字 40ms ずつ待つと 400ms。上限は 3 字ぶん (120ms)
+        f.begin_frame();
+        let t = Instant::now();
+        for ch in "あいうえおかきくけこ".chars() {
+            assert!(f.glyph(ch, &st).is_none());
+        }
+        let dt = t.elapsed();
+        assert!(dt >= Duration::from_millis(115) && dt < Duration::from_millis(250), "{dt:?}");
+        gate_tx.send(()).unwrap();
+        worker.wait_idle();
+        assert!(f.take_ready());
+        // 次のフレームでは上限が戻り、全部キャッシュから出る
+        f.begin_frame();
+        assert!("あいうえおかきくけこ".chars().all(|ch| f.glyph(ch, &st).is_some()));
     }
 
     #[test]

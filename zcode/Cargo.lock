@@ -359,6 +359,7 @@ dependencies = [
  "serde",
  "toml",
  "zc-core",
+ "zc-input",
 ]
 
 [[package]]

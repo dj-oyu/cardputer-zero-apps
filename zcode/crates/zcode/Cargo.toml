@@ -21,3 +21,7 @@ zc-font.workspace = true
 zc-input.workspace = true
 zc-ui.workspace = true
 libc.workspace = true
+
+[dev-dependencies]
+# keylog のテストが、出力をキー配列として読み直す
+zc-input = { workspace = true, features = ["parse"] }

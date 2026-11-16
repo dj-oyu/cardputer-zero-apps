@@ -96,10 +96,12 @@ fn device_name(fd: RawFd) -> Option<String> {
     Some(String::from_utf8_lossy(s).into_owned())
 }
 
-/// 名前が `name` の evdev デバイスを探す。
+/// 名前が `name` の evdev デバイスを探す。sysfs の名前を読むだけで、デバイスは
+/// 開かない（関係ないデバイスを開くと、それだけで数十 ms かかるものがある）。
 pub fn find_device(name: &str) -> Option<PathBuf> {
-    (0..32).map(|i| PathBuf::from(format!("/dev/input/event{i}"))).find(|p| {
-        File::open(p).ok().and_then(|f| device_name(f.as_raw_fd())).is_some_and(|n| n == name)
+    (0..32).find_map(|i| {
+        let n = std::fs::read_to_string(format!("/sys/class/input/event{i}/device/name")).ok()?;
+        (n.trim_end() == name).then(|| PathBuf::from(format!("/dev/input/event{i}")))
     })
 }
 

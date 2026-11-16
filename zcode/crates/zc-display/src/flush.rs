@@ -75,7 +75,7 @@ struct State {
     log: VecDeque<FlushRecord>,
     listener: Option<Listener>,
     verify_req: bool,
-    verify_result: Option<u16>,
+    verify_result: Option<(u16, RowRange)>,
 }
 
 struct Shared {
@@ -185,9 +185,9 @@ impl Display {
         self.shared.wake.notify_one();
     }
 
-    /// [`Display::request_verify`] の結果: 提示用バッファと違っていた行の数。
-    /// まだ終わっていなければ `None`。
-    pub fn take_verify(&mut self) -> Option<u16> {
+    /// [`Display::request_verify`] の結果: 提示用バッファと違っていた行の数と、
+    /// それを含む行範囲。まだ終わっていなければ `None`。
+    pub fn take_verify(&mut self) -> Option<(u16, RowRange)> {
         self.shared.state.lock().unwrap().verify_result.take()
     }
 
@@ -241,8 +241,15 @@ fn flush_loop(shared: &Shared, mut backend: Box<dyn Backend>, cfg: FlushConfig, 
                     st.verify_req = false;
                     readback.resize(st.front.len(), 0);
                     backend.read_all(&mut readback);
-                    let n = st.front.chunks_exact(w).zip(readback.chunks_exact(w)).filter(|(a, b)| a != b).count();
-                    st.verify_result = Some(n as u16);
+                    let mut n = 0u16;
+                    let mut bounds = RowRange::default();
+                    for (y, (a, b)) in st.front.chunks_exact(w).zip(readback.chunks_exact(w)).enumerate() {
+                        if a != b {
+                            n += 1;
+                            bounds = bounds.union(RowRange::new(y as u16, y as u16 + 1));
+                        }
+                    }
+                    st.verify_result = Some((n, bounds));
                 }
                 st.busy = false;
                 shared.idle.notify_all();
@@ -391,13 +398,13 @@ mod tests {
         d.present_all(&c);
         d.request_verify();
         assert!(d.wait_idle(Duration::from_secs(2)));
-        assert_eq!(d.take_verify(), Some(0));
+        assert_eq!(d.take_verify(), Some((0, RowRange::default())));
         assert_eq!(d.take_verify(), None);
         // ほかのプロセスが 2 行ぶん上書きした
         log.lock().unwrap().px[320 * 10..320 * 12].fill(9);
         d.request_verify();
         assert!(d.wait_idle(Duration::from_secs(2)));
-        assert_eq!(d.take_verify(), Some(2));
+        assert_eq!(d.take_verify(), Some((2, RowRange::new(10, 12))));
     }
 
     #[test]

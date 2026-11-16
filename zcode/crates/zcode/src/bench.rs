@@ -8,6 +8,10 @@
 //! | `line-status` | 1 行 + ステータスバー（離れた 2 か所 → fsync が 2 回に分かれる） | 30ms |
 //! | `scroll` | 本文を 1 行ぶんスクロール（ほぼ全画面） | 50ms（リピート 20 回/秒に相当） |
 //! | `full` | 全画面を描き直す | 50ms |
+//!
+//! 異常終了の後始末（[`crate::crash`]）を実機で確かめるための種類もある:
+//! `panic` は 10 フレーム目でメインが panic する。`hang` は 10 フレーム目でメインが
+//! 固まる（シグナルを送ると 2 秒後に SIGALRM のハンドラが後始末して終わる）。
 
 use crate::app::{AppEvent, LoopCx, Screen, TimerId};
 use crate::sample::{self, CODE};
@@ -25,6 +29,10 @@ pub enum BenchKind {
     LineStatus,
     Scroll,
     Full,
+    /// 後始末の試験: メインが panic する。
+    Panic,
+    /// 後始末の試験: メインが固まる。
+    Hang,
 }
 
 impl BenchKind {
@@ -34,12 +42,14 @@ impl BenchKind {
             "line-status" => BenchKind::LineStatus,
             "scroll" => BenchKind::Scroll,
             "full" => BenchKind::Full,
+            "panic" => BenchKind::Panic,
+            "hang" => BenchKind::Hang,
             _ => return None,
         })
     }
     fn interval(self) -> Duration {
         match self {
-            BenchKind::Line | BenchKind::LineStatus => Duration::from_millis(30),
+            BenchKind::Line | BenchKind::LineStatus | BenchKind::Panic | BenchKind::Hang => Duration::from_millis(30),
             BenchKind::Scroll | BenchKind::Full => Duration::from_millis(50),
         }
     }
@@ -94,6 +104,15 @@ impl Screen for Bench {
             return;
         }
         self.step += 1;
+        if self.step == 10 {
+            match self.kind {
+                BenchKind::Panic => panic!("後始末の試験（--bench panic）"),
+                BenchKind::Hang => loop {
+                    std::thread::sleep(Duration::from_secs(3600));
+                },
+                _ => {}
+            }
+        }
         self.pending_step = true;
         cx.timers.set_after(TimerId::Step, self.kind.interval());
     }
@@ -121,7 +140,7 @@ impl Screen for Bench {
         }
         let n = self.step as usize;
         match self.kind {
-            BenchKind::Line | BenchKind::LineStatus => {
+            BenchKind::Line | BenchKind::LineStatus | BenchKind::Panic | BenchKind::Hang => {
                 // カーソル行（8 行目）の文字を増やしていく
                 let cell = cx.metrics(&ts).cell_w;
                 let gutter = cell * 3 + 5;

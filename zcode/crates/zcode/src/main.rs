@@ -19,6 +19,7 @@ zcode — CardputerZero 用コードエディタ（段階 1: 土台。エディ�
   zcode --keytest [--guide] [--log <パス>]   キー確認モード
   zcode --fonttest [--bdf <パス>] [--auto <ms>] [--page <n>]   フォント比較
   zcode --bench <line|line-status|scroll|full> [--frames <n>]  描画の計測
+                （panic / hang は異常終了の後始末の試験）
   zcode --keymap-from-log <ログ>             キー確認のログからキー配列の行を作る
 
 キー確認モード:
