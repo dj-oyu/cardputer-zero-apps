@@ -1,0 +1,75 @@
+# TOML (toml) — zc-highlight の見本の正解。ZCODE_UPDATE_GOLDEN=1 で作り直す
+   1| # 設定ファイルの見本
+    : comment "# 設定ファイルの見本"
+   2| title = "zcode"
+    : key "title" · operator "=" · string "\"zcode\""
+   3| enabled = true
+    : key "enabled" · operator "=" · constant "true"
+   4| retries = 3
+    : key "retries" · operator "=" · number "3"
+   5| ratio = 1.5e-3
+    : key "ratio" · operator "=" · number "1.5e-3"
+   6| mask = 0xDEADBEEF
+    : key "mask" · operator "=" · number "0xDEADBEEF"
+   7| big = 1_000_000
+    : key "big" · operator "=" · number "1_000_000"
+   8| limit = +inf
+    : key "limit" · operator "=" · number "+inf"
+   9| released = 1979-05-27T07:32:00Z
+    : key "released" · operator "=" · number "1979-05-27T07:32:00Z"
+  10| 
+  11| [package]
+    : heading "[package]"
+  12| name = "zcode"
+    : key "name" · operator "=" · string "\"zcode\""
+  13| version.workspace = true
+    : key "version" · punctuation "." · key "workspace" · operator "=" · constant "true"
+  14| "quoted key" = 'literal \n string'
+    : key "\"quoted key\"" · operator "=" · string "'literal \\n string'"
+  15| authors = ["A. Person", "B. Person"]
+    : key "authors" · operator "=" · punctuation "[" · string "\"A. Person\"" · punctuation "," · string "\"B. Person\"" · punctuation "]"
+  16| 
+  17| [dependencies.serde]
+    : heading "[dependencies.serde]"
+  18| version = "1"
+    : key "version" · operator "=" · string "\"1\""
+  19| features = ["derive"]
+    : key "features" · operator "=" · punctuation "[" · string "\"derive\"" · punctuation "]"
+  20| 
+  21| [[bin]]
+    : heading "[[bin]]"
+  22| name = "main"
+    : key "name" · operator "=" · string "\"main\""
+  23| path = "src/main.rs"
+    : key "path" · operator "=" · string "\"src/main.rs\""
+  24| 
+  25| [server]
+    : heading "[server]"
+  26| point = { x = 1, y = -2 }
+    : key "point" · operator "=" · punctuation "{" · key "x" · operator "=" · number "1" · punctuation "," · key "y" · operator "=" · number "-2" · punctuation "}"
+  27| matrix = [
+    : key "matrix" · operator "=" · punctuation "["
+  28|     [1, 2],
+    : punctuation "[" · number "1" · punctuation "," · number "2" · punctuation "],"
+  29|     [3, 4],
+    : punctuation "[" · number "3" · punctuation "," · number "4" · punctuation "],"
+  30| ]
+    : punctuation "]"
+  31| message = "tab\there \"quoted\" \u00e9"
+    : key "message" · operator "=" · string "\"tab" · escape "\\t" · string "here " · escape "\\\"" · string "quoted" · escape "\\\"" · escape "\\u00e9" · string "\""
+  32| paragraph = """
+    : key "paragraph" · operator "=" · string "\"\"\""
+  33| Roses are red,
+    : string "Roses are red,"
+  34|   line with a \
+    : string "  line with a " · escape "\\"
+  35| continued part
+    : string "continued part"
+  36| """
+    : string "\"\"\""
+  37| regex = '''
+    : key "regex" · operator "=" · string "'''"
+  38| \d+ and 'quotes' stay raw
+    : string "\\d+ and 'quotes' stay raw"
+  39| '''
+    : string "'''"
