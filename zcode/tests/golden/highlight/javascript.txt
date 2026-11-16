@@ -1,0 +1,102 @@
+# JavaScript (javascript) — zc-highlight の見本の正解。ZCODE_UPDATE_GOLDEN=1 で作り直す
+   1| #!/usr/bin/env node
+    : comment "#!/usr/bin/env node"
+   2| // 見本: テンプレートの入れ子、正規表現と割り算、private、デコレータ
+    : comment "// 見本: テンプレートの入れ子、正規表現と割り算、private、デコレータ"
+   3| 'use strict';
+    : string "'use strict'" · punctuation ";"
+   4| 
+   5| import { readFile } from 'node:fs/promises';
+    : control "import" · punctuation "{" · punctuation "}" · control "from" · string "'node:fs/promises'" · punctuation ";"
+   6| import * as path from "node:path";
+    : control "import" · operator "*" · control "as" · control "from" · string "\"node:path\"" · punctuation ";"
+   7| 
+   8| /**
+    : comment "/**"
+   9|  * 行を数える。
+    : comment " * 行を数える。"
+  10|  * @param {string} text 本文
+    : comment " * " · keyword "@param" · comment " {string} text 本文"
+  11|  * @returns {number}
+    : comment " * " · keyword "@returns" · comment " {number}"
+  12|  */
+    : comment " */"
+  13| export async function countLines(text, limit = 1_000) {
+    : control "export" · keyword "async" · keyword "function" · function "countLines" · punctuation "(" · punctuation "," · operator "=" · number "1_000" · punctuation ")" · punctuation "{"
+  14|   const lines = text.split(/\r?\n/);
+    : keyword "const" · operator "=" · punctuation "." · function "split" · punctuation "(" · string "/\\r?\\n/" · punctuation ");"
+  15|   return lines.length > limit ? limit : lines.length;
+    : control "return" · punctuation "." · operator ">" · operator "?" · punctuation ":" · punctuation "." · punctuation ";"
+  16| }
+    : punctuation "}"
+  17| 
+  18| const MAX_LEN = 0xFF + 0b101 + 0o17 + 12n + 1.5e-3 + .5;
+    : keyword "const" · constant "MAX_LEN" · operator "=" · number "0xFF" · operator "+" · number "0b101" · operator "+" · number "0o17" · operator "+" · number "12n" · operator "+" · number "1.5e-3" · operator "+" · number ".5" · punctuation ";"
+  19| const ratio = MAX_LEN / 2 / 3, big = 10n ** 3n;
+    : keyword "const" · operator "=" · constant "MAX_LEN" · operator "/" · number "2" · operator "/" · number "3" · punctuation "," · operator "=" · number "10n" · operator "**" · number "3n" · punctuation ";"
+  20| const re = /[/\]]+\/(?:a|b)+$/gi.test("a/b");
+    : keyword "const" · operator "=" · string "/[/\\]]+\\/(?:a|b)+$/gi" · punctuation "." · function "test" · punctuation "(" · string "\"a/b\"" · punctuation ");"
+  21| let x = (a + b) / c;
+    : keyword "let" · operator "=" · punctuation "(" · operator "+" · punctuation ")" · operator "/" · punctuation ";"
+  22| x = cond ? /^\d+$/ : null;
+    : operator "=" · operator "?" · string "/^\\d+$/" · punctuation ":" · constant "null" · punctuation ";"
+  23| 
+  24| @sealed
+    : attribute "@sealed"
+  25| class Counter extends EventTarget {
+    : keyword "class" · type "Counter" · keyword "extends" · type "EventTarget" · punctuation "{"
+  26|   #count = 0;
+    : variable "#count" · operator "=" · number "0" · punctuation ";"
+  27|   static DEFAULT = Object.freeze({ step: 1, name: 'it\'s\n' });
+    : keyword "static" · constant "DEFAULT" · operator "=" · type "Object" · punctuation "." · function "freeze" · punctuation "({" · punctuation ":" · number "1" · punctuation "," · punctuation ":" · string "'it" · escape "\\'" · string "s" · escape "\\n" · string "'" · punctuation "});"
+  28| 
+  29|   constructor(step = 1) {
+    : function "constructor" · punctuation "(" · operator "=" · number "1" · punctuation ")" · punctuation "{"
+  30|     super();
+    : constant "super" · punctuation "();"
+  31|     this.step = step ?? Counter.DEFAULT.step;
+    : constant "this" · punctuation "." · operator "=" · operator "??" · type "Counter" · punctuation "." · constant "DEFAULT" · punctuation "." · punctuation ";"
+  32|   }
+    : punctuation "}"
+  33| 
+  34|   get value() { return this.#count; }
+    : function "value" · punctuation "()" · punctuation "{" · control "return" · constant "this" · punctuation "." · variable "#count" · punctuation ";" · punctuation "}"
+  35| 
+  36|   *items() { yield* [1, 2, 3]; }
+    : operator "*" · function "items" · punctuation "()" · punctuation "{" · control "yield" · operator "*" · punctuation "[" · number "1" · punctuation "," · number "2" · punctuation "," · number "3" · punctuation "];" · punctuation "}"
+  37| 
+  38|   inc() {
+    : function "inc" · punctuation "()" · punctuation "{"
+  39|     this.#count += this.step;
+    : constant "this" · punctuation "." · variable "#count" · operator "+=" · constant "this" · punctuation "." · punctuation ";"
+  40|     return /x/.test(`${this.#count}`) ? this?.value : undefined;
+    : control "return" · string "/x/" · punctuation "." · function "test" · punctuation "(" · string "`" · constant "${this" · punctuation "." · variable "#count" · constant "}" · string "`" · punctuation ")" · operator "?" · constant "this" · operator "?." · punctuation ":" · constant "undefined" · punctuation ";"
+  41|   }
+    : punctuation "}"
+  42| }
+    : punctuation "}"
+  43| 
+  44| const fmt = (n, w = 8) => `${String(n).padStart(w)}|${n > 9 ? `big ${n / 10 | 0}` : `${[1, 2].map(v => `<${v}>`).join(`, ${w}`)}`}`;
+    : keyword "const" · operator "=" · punctuation "(" · punctuation "," · operator "=" · number "8" · punctuation ")" · keyword "=>" · string "`" · constant "${" · function "String" · punctuation "(" · punctuation ")." · function "padStart" · punctuation "(" · punctuation ")" · constant "}" · string "|" · constant "${" · operator ">" · number "9" · operator "?" · string "`big " · constant "${" · operator "/" · number "10" · operator "|" · number "0" · constant "}" · string "`" · punctuation ":" · string "`" · constant "${" · punctuation "[" · number "1" · punctuation "," · number "2" · punctuation "]." · function "map" · punctuation "(" · keyword "=>" · string "`<" · constant "${" · constant "}" · string ">`" · punctuation ")." · function "join" · punctuation "(" · string "`, " · constant "${" · constant "}" · string "`" · punctuation ")" · constant "}" · string "`" · constant "}" · string "`" · punctuation ";"
+  45| const label = `a${ {k: 1}.k }b\u{1F600}\x41`;
+    : keyword "const" · operator "=" · string "`a" · constant "${" · punctuation "{" · punctuation ":" · number "1" · punctuation "}." · constant "}" · string "b" · escape "\\u{1F600}\\x41" · string "`" · punctuation ";"
+  46| const obj = { type: 'x', default: 1, in: true };
+    : keyword "const" · operator "=" · punctuation "{" · punctuation ":" · string "'x'" · punctuation "," · control "default" · punctuation ":" · number "1" · punctuation "," · keyword "in" · punctuation ":" · constant "true" · punctuation "};"
+  47| const { NaN: nan, Infinity: inf } = Number;
+    : keyword "const" · punctuation "{" · constant "NaN" · punctuation ":" · punctuation "," · constant "Infinity" · punctuation ":" · punctuation "}" · operator "=" · type "Number" · punctuation ";"
+  48| 
+  49| for (const [k, v] of Object.entries(obj)) {
+    : control "for" · punctuation "(" · keyword "const" · punctuation "[" · punctuation "," · punctuation "]" · keyword "of" · type "Object" · punctuation "." · function "entries" · punctuation "(" · punctuation "))" · punctuation "{"
+  50|   if (v === null || typeof v === 'undefined') continue;
+    : control "if" · punctuation "(" · operator "===" · constant "null" · operator "||" · keyword "typeof" · operator "===" · string "'undefined'" · punctuation ")" · control "continue" · punctuation ";"
+  51|   console.log(k, v, obj.default.type, obj?.in);
+    : variable "console" · punctuation "." · function "log" · punctuation "(" · punctuation "," · punctuation "," · punctuation "." · punctuation "." · punctuation "," · operator "?." · punctuation ");"
+  52| }
+    : punctuation "}"
+  53| 
+  54| const p = new Promise((resolve) => setTimeout(resolve, 100));
+    : keyword "const" · operator "=" · keyword "new" · type "Promise" · punctuation "((" · punctuation ")" · keyword "=>" · function "setTimeout" · punctuation "(" · punctuation "," · number "100" · punctuation "));"
+  55| const t = await Promise.all([p, readFile(path.join('a', 'b'), 'utf8')]);
+    : keyword "const" · operator "=" · control "await" · type "Promise" · punctuation "." · function "all" · punctuation "([" · punctuation "," · function "readFile" · punctuation "(" · punctuation "." · function "join" · punctuation "(" · string "'a'" · punctuation "," · string "'b'" · punctuation ")," · string "'utf8'" · punctuation ")]);"
+  56| module.exports = { Counter, countLines, fmt, label, t };
+    : variable "module" · punctuation "." · operator "=" · punctuation "{" · type "Counter" · punctuation "," · punctuation "," · punctuation "," · punctuation "," · punctuation "};"

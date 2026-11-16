@@ -75,3 +75,27 @@ fn gcc_fsyntax_only_output() {
     );
     assert!(d[0].message.starts_with("expected"), "{:?}", d[0].message);
 }
+
+#[test]
+fn tsc_pretty_false_output() {
+    // TypeScript 7.0.2（Go 版）の `--pretty false` の出力（実機で取ったもの）。
+    // メッセージに TS の番号を残す
+    let out = "bad.ts(1,7): error TS2322: Type 'string' is not assignable to type 'number'.\n";
+    let d = parse_diagnostics(out, pattern("typescript"), "bad.ts").unwrap();
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!((d[0].line, d[0].col), (0, Some(6)));
+    assert_eq!(d[0].severity, Severity::Error);
+    assert_eq!(d[0].message, "TS2322: Type 'string' is not assignable to type 'number'.");
+}
+
+#[test]
+fn tsc_syntax_error_in_js() {
+    // JS（--allowJs）では構文エラーだけが出る（形は TS と同じ。ファイル名に括弧があってもよい）
+    let out = "src/app (1)/bad.js(3,14): error TS1005: ';' expected.\nbad.js(7,1): error TS1128: Declaration or statement expected.\n";
+    let d = parse_diagnostics(out, pattern("javascript"), "").unwrap();
+    assert_eq!(d.len(), 2, "{d:?}");
+    assert_eq!((d[0].line, d[0].col), (2, Some(13)));
+    assert_eq!(d[0].message, "TS1005: ';' expected.");
+    assert_eq!((d[1].line, d[1].col), (6, Some(0)));
+    assert!(d[1].message.starts_with("TS1128:"), "{:?}", d[1].message);
+}

@@ -1,0 +1,393 @@
+# TypeScript（.ts / .mts / .cts）。色の付け方は VS Code の Dark+ に寄せてある。
+# JavaScript は ../javascript/language.toml（継承が無いので規則を複製している。直すときは両方）。
+# JS との差: 型の語（string / number …）・interface / type / enum / namespace・修飾子・
+# ジェネリクス呼び出し `f<T>(x)` が関数の色になる規則。
+#
+# 限界（DFA で書けないもの）:
+# - TSX（.tsx）は扱わない: JSX のタグの対応は後方参照が要り、`<T,>(x) =>` のジェネリクスと
+#   タグも区別できない。拡張子も登録しない
+# - 型注釈の文脈は持たない。`x: T` の T は、先頭が大文字の名前・1 文字の大文字（T）・
+#   [words] の型名（string など）だけ型の色になる。小文字で始まる自作の型名は塗れない。
+#   `a < b` の比較演算子とジェネリクスの `<` `>` は、どちらも演算子のまま（壊さないため）
+# - `type` は後ろに大文字か `_` `$` で始まる名前が続くときだけキーワード
+#   （`type Foo =`。変数名・プロパティ名の type を壊さないため。`type foo = …` は塗れない）
+# - `f<T>(x)` が関数の色になるのは、`<` と `>` の間が英数字・`. , [ ] | < >` と空白だけのとき
+#   （`a < b || c > (d)` は誤って関数の色になりうる）
+# - `string` `number` `object` などは、変数名に使っても型の色になる
+# - オブジェクト型のプロパティ名・引数名は塗り分けない（text）
+# - 正規表現リテラルと割り算の区別は「直前のトークン」の簡易判定: 演算子・`( [ { } , ; :`・
+#   `return typeof case in delete void throw yield else do instanceof` の後ろは正規表現
+#   （同じ行に閉じの `/` が無ければ割り算）、識別子・数・`)`・`]`・文字列の後ろは割り算。
+#   外れる例: `i++ / 2 / 3`（`++` の後ろを正規表現と見て `/ 2 /` を塗る）、
+#   `if (x) /re/.test(y)`（`)` の後ろは割り算）
+# - 正規表現リテラルは 1 つのトークン（string の色。中身は塗り分けない）。
+#   フラグ（/g）まで含む。クラス `[/]` の中の `/` は閉じにならない
+# - テンプレートリテラルの `${ }` は文脈のスタックで好きな深さまで入れ子にできる。
+#   `${` の中の `{ }` の対応も数える
+# - 型の色は先頭が大文字の名前（Map）と 1 文字の大文字（T）。全部大文字（MAX_LEN）は
+#   定数の色。`new Foo(` の Foo は型の色、`Foo(` は関数の色
+# - 数は「数字で始まる英数字の並び」を 1 つにまとめる（0x1F・1_000n・1e-3）。
+#   `0xfe-1` のような 16 進と引き算の隙間なしは 1 つの数に見える
+# - オブジェクトのキー・引数名は塗り分けない（text）
+# - JSDoc は `@tag` だけを塗る（`{型}` や名前は塗らない）
+# - アウトラインは行の最初の語（function / class。`export` `default` `async` は飛ばす）。
+#   `const f = () =>` のアロー関数と、メソッド定義は拾えない（最初の語が識別子なので）
+
+name = "TypeScript"
+extensions = ["ts", "mts", "cts"]
+first_line = '^#!.*\b(?:ts-node|tsx)\b'
+line_comment = "//"
+indent = "  "
+# run は未設定（F5 実行の設計は後で）
+check = "tsc --noEmit --pretty false --strict --target es2022 --module esnext --moduleResolution bundler --lib es2022,dom --skipLibCheck {file}"
+# tsc の出力: `ファイル(行,桁): error TS1005: メッセージ`。メッセージには TS の番号を残す
+check_pattern = '^.*?\((\d+),(\d+)\): (?:error|warning) (TS\d+: .*)$'
+keywords = [
+    "async", "await", "break", "case", "catch", "class", "const", "continue", "debugger",
+    "default", "delete", "do", "else", "export", "extends", "false", "finally", "for", "from",
+    "function", "if", "import", "in", "instanceof", "let", "new", "null", "of", "return", "static",
+    "super", "switch", "this", "throw", "true", "try", "typeof", "undefined", "var", "void",
+    "while", "with", "yield",
+    "console", "window", "document", "process", "module", "require", "exports", "globalThis",
+    "Promise", "JSON", "Math", "Object", "Array", "Map", "Set", "WeakMap", "WeakSet", "Symbol",
+    "Number", "String", "Boolean", "BigInt", "Date", "RegExp", "Error", "TypeError", "RangeError",
+    "setTimeout", "clearTimeout", "setInterval", "clearInterval", "queueMicrotask",
+    "structuredClone", "fetch", "URL", "TextEncoder", "TextDecoder", "Buffer", "parseInt",
+    "parseFloat", "isNaN", "addEventListener", "querySelector", "forEach", "constructor",
+    "prototype", "toString",
+    "interface", "type", "enum", "namespace", "declare", "abstract", "implements", "readonly",
+    "keyof", "infer", "satisfies", "as", "public", "private", "protected", "override",
+    "string", "number", "boolean", "any", "unknown", "never", "object", "bigint", "symbol",
+    "Record", "Partial", "Required", "Readonly", "Pick", "Omit", "Exclude", "Extract",
+    "NonNullable", "ReturnType", "Parameters", "Awaited", "ReadonlyArray",
+]
+
+[outline]
+items = { function = "function", class = "class", interface = "class", type = "class", enum = "class", namespace = "class" }
+modifiers = ["export", "default", "async", "declare", "abstract"]
+
+[variables]
+ident = '[A-Za-z_${{nonascii}}][A-Za-z0-9_${{nonascii}}]*'
+idrest = '[A-Za-z0-9_${{nonascii}}]'
+notid = '[^A-Za-z0-9_${{nonascii}}]'
+
+[words]
+keyword = [
+    "const", "let", "var", "function", "class", "extends", "new", "typeof", "instanceof",
+    "delete", "in", "of", "static", "async",
+    "interface", "enum", "namespace", "declare", "abstract", "implements", "readonly", "keyof",
+    "infer", "satisfies", "public", "private", "protected", "override",
+]
+control = [
+    "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue",
+    "return", "throw", "try", "catch", "finally", "import", "export", "from", "as", "await",
+    "yield", "with", "debugger",
+]
+constant = ["true", "false", "null", "undefined", "NaN", "Infinity", "this", "super"]
+variable = [
+    "console", "window", "document", "process", "module", "require", "exports", "globalThis",
+    "arguments", "__dirname", "__filename",
+]
+# プリミティブの型（`void` は式の `void 0` でも型の色）
+type = ["string", "number", "boolean", "any", "unknown", "never", "object", "bigint", "symbol", "void"]
+
+# function の後ろは関数名、class の後ろはクラス名、new の後ろは型名。
+# 正規表現が書ける位置（return など）の後ろは rx
+[word_push]
+function = "funcname"
+class = "classname"
+interface = "classname"
+enum = "classname"
+namespace = "classname"
+new = "newname"
+return = "rx"
+typeof = "rx"
+case = "rx"
+in = "rx"
+delete = "rx"
+void = "rx"
+throw = "rx"
+yield = "rx"
+else = "rx"
+do = "rx"
+instanceof = "rx"
+
+[default_token]
+sq = "string"
+dq = "string"
+tmpl = "string"
+block_comment = "comment"
+
+[[contexts.main]]
+# シバン
+match = '^#!.*'
+token = "comment"
+[[contexts.main]]
+include = "expr"
+
+# ---- 式（ほとんどの文脈がこれを取り込む） ----
+
+[[contexts.expr]]
+match = '//.*'
+token = "comment"
+[[contexts.expr]]
+match = '/\*'
+token = "comment"
+push = "block_comment"
+[[contexts.expr]]
+match = "'"
+token = "string"
+push = "sq"
+[[contexts.expr]]
+match = '"'
+token = "string"
+push = "dq"
+[[contexts.expr]]
+match = '`'
+token = "string"
+push = "tmpl"
+# プライベートフィールド #x
+[[contexts.expr]]
+match = '#{{ident}}'
+token = "variable"
+# デコレータ
+[[contexts.expr]]
+match = '@{{ident}}(?:\.{{ident}})*'
+token = "attribute"
+[[contexts.expr]]
+match = '\.\.\.'
+token = "punctuation"
+# `?.` と `.名前`: 名前は member で塗る（予約語も普通の名前として）
+[[contexts.expr]]
+match = '\?\.'
+token = "operator"
+push = "member"
+[[contexts.expr]]
+match = '\.'
+followed_by = '[ \t]*[A-Za-z_$#{{nonascii}}]'
+token = "punctuation"
+push = "member"
+# type 宣言（`type Foo =`）。それ以外の type は普通の名前
+[[contexts.expr]]
+match = 'type'
+followed_by = '[ \t]+[A-Z_$]'
+token = "keyword"
+push = "classname"
+# 識別子（予約語は [words] で引く）。後ろに `(` が続けば呼び出し。ジェネリクス `f<T>(` も
+[[contexts.expr]]
+match = '{{ident}}'
+followed_by = '[ \t]*<[A-Za-z0-9_$.,\[\]| \t<>]*>[ \t]*\('
+token = "function"
+words = true
+[[contexts.expr]]
+match = '{{ident}}'
+followed_by = '[ \t]*\('
+token = "function"
+words = true
+[[contexts.expr]]
+match = '[A-Z]'
+followed_by = '{{notid}}'
+token = "type"
+[[contexts.expr]]
+match = '[A-Z][A-Z0-9_$]*'
+followed_by = '{{notid}}'
+token = "constant"
+words = true
+[[contexts.expr]]
+match = '[A-Z]{{idrest}}*'
+token = "type"
+words = true
+[[contexts.expr]]
+match = '{{ident}}'
+token = "text"
+words = true
+# 数（0x1F・0b1・0o7・1_000n・1.5e-3 などをまとめて）
+[[contexts.expr]]
+match = '(?:[0-9]|\.[0-9])(?:[eE][+-]|[0-9A-Za-z_.])*'
+token = "number"
+[[contexts.expr]]
+match = '=>'
+token = "keyword"
+push = "rx"
+# 割り算（`/` は rx の文脈で正規表現として先に試されている）
+[[contexts.expr]]
+match = '/=?'
+token = "operator"
+push = "rx"
+[[contexts.expr]]
+match = '[-+*%&|^~<>!=?]+'
+token = "operator"
+push = "rx"
+[[contexts.expr]]
+match = '[(\[{},;:]'
+token = "punctuation"
+push = "rx"
+[[contexts.expr]]
+match = '[)\]}.]'
+token = "punctuation"
+[[contexts.expr]]
+match = '[ \t]+'
+token = "text"
+
+# ---- 正規表現リテラルが書ける位置（演算子・開き括弧・return などの直後） ----
+
+[[contexts.rx]]
+match = '[ \t]+'
+token = "text"
+[[contexts.rx]]
+match = '//.*'
+token = "comment"
+[[contexts.rx]]
+match = '/\*'
+token = "comment"
+push = "block_comment"
+[[contexts.rx]]
+match = '/(?:[^/\\\n\[]|\\.|\[(?:[^\]\\\n]|\\.)*\])+/[A-Za-z]*'
+token = "string"
+pop = true
+# 正規表現が書けなければ、何も食べずに抜けて普通に塗る
+[[contexts.rx]]
+match = ''
+pop = true
+
+# ---- 名前 ----
+
+[[contexts.member]]
+match = '[ \t]+'
+token = "text"
+[[contexts.member]]
+match = '#{{ident}}'
+token = "variable"
+pop = true
+[[contexts.member]]
+match = '{{ident}}'
+followed_by = '[ \t]*(?:<[A-Za-z0-9_$.,\[\]| \t<>]*>[ \t]*)?\('
+token = "function"
+pop = true
+[[contexts.member]]
+match = '[A-Z][A-Z0-9_$]*'
+followed_by = '{{notid}}'
+token = "constant"
+pop = true
+[[contexts.member]]
+match = '[A-Z]{{idrest}}*'
+token = "type"
+pop = true
+[[contexts.member]]
+match = '{{ident}}'
+token = "text"
+pop = true
+[[contexts.member]]
+match = ''
+pop = true
+
+[[contexts.funcname]]
+match = '[ \t]+'
+token = "text"
+[[contexts.funcname]]
+match = '\*'
+token = "operator"
+[[contexts.funcname]]
+match = '{{ident}}'
+token = "function"
+pop = true
+[[contexts.funcname]]
+match = ''
+pop = true
+
+[[contexts.classname]]
+match = '[ \t]+'
+token = "text"
+[[contexts.classname]]
+match = '{{ident}}'
+token = "type"
+pop = true
+[[contexts.classname]]
+match = ''
+pop = true
+
+[[contexts.newname]]
+match = '[ \t]+'
+token = "text"
+[[contexts.newname]]
+match = '{{ident}}'
+token = "type"
+pop = true
+[[contexts.newname]]
+match = ''
+pop = true
+
+# ---- コメント ----
+
+# /* … */（JSDoc の @tag だけ塗る）
+[[contexts.block_comment]]
+match = '\*/'
+pop = true
+[[contexts.block_comment]]
+match = '@[A-Za-z]+'
+token = "keyword"
+[[contexts.block_comment]]
+match = '[^*@\n]+|[*@]'
+
+# ---- 文字列 ----
+
+[[contexts.str_escape]]
+match = '''\\(?:x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|u\{[0-9a-fA-F]+\}|[0-7]{1,3}|.|\n)'''
+token = "escape"
+
+[[contexts.sq]]
+match = "'"
+pop = true
+[[contexts.sq]]
+match = '\n'
+pop = true
+[[contexts.sq]]
+match = '''[^'\\\n]+'''
+[[contexts.sq]]
+include = "str_escape"
+
+[[contexts.dq]]
+match = '"'
+pop = true
+[[contexts.dq]]
+match = '\n'
+pop = true
+[[contexts.dq]]
+match = '[^"\\\n]+'
+[[contexts.dq]]
+include = "str_escape"
+
+# テンプレートリテラル（複数行。`${` の中は式で、入れ子にできる）
+[[contexts.tmpl]]
+match = '`'
+pop = true
+[[contexts.tmpl]]
+match = '\$\{'
+token = "constant"
+push = ["tmpl_expr", "rx"]
+[[contexts.tmpl]]
+match = '[^`\\$]+|\$'
+[[contexts.tmpl]]
+include = "str_escape"
+
+[[contexts.tmpl_expr]]
+match = '\}'
+token = "constant"
+pop = true
+[[contexts.tmpl_expr]]
+match = '\{'
+token = "punctuation"
+push = ["brace_nest", "rx"]
+[[contexts.tmpl_expr]]
+include = "expr"
+
+[[contexts.brace_nest]]
+match = '\}'
+token = "punctuation"
+pop = true
+[[contexts.brace_nest]]
+match = '\{'
+token = "punctuation"
+push = ["brace_nest", "rx"]
+[[contexts.brace_nest]]
+include = "expr"

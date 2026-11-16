@@ -147,6 +147,20 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - Shell / C の `check`・`run`、Rust の `run` の書き方は実機で未確認（`bash -n` / `gcc` の
   出力の形、実機に gcc・rustc があるか）
 
+## TypeScript / JavaScript の方針（ユーザーが 2026-11-16 に決定）
+
+- 言語は `languages/javascript/`（js / mjs / cjs）と `languages/typescript/`（ts / mts / cts）。
+  JSX / TSX はタグの対応が書けないので対象外（限界は各 `language.toml` の先頭）
+- 型チェックは**公式の TypeScript 7（Go 版。npm `@typescript/typescript-linux-arm64`）の
+  `tsc`** を使う。tsc-rs は実機で 1.3〜2.2 倍速く軽かったが、`ulimit -v` が要る・終了コードが
+  違う・作者が読んでいない AI 移植、という理由で採らない（サプライチェーンの信頼と継続的な
+  更新を優先）。`tsc` が無い間は「構文チェックできない」と出る。実機にはまだ入れていない
+- 型チェックは必須。TS の F5 は `tsc` で型チェックして JS を出力し、それを実行する
+  （型を剥がすだけの esbuild は型チェックしないので使わない）。`run` は未設定（F5 の設計は後）
+- JS の実行系は Cortex-A53 向けにビルドした LLRT（`runtimes/llrt/`）
+- `--lib es2022,dom` は実機の Go 版 tsc で約 3.8 秒・約 91MB（実測）。LLRT のグローバルだけの
+  小さな ambient `.d.ts` にすれば減らせる。ランタイムを入れるときに見直す
+
 ## 次にやること
 
 - 段階 2 を実機の「zcode (dev)」で確かめる（`dev/README.md`）: Python を開いて編集・保存、
