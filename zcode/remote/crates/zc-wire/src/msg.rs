@@ -274,9 +274,34 @@ pub fn encode<T: Serialize>(msg: &T) -> String {
 }
 
 /// JSON から読む。知らない `type` は `Ok(None)`（無視する）。
+///
+/// 知っている `type` で項目が足りない・型が違うものは `Err`（約束の間違い）。オブジェクトで
+/// ない・`type` が無い・`type` が文字列でないものも `Err`。知らない項目は無視する。
+///
+/// 見分け方: まず `T` として読む。失敗したら、`type` だけのオブジェクト `{"type": …}` を
+/// `T` として読み直し、それが「知らない種類」で落ちるなら知らない `type` とみなす
+/// （中の項目の知らない値、たとえば `"kind":"deploy"` と取り違えない）。
 pub fn decode<'a, T: Deserialize<'a>>(text: &'a str) -> Result<Option<T>, serde_json::Error> {
-    let _ = text;
-    todo!("W2: 知らない type を見分けて None にする")
+    let err = match serde_json::from_str::<T>(text) {
+        Ok(v) => return Ok(Some(v)),
+        Err(e) => e,
+    };
+    if !err.is_data() {
+        // 構文の誤り・途中で切れた JSON
+        return Err(err);
+    }
+    let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Err(err);
+    };
+    let Some(serde_json::Value::String(ty)) = obj.get("type") else {
+        return Err(err);
+    };
+    let mut probe = serde_json::Map::new();
+    probe.insert("type".into(), serde_json::Value::String(ty.clone()));
+    match T::deserialize(serde_json::Value::Object(probe)) {
+        Err(e) if e.to_string().starts_with("unknown variant") => Ok(None),
+        _ => Err(err),
+    }
 }
 
 /// バイナリフレームの種類。
@@ -311,13 +336,31 @@ impl BinHeader {
     pub const LEN: usize = 16;
 
     pub fn encode(&self) -> [u8; Self::LEN] {
-        todo!("W2")
+        let mut b = [0u8; Self::LEN];
+        b[0] = self.kind as u8;
+        b[1] = self.last as u8;
+        b[4..8].copy_from_slice(&self.id.to_le_bytes());
+        b[8..16].copy_from_slice(&self.offset.to_le_bytes());
+        b
     }
 
-    /// フレームを頭と中身に分ける。短い・知らない種類は `None`。
+    /// フレームを頭と中身に分ける。短い・知らない種類・中身が
+    /// [`crate::limits::CHUNK_BYTES`] を超えるものは `None`。
+    ///
+    /// `flags` の bit0 以外と `reserved` は見ない（版を上げずに足せるように）。
     pub fn split(frame: &[u8]) -> Option<(BinHeader, &[u8])> {
-        let _ = frame;
-        todo!("W2")
+        if frame.len() < Self::LEN || frame.len() - Self::LEN > crate::limits::CHUNK_BYTES {
+            return None;
+        }
+        let kind = match frame[0] {
+            1 => BinKind::Blob,
+            2 => BinKind::Artifact,
+            _ => return None,
+        };
+        let last = frame[1] & 1 != 0;
+        let id = u32::from_le_bytes(frame[4..8].try_into().unwrap());
+        let offset = u64::from_le_bytes(frame[8..16].try_into().unwrap());
+        Some((BinHeader { kind, last, id, offset }, &frame[Self::LEN..]))
     }
 }
 
@@ -347,7 +390,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "W2"]
     fn unknown_type_is_ignored_and_bin_header_round_trips() {
         assert_eq!(decode::<ServerMsg>(r#"{"type":"future_thing","x":1}"#).unwrap(), None);
         assert!(decode::<ServerMsg>(r#"{"type":"ready","tree":"t","extra":1}"#).unwrap().is_some());
@@ -358,5 +400,250 @@ mod tests {
         frame.extend_from_slice(b"xyz");
         assert_eq!(BinHeader::split(&frame), Some((h, &b"xyz"[..])));
         assert_eq!(BinHeader::split(&frame[..10]), None);
+    }
+
+    /// 文字列 → 型 → 文字列が元に戻る（正解の JSON と 1 文字も違わない）。
+    fn same_both_ways<T: Serialize + for<'a> Deserialize<'a> + PartialEq + core::fmt::Debug>(json: &str, msg: T) {
+        assert_eq!(encode(&msg), json);
+        assert_eq!(decode::<T>(json).unwrap(), Some(msg));
+    }
+
+    /// docs/stage3-design.md §5.4 の例（「…」は具体的な値に置き換えた）。
+    #[test]
+    fn design_doc_example_session() {
+        let (p, t, j) = ("3f9a000000000000", "b1c2".repeat(16), "7f3a".repeat(8));
+        let h = |c: &str| c.repeat(64);
+        same_both_ways(r#"{"type":"hello","v":1,"client":"zc-remote/0.1.0"}"#, ClientMsg::Hello { v: 1, client: "zc-remote/0.1.0".into() });
+        same_both_ways(r#"{"type":"hello","v":1,"server":"zc-buildd/0.1.0"}"#, ServerMsg::Hello { v: 1, server: "zc-buildd/0.1.0".into() });
+        same_both_ways(
+            &format!(r#"{{"type":"manifest","project":"{p}","tree":"{t}","files":[{{"p":"Cargo.toml","s":120,"h":"{}"}},{{"p":"src/main.rs","s":812,"h":"{}","x":true}}]}}"#, h("1"), h("2")),
+            ClientMsg::Manifest {
+                project: p.into(),
+                tree: t.clone(),
+                files: vec![
+                    FileEntry { path: "Cargo.toml".into(), size: 120, sha256: h("1"), exec: false },
+                    FileEntry { path: "src/main.rs".into(), size: 812, sha256: h("2"), exec: true },
+                ],
+            },
+        );
+        same_both_ways(&format!(r#"{{"type":"need","tree":"{t}","blobs":["{}"]}}"#, h("9")), ServerMsg::Need { tree: t.clone(), blobs: vec![h("9")] });
+        same_both_ways(&format!(r#"{{"type":"ready","tree":"{t}"}}"#), ServerMsg::Ready { tree: t.clone() });
+        same_both_ways(
+            &format!(r#"{{"type":"job","job":"{j}","project":"{p}","tree":"{t}","kind":"build","lang":"rust","opts":{{}},"log":true}}"#),
+            ClientMsg::Job { job: j.clone(), project: p.into(), tree: t.clone(), kind: Kind::Build, lang: Lang::Rust, opts: JobOpts::default(), log: true },
+        );
+        same_both_ways(&format!(r#"{{"type":"accepted","job":"{j}","cached":false,"queued":0}}"#), ServerMsg::Accepted { job: j.clone(), cached: false, queued: 0 });
+        same_both_ways(&format!(r#"{{"type":"started","job":"{j}"}}"#), ServerMsg::Started { job: j.clone() });
+        same_both_ways(
+            &format!(r#"{{"type":"log","job":"{j}","offset":0,"text":"   Compiling foo v0.1.0\n"}}"#),
+            ServerMsg::Log { job: j.clone(), offset: 0, text: "   Compiling foo v0.1.0\n".into() },
+        );
+        same_both_ways(
+            &format!(r#"{{"type":"diagnostics","job":"{j}","complete":true,"truncated":false,"files":[]}}"#),
+            ServerMsg::Diagnostics { job: j.clone(), complete: true, truncated: false, files: vec![] },
+        );
+        same_both_ways(
+            &format!(r#"{{"type":"artifact","job":"{j}","chan":1,"kind":"exe","name":"foo","sha256":"{}","bytes":912384,"zbytes":301220,"offset":0}}"#, h("a")),
+            ServerMsg::Artifact { job: j.clone(), chan: 1, kind: ArtifactKind::Exe, name: "foo".into(), sha256: h("a"), bytes: 912384, zbytes: 301220, offset: 0 },
+        );
+        same_both_ways(
+            &format!(r#"{{"type":"done","job":"{j}","status":"ok","exit":0,"queue_ms":3,"run_ms":4210}}"#),
+            ServerMsg::Done { job: j.clone(), status: Status::Ok, exit: 0, queue_ms: 3, run_ms: 4210 },
+        );
+    }
+
+    #[test]
+    fn the_other_messages() {
+        same_both_ways(r#"{"type":"attach","job":"j","log":4096,"artifact":65536}"#, ClientMsg::Attach { job: "j".into(), log: 4096, artifact: 65536 });
+        same_both_ways(r#"{"type":"cancel","job":"j"}"#, ClientMsg::Cancel { job: "j".into() });
+        same_both_ways(
+            r#"{"type":"job","job":"j","project":"p","tree":"t","kind":"test","lang":"node","opts":{"release":true,"entry":"src/a.ts","filter":"x"},"log":true}"#,
+            ClientMsg::Job {
+                job: "j".into(),
+                project: "p".into(),
+                tree: "t".into(),
+                kind: Kind::Test,
+                lang: Lang::Node,
+                opts: JobOpts { release: true, entry: Some("src/a.ts".into()), filter: Some("x".into()) },
+                log: true,
+            },
+        );
+        same_both_ways(
+            r#"{"type":"tests","job":"j","passed":1,"failed":1,"ignored":0,"cases":[{"name":"a","passed":true},{"name":"b","passed":false,"path":"src/lib.rs","line":3,"message":"assert"}]}"#,
+            ServerMsg::Tests {
+                job: "j".into(),
+                passed: 1,
+                failed: 1,
+                ignored: 0,
+                cases: vec![
+                    TestCase { name: "a".into(), passed: true, path: None, line: None, message: String::new() },
+                    TestCase { name: "b".into(), passed: false, path: Some("src/lib.rs".into()), line: Some(3), message: "assert".into() },
+                ],
+            },
+        );
+        same_both_ways(
+            r##"{"type":"file","job":"j","path":"Cargo.lock","sha256":"00","text":"# lock\n"}"##,
+            ServerMsg::File { job: "j".into(), path: "Cargo.lock".into(), sha256: "00".into(), text: "# lock\n".into() },
+        );
+        same_both_ways(
+            r#"{"type":"error","job":"j","code":"limit","message":"1 日の上限","retry_after_s":60}"#,
+            ServerMsg::Error { job: Some("j".into()), code: ErrorCode::Limit, message: "1 日の上限".into(), retry_after_s: Some(60) },
+        );
+        same_both_ways(
+            r#"{"type":"diagnostics","job":"j","complete":false,"truncated":true,"files":[{"path":"","diags":[{"line":0,"col":2,"end":[0,5],"severity":"warning","message":"m"}]}]}"#,
+            ServerMsg::Diagnostics {
+                job: "j".into(),
+                complete: false,
+                truncated: true,
+                files: vec![FileDiags { path: String::new(), diags: vec![Diag { line: 0, col: Some(2), end: Some((0, 5)), severity: Severity::Warning, code: None, message: "m".into() }] }],
+            },
+        );
+        for (s, c) in [
+            ("version", ErrorCode::Version),
+            ("protocol", ErrorCode::Protocol),
+            ("too-large", ErrorCode::TooLarge),
+            ("unknown-job", ErrorCode::UnknownJob),
+            ("bad-tree", ErrorCode::BadTree),
+            ("bad-blob", ErrorCode::BadBlob),
+            ("unavailable", ErrorCode::Unavailable),
+            ("internal", ErrorCode::Internal),
+        ] {
+            same_both_ways(&format!(r#"{{"type":"error","code":"{s}","message":""}}"#), ServerMsg::Error { job: None, code: c, message: String::new(), retry_after_s: None });
+        }
+        for (s, st) in [("failed", Status::Failed), ("cancelled", Status::Cancelled), ("timeout", Status::Timeout), ("lost", Status::Lost), ("error", Status::Error)] {
+            same_both_ways(&format!(r#"{{"type":"done","job":"j","status":"{s}","exit":1,"queue_ms":0,"run_ms":0}}"#), ServerMsg::Done { job: "j".into(), status: st, exit: 1, queue_ms: 0, run_ms: 0 });
+        }
+    }
+
+    #[test]
+    fn defaults_and_extra_fields() {
+        // 省いてよい項目
+        assert_eq!(
+            decode::<ClientMsg>(r#"{"type":"job","job":"j","project":"p","tree":"t","kind":"check","lang":"c"}"#).unwrap(),
+            Some(ClientMsg::Job { job: "j".into(), project: "p".into(), tree: "t".into(), kind: Kind::Check, lang: Lang::C, opts: JobOpts::default(), log: false })
+        );
+        assert_eq!(decode::<ClientMsg>(r#"{"type":"attach","job":"j"}"#).unwrap(), Some(ClientMsg::Attach { job: "j".into(), log: 0, artifact: 0 }));
+        assert_eq!(
+            decode::<ServerMsg>(r#"{"type":"done","job":"j","status":"cancelled"}"#).unwrap(),
+            Some(ServerMsg::Done { job: "j".into(), status: Status::Cancelled, exit: 0, queue_ms: 0, run_ms: 0 })
+        );
+        // 知らない項目は、どの深さでも無視する
+        assert_eq!(
+            decode::<ClientMsg>(r#"{"later":[1,{"a":null}],"type":"manifest","project":"p","tree":"t","files":[{"p":"a","s":1,"h":"00","mode":420}]}"#).unwrap(),
+            Some(ClientMsg::Manifest { project: "p".into(), tree: "t".into(), files: vec![FileEntry { path: "a".into(), size: 1, sha256: "00".into(), exec: false }] })
+        );
+        assert!(decode::<ClientMsg>(r#"{"type":"job","job":"j","project":"p","tree":"t","kind":"build","lang":"rust","opts":{"future":true}}"#)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn unknown_types_per_direction() {
+        // 向きが逆のメッセージは、その向きでは知らない type
+        assert_eq!(decode::<ClientMsg>(r#"{"type":"need","tree":"t","blobs":[]}"#).unwrap(), None);
+        assert_eq!(decode::<ServerMsg>(r#"{"type":"cancel","job":"j"}"#).unwrap(), None);
+        // 大文字小文字は区別する
+        assert_eq!(decode::<ServerMsg>(r#"{"type":"Ready","tree":"t"}"#).unwrap(), None);
+        // 知らない type なら、ほかの項目が何であっても無視する
+        assert_eq!(decode::<ServerMsg>(r#"{"type":"x","tree":5,"job":[]}"#).unwrap(), None);
+        assert_eq!(decode::<ServerMsg>(r#"{"type":""}"#).unwrap(), None);
+    }
+
+    #[test]
+    fn broken_messages_are_errors() {
+        for bad in [
+            "",
+            "{",
+            r#"{"type":"ready","tree":"t""#,
+            "[]",
+            "null",
+            r#""ready""#,
+            r#"{"tree":"t"}"#,
+            r#"{"type":5}"#,
+            r#"{"type":null}"#,
+            // 知っている type で項目が足りない・型が違う
+            r#"{"type":"ready"}"#,
+            r#"{"type":"ready","tree":5}"#,
+            r#"{"type":"done","job":"j","status":"exploded"}"#,
+            r#"{"type":"error","code":"nope","message":""}"#,
+            // 中の項目の知らない値（type と同じ綴りでも、知らない type と取り違えない）
+            r#"{"type":"job","job":"j","project":"p","tree":"t","kind":"job","lang":"rust"}"#,
+            r#"{"type":"job","job":"j","project":"p","tree":"t","kind":"deploy","lang":"rust"}"#,
+            r#"{"type":"job","job":"j","project":"p","tree":"t","kind":"build","lang":"go"}"#,
+            // 数の範囲
+            r#"{"type":"attach","job":"j","log":-1}"#,
+            r#"{"type":"hello","v":4294967296,"client":"c"}"#,
+            r#"{"type":"hello","v":"1","client":"c"}"#,
+            // 後ろのごみ
+            r#"{"type":"cancel","job":"j"} x"#,
+        ] {
+            // 向きが違えば「知らない type」で None になりうるので、少なくとも片方で Err
+            assert!(decode::<ClientMsg>(bad).is_err() || decode::<ServerMsg>(bad).is_err(), "{bad:?}");
+        }
+        // 向きを決めて確かめる
+        assert!(decode::<ServerMsg>(r#"{"type":"ready"}"#).is_err());
+        assert!(decode::<ClientMsg>(r#"{"type":"job","job":"j","project":"p","tree":"t","kind":"job","lang":"rust"}"#).is_err());
+        assert!(decode::<ClientMsg>(r#"{"type":5}"#).is_err());
+    }
+
+    /// 版が違う hello も読める（断るのは受ける側の仕事: `error {code:"version"}`）。
+    #[test]
+    fn version_mismatch_is_visible_to_the_caller() {
+        let m = decode::<ClientMsg>(r#"{"type":"hello","v":2,"client":"zc-remote/9.0.0","caps":["zstd"]}"#).unwrap();
+        assert_eq!(m, Some(ClientMsg::Hello { v: 2, client: "zc-remote/9.0.0".into() }));
+        assert!(matches!(m, Some(ClientMsg::Hello { v, .. }) if v != crate::PROTOCOL_VERSION));
+        same_both_ways(
+            r#"{"type":"error","code":"version","message":"v2 は知らない"}"#,
+            ServerMsg::Error { job: None, code: ErrorCode::Version, message: "v2 は知らない".into(), retry_after_s: None },
+        );
+    }
+
+    #[test]
+    fn json_escapes_survive() {
+        let text = "a\"b\\c\n\t\u{1}日本語\u{1F600}";
+        let m = ServerMsg::Log { job: "j".into(), offset: 7, text: text.into() };
+        let s = encode(&m);
+        assert!(!s.contains('\n'));
+        assert_eq!(decode::<ServerMsg>(&s).unwrap(), Some(m));
+        // \u の書き方で来ても同じ
+        assert_eq!(
+            decode::<ServerMsg>(r#"{"type":"ready","tree":"t"}"#).unwrap(),
+            Some(ServerMsg::Ready { tree: "t".into() })
+        );
+        assert_eq!(
+            decode::<ServerMsg>(r#"{"type":"ready","tree":"t"}"#).unwrap(),
+            Some(ServerMsg::Ready { tree: "t".into() })
+        );
+    }
+
+    #[test]
+    fn bin_header_edges() {
+        let h = BinHeader { kind: BinKind::Blob, last: false, id: u32::MAX, offset: u64::MAX };
+        assert_eq!(h.encode(), [1, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(BinHeader::split(&h.encode()), Some((h, &[][..])));
+        // 頭だけちょうど・1 バイト足りない
+        assert!(BinHeader::split(&[1; 16]).is_some());
+        assert_eq!(BinHeader::split(&[1; 15]), None);
+        assert_eq!(BinHeader::split(&[]), None);
+        // 知らない種類
+        for k in [0u8, 3, 255] {
+            let mut f = h.encode();
+            f[0] = k;
+            assert_eq!(BinHeader::split(&f), None, "{k}");
+        }
+        // flags の bit0 以外と reserved は見ない
+        let mut f = h.encode();
+        f[1] = 0xfe;
+        f[2] = 9;
+        f[3] = 9;
+        assert_eq!(BinHeader::split(&f).unwrap().0, h);
+        f[1] = 0x03;
+        assert!(BinHeader::split(&f).unwrap().0.last);
+        // 中身の上限
+        let mut f = h.encode().to_vec();
+        f.resize(BinHeader::LEN + crate::limits::CHUNK_BYTES, 0);
+        assert_eq!(BinHeader::split(&f).unwrap().1.len(), crate::limits::CHUNK_BYTES);
+        f.push(0);
+        assert_eq!(BinHeader::split(&f), None);
     }
 }
