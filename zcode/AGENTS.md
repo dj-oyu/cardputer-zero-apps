@@ -13,7 +13,7 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 | `docs/ui-mock.html` | 画面のモック（320×170 実寸を拡大表示）。画面 1〜11 とショートカットの全項目 |
 | `docs/setup-remote-build.md` | **人向け**の導入手順: Cloudflare（プラン・Zero Trust・サービストークン・Access・deploy・秘密の値）、Tailscale と PC（ACL・ファイアウォール）、実機ごとの設定、トークンを失くしたとき |
 | `docs/remote-build.html` | 外でビルド・試験・型検査する仕組みの設計（Cloudflare Containers / PC、認証、送る形・返す形、実機側の別プロセス `zc-remote`）。却下した案の理由つき。未実装。ユーザーの決定（2026-11-16）: Cloudflare が前提、`zc-remote` の TLS の暗号は ring（「pure Rust だけ」の例外。zcode 本体には入れない）、最後に成功した実行ファイルをプロジェクトごとに 1 つ SD（`~/.cache/zcode/bin/`）に残す（「再計算できるキャッシュは SD に書かない」の例外。オフラインでは作り直せないため） |
-| `docs/stage3-design.md` | 段階 3 の残りの設計: 外部ビルド（受付 `zc-buildd`・実機側 `zc-remote`・Cloudflare の Worker / DO / コンテナ・約束）、zcode へのつなぎ込み、診断の持ち方、JS / TS の F5、人がやる準備、**課題の表（持ち物・順番・担当）**。課題は D5・C3・C4 以外実装済み（2026-11-17）。`remote-build.html` と食い違うところはこちらが優先 |
+| `docs/stage3-design.md` | 段階 3 の残りの設計: 外部ビルド（受付 `zc-buildd`・実機側 `zc-remote`・Cloudflare の Worker / DO / コンテナ・約束）、zcode へのつなぎ込み、診断の持ち方、JS / TS の F5、人がやる準備、**課題の表（持ち物・順番・担当）**。課題は C4（スナップショット。最初の deploy の後）以外実装済み（2026-11-17）。`remote-build.html` と食い違うところはこちらが優先 |
 | `bench/` | 実測に使ったベンチマーク（`bench/README.md`）。測り直すときはこれを使う |
 
 ## 守ること（設計の要点）
@@ -211,7 +211,7 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - zcode 本体に足したのは、診断の型（`zc_core::diag`。`zc-intel` からも同じ名前）、診断の置き場
   （`zc_intel::DiagStore`・`ShiftLog`）、UNIX ソケットの約束（`zc-remote-ipc`）、専用スレッドの
   口（`zcode/src/remote.rs`）、`AppEvent::Remote`、`check` ワーカー、`language.toml` の `remote`。
-  2026-11-17 時点で W1・W2・B1〜B4・D1〜D4・I1・Z1〜Z3・C1・C2・H1・R1・M1 は実装済み・統合済み
+  2026-11-17 時点で C4 以外の課題（W1・W2・B1〜B4・D1〜D5・I1・Z1〜Z3・C1〜C3・H1・R1・M1）は実装済み・統合済み
   （`zcode-stage3-remote`）。zcode 側は `DiagStore`（ソースごとの置き換え・遅れた結果のずらし）、
   保存時のビルド係の check、F6（Fn+6）の「試験を実行」（モック 15）、起動時に `~/.local/bin` を PATH の先頭へ
 - **雛形の公開の形（型・関数の名前と引数）は、課題の担当が勝手に変えない。** 課題は
@@ -276,3 +276,17 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - 段階 3 を実機の「zcode (dev)」で確かめる: F5・Ctrl+C・F12・F11、端末の出力が流れている間の
   打鍵の遅延、APPLaunch から起動したときのロケール（端末の日本語の折り返し）
 - ハイライトの実機の計測は済み（`docs/measurements.md` §6）
+
+## 段階 3 の `zc-remote`（D5）で分かったこと（2026-11-17）
+
+- 端から端までの試験（本物の `zc-buildd` をループバックに立て、Rust / C を作って受け取る、日本語の行の
+  型エラーの桁、途中で切れても attach で続く）は `zstd` が要る。開発コンテナ（`cz-dev`）には無いので、
+  ビルド係のイメージで回す: `zcode` で
+  `wslc run --rm -v "${PWD}:/src" -w /src/remote --entrypoint bash cz-builder:latest -c 'CARGO_TARGET_DIR=/tmp/t ZC_E2E_REQUIRE=1 cargo test --locked --workspace'`
+  （`ZC_E2E_REQUIRE=1` だと、道具が無いときに飛ばさず落ちる）
+- `zc-remote run` は `execv` で実行ファイルに置き換わる（std の exec は ENOEXEC で `/bin/sh` に
+  落ちるので使わない）。実行できなければ 126
+- `zc-remote` の版は 0.1.0 のまま中身が変わるので、`runtimes.lock` の SHA-256 は作り直すたびに
+  書き換える。インストーラが「同じ版は入れ直さない」で古いものを残さないか、実機で確かめる
+- 実行ファイル 1.77MB（aarch64）、待機中の RSS は x86-64 で約 3MB（実機は未計測）
+
