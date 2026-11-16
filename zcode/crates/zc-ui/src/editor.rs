@@ -12,6 +12,11 @@
 //! - 縦スクロールは `Canvas::scroll_rows`（memmove）でずらし、新しく見えた行だけ描く
 //!   （§5.3）。返す `Damage` は、カーソル行が [`Priority::Cursor`]、ほかの描き直した行が
 //!   [`Priority::Edit`]、スクロールしたときは領域全体（§5.2）
+//! - 日本語入力の未確定文字列（[`PreeditView`]。SKK の ▽ / ▼）は、文書には入れずに、
+//!   カーソル行の **カーソルの桁に挟んだ文字列** を [`LineLayouter`] に渡して組む
+//!   （全角の字幅・横スクロール・折り返しがそのまま効く）。色と下線は描くときに重ねる。
+//!   外から見える桁（[`EditorView::point_of`]・[`EditorView::pos_at`]・選択・波線）は
+//!   いつも文書の桁で、表示上の桁との行き来はビューの中で済ませる
 
 use crate::textlayout::{LineInput, LineLayout, LineLayouter};
 use crate::RenderCx;
@@ -48,6 +53,151 @@ pub struct LineMark {
     /// 桁の範囲。`None` なら行の文字全体。
     pub cols: Option<core::ops::Range<u32>>,
     pub color: Color,
+}
+
+/// 未確定文字列の区間の見た目（モック 7・8）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PreeditStyle {
+    /// 読みを入力中（▽）: 白い字に白い下線。背景は行のまま。
+    Reading,
+    /// 変換中（▼）: 選択と同じ青の背景、白い字に白い下線。
+    Converting,
+    /// 打ちかけのローマ字など、まだ決まっていない部分: 薄い字に薄い下線。
+    Pending,
+}
+
+impl PreeditStyle {
+    /// `(字の色, 背景, 下線の色)`。背景が `None` なら行の背景のまま。
+    fn colors(self) -> (Color, Option<Color>, Color) {
+        match self {
+            PreeditStyle::Reading => (Color::WHITE, None, Color::WHITE),
+            PreeditStyle::Converting => (Color::WHITE, Some(palette::SELECTION), Color::WHITE),
+            PreeditStyle::Pending => (palette::DIM, None, palette::DIM),
+        }
+    }
+}
+
+/// 未確定文字列の、同じ見た目が続く区間。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreeditSeg {
+    pub text: String,
+    pub style: PreeditStyle,
+}
+
+/// カーソルの位置に挟んで見せる未確定文字列（日本語入力の ▽ 読み / ▼ 候補）。
+///
+/// 文書には入らない。`▽` / `▼` の印も含めて、**見せる文字列そのもの**を渡す
+/// （ビューは印を足さない）。区間ごとに見た目を変えられる
+/// （例: `▽てんめ` は [`PreeditStyle::Reading`]、打ちかけの `t` は [`PreeditStyle::Pending`]）。
+/// 改行・タブなどの制御文字は入れない前提（入っていたら空白に置き換える）。
+///
+/// ```
+/// use zc_ui::{PreeditStyle, PreeditView};
+/// let reading = PreeditView::reading("▽てんめ").with(PreeditStyle::Pending, "t");
+/// let converting = PreeditView::converting("▼点滅");
+/// assert_eq!(reading.len_chars(), 5);
+/// assert_eq!(converting.text(), "▼点滅");
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PreeditView {
+    segs: Vec<PreeditSeg>,
+}
+
+impl PreeditView {
+    /// 空（何も見せない）。[`PreeditView::with`] で区間を足す。
+    pub fn new() -> PreeditView {
+        PreeditView::default()
+    }
+    /// 読みを入力中（▽）の 1 区間。
+    pub fn reading(text: impl Into<String>) -> PreeditView {
+        PreeditView::new().with(PreeditStyle::Reading, text)
+    }
+    /// 変換中（▼）の 1 区間。
+    pub fn converting(text: impl Into<String>) -> PreeditView {
+        PreeditView::new().with(PreeditStyle::Converting, text)
+    }
+    /// 区間を後ろに足す（空の文字列は足さない）。
+    pub fn with(mut self, style: PreeditStyle, text: impl Into<String>) -> PreeditView {
+        let mut text: String = text.into();
+        if text.chars().any(char::is_control) {
+            text = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        }
+        if !text.is_empty() {
+            self.segs.push(PreeditSeg { text, style });
+        }
+        self
+    }
+    /// 区間の並び。
+    pub fn segs(&self) -> &[PreeditSeg] {
+        &self.segs
+    }
+    /// 見せる文字が無いか。
+    pub fn is_empty(&self) -> bool {
+        self.segs.is_empty()
+    }
+    /// 文字数。
+    pub fn len_chars(&self) -> u32 {
+        self.segs.iter().map(|s| s.text.chars().count() as u32).sum()
+    }
+    /// 全部の区間をつないだ文字列。
+    pub fn text(&self) -> String {
+        self.segs.iter().map(|s| s.text.as_str()).collect()
+    }
+}
+
+/// いま挟んでいる未確定文字列（描くときの形）。
+#[derive(Default)]
+struct Pre {
+    view: PreeditView,
+    /// 全部の区間をつないだ文字列。
+    text: String,
+    /// 文字数。0 なら未確定文字列なし。
+    n: u32,
+    /// 区間ごとの、未確定文字列の先頭からの文字位置と見た目。
+    segs: Vec<PreSeg>,
+}
+
+/// 未確定文字列の区間: 先頭からの文字位置と見た目。
+type PreSeg = (core::ops::Range<u32>, PreeditStyle);
+
+/// 行の文字列 `text` の桁 `col`（行末より後ろなら行末）に `pre` を挟み、トークンの
+/// 位置をそれに合わせてずらす（挟んだ所にまたがるトークンは 2 つに分ける。挟んだ
+/// 文字列にはトークンを付けない）。挟んだ桁を返す。
+fn splice_preedit(text: &mut String, spans: &mut Vec<Span>, col: u32, pre: &str) -> u32 {
+    let (mut at, mut b) = (0u32, text.len());
+    for (i, (bi, _)) in text.char_indices().enumerate() {
+        if i as u32 == col {
+            b = bi;
+            break;
+        }
+        at = i as u32 + 1;
+    }
+    text.insert_str(b, pre);
+    let (b, len) = (b as u32, pre.len() as u32);
+    let mut i = 0;
+    while i < spans.len() {
+        let s = spans[i];
+        if s.start >= b {
+            spans[i].start = s.start.saturating_add(len);
+            spans[i].end = s.end.saturating_add(len);
+        } else if s.end > b {
+            spans[i].end = b;
+            i += 1;
+            spans.insert(i, Span { start: b + len, end: s.end.saturating_add(len), kind: s.kind });
+        }
+        i += 1;
+    }
+    at
+}
+
+/// 未確定文字列を挟んだ行の、文書の桁 → 表示上の桁。`at` は挟んだ桁、`n` は挟んだ
+/// 文字数。`at` ちょうどの桁は、`after` なら未確定文字列の後ろ、そうでなければ前。
+fn to_display(col: u32, at: u32, n: u32, after: bool) -> u32 {
+    if col > at || (after && col == at) {
+        col.saturating_add(n)
+    } else {
+        col
+    }
 }
 
 /// 表示位置。いちばん上に見えている論理行と、その行の中で上に隠れている画素数。
@@ -204,6 +354,9 @@ pub struct EditorView {
     gutter_font: TextStyle,
     pool: Vec<LineLayout>,
     marks: Vec<LineMark>,
+    pre: Pre,
+    /// 直前の `render` で未確定文字列を挟んだ所 `(論理行, 桁, 文字数)`。
+    pre_shown: Option<(u32, u32, u32)>,
     text: String,
     spans: Vec<Span>,
     plans: Vec<(Painted, Plan)>,
@@ -231,6 +384,8 @@ impl EditorView {
             gutter_font: TextStyle::mono(crate::layout::CODE_PX),
             pool: Vec::new(),
             marks: Vec::new(),
+            pre: Pre::default(),
+            pre_shown: None,
             text: String::new(),
             spans: Vec::new(),
             plans: Vec::new(),
@@ -343,6 +498,44 @@ impl EditorView {
             self.all_dirty = true;
         }
     }
+    /// カーソルの位置に挟んで見せる未確定文字列を置く（`None` か空なら消す）。
+    ///
+    /// 文書は変えない。カーソル行の、カーソルの桁に挟んで組み直すので、行の残りは
+    /// 右へずれ、カーソルは未確定文字列の **後ろ** に出る。描き直すのはカーソル行だけ
+    /// （中身が前と同じなら何もしない）。次の `render` で、カーソルが見える位置まで
+    /// スクロールする。カーソルが動けば、未確定文字列も新しいカーソルの位置に付いていく。
+    pub fn set_preedit(&mut self, preedit: Option<PreeditView>) {
+        let view = preedit.unwrap_or_default();
+        if view == self.pre.view {
+            return;
+        }
+        let pre = &mut self.pre;
+        pre.text.clear();
+        pre.segs.clear();
+        pre.n = 0;
+        for s in view.segs() {
+            let n = s.text.chars().count() as u32;
+            pre.text.push_str(&s.text);
+            pre.segs.push((pre.n..pre.n + n, s.style));
+            pre.n += n;
+        }
+        pre.view = view;
+        self.mark(self.head.line, self.head.line);
+        self.reveal = true;
+    }
+    /// いま置いてある未確定文字列（無ければ `None`）。
+    pub fn preedit(&self) -> Option<&PreeditView> {
+        (self.pre.n > 0).then_some(&self.pre.view)
+    }
+    /// 未確定文字列の先頭（`▽` / `▼` の左端）の画面上の矩形（幅 1）。直前の `render` で
+    /// 未確定文字列を描いていなければ `None`。折り返して 2 行にまたがるときも、先頭の
+    /// ある表示行を返す（後ろの端は [`EditorView::caret_rect`]）。
+    pub fn preedit_rect(&self) -> Option<Rect> {
+        let (line, at, _) = self.pre_shown?;
+        let p = self.painted.iter().find(|p| p.line == line)?;
+        Some(self.rect_at(p, at))
+    }
+
     /// 表示位置。
     pub fn viewport(&self) -> Viewport {
         self.vp
@@ -381,26 +574,45 @@ impl EditorView {
     fn origin_x(&self) -> i32 {
         self.last_area.x as i32 + self.gutter_w as i32 - self.vp.scroll_x
     }
+    /// 描いてある行 `p` の、表示上の桁 `col` の境目の矩形。
+    fn rect_at(&self, p: &Painted, col: u32) -> Rect {
+        let c = p.layout.caret(col);
+        Rect::new((self.origin_x() + c.x) as i16, (p.y + c.y as i32) as i16, 1, c.height)
+    }
     /// 位置 `pos` のカーソルの画面上の矩形（幅 1）。その行が画面に出ていなければ `None`。
     /// 候補一覧などの小窓を置く位置に使う。直前の `render` の結果から求める。
+    ///
+    /// 未確定文字列（[`EditorView::set_preedit`]）を挟んだ行では、カーソルの桁と
+    /// それより右の桁は、未確定文字列の **後ろ** の位置を返す（未確定文字列の幅だけ
+    /// 右へずれる）。未確定文字列の先頭は [`EditorView::preedit_rect`]。
     pub fn point_of(&self, pos: Pos) -> Option<Rect> {
         let p = self.painted.iter().find(|p| p.line == pos.line)?;
-        let c = p.layout.caret(pos.col);
-        Some(Rect::new((self.origin_x() + c.x) as i16, (p.y + c.y as i32) as i16, 1, c.height))
+        let col = match self.pre_shown {
+            Some((line, at, n)) if line == pos.line => to_display(pos.col.min(p.layout.len_chars().saturating_sub(n)), at, n, true),
+            _ => pos.col,
+        };
+        Some(self.rect_at(p, col))
     }
-    /// カーソルの画面上の矩形。
+    /// カーソルの画面上の矩形（未確定文字列があれば、その後ろ）。
     pub fn caret_rect(&self) -> Option<Rect> {
         self.point_of(self.head)
     }
     /// 画面上の点にいちばん近い文字の境目。領域より上・下の点は、見えている最初・最後の
-    /// 行に丸める。何も描いていなければ `None`。
+    /// 行に丸める。何も描いていなければ `None`。未確定文字列の上の点は、それを挟んだ桁
+    /// （カーソルの桁）になる。
     pub fn pos_at(&self, x: i32, y: i32) -> Option<Pos> {
         let p = match self.painted.iter().find(|p| y < p.y + p.height as i32) {
             Some(p) => p,
             None => self.painted.last()?,
         };
         let row = p.layout.row_at_y(y - p.y);
-        Some(Pos::new(p.line, p.layout.col_at(row, x - self.origin_x())))
+        let mut col = p.layout.col_at(row, x - self.origin_x());
+        if let Some((line, at, n)) = self.pre_shown {
+            if line == p.line && col > at {
+                col = col.saturating_sub(n).max(at);
+            }
+        }
+        Some(Pos::new(p.line, col))
     }
 
     /// `area` に描き、描き変えた行範囲を返す。
@@ -438,14 +650,19 @@ impl EditorView {
         let sel = (self.anchor.min(self.head), self.anchor.max(self.head));
         let has_sel = sel.0 != sel.1;
         let cursor_dep = self.layouter.depends_on_cursor();
+        let pre_n = self.pre.n;
         if std::mem::take(&mut self.reveal) {
             let mut tmp = self.pool.pop().unwrap_or_default();
             src.line(head.line, &mut self.text);
             spans.spans(head.line, &self.text, &mut self.spans);
+            let mut caret_col = head.col;
+            if pre_n > 0 {
+                caret_col = splice_preedit(&mut self.text, &mut self.spans, head.col, &self.pre.text) + pre_n;
+            }
             let input = LineInput { line: head.line, text: &self.text, spans: &self.spans, cursor_line: true, wrap_width: text_w };
             self.layouter.layout(cx.fonts, cx.theme, &input, &mut tmp);
-            let caret = tmp.caret(head.col);
-            let (layouter, text, sp) = (&mut self.layouter, &mut self.text, &mut self.spans);
+            let caret = tmp.caret(caret_col);
+            let (layouter, text, sp, pre_text) = (&mut self.layouter, &mut self.text, &mut self.spans, &self.pre.text);
             let mut scratch = self.pool.pop().unwrap_or_default();
             let mut height_of = |l: u32| -> u16 {
                 if let Some(h) = uniform {
@@ -453,6 +670,9 @@ impl EditorView {
                 }
                 src.line(l, text);
                 spans.spans(l, text, sp);
+                if pre_n > 0 && l == head.line {
+                    splice_preedit(text, sp, head.col, pre_text);
+                }
                 let input = LineInput { line: l, text, spans: sp, cursor_line: l == head.line, wrap_width: text_w };
                 layouter.layout(cx.fonts, cx.theme, &input, &mut scratch);
                 scratch.height()
@@ -490,6 +710,9 @@ impl EditorView {
                     src.line(line, &mut self.text);
                     spans.spans(line, &self.text, &mut self.spans);
                     let is_cur = line == head.line;
+                    if is_cur && pre_n > 0 {
+                        splice_preedit(&mut self.text, &mut self.spans, head.col, &self.pre.text);
+                    }
                     let input = LineInput { line, text: &self.text, spans: &self.spans, cursor_line: is_cur && cursor_dep, wrap_width: text_w };
                     self.layouter.layout(cx.fonts, cx.theme, &input, &mut lay);
                     let sig = self.line_sig(line, is_cur, head.col, sel, has_sel, &lay);
@@ -558,6 +781,12 @@ impl EditorView {
             stats.lines_painted += 1;
             src.line(p.line, &mut self.text);
             let is_cur = p.line == head.line;
+            // 未確定文字列を挟んだ桁（挟んでいなければ None）
+            let pre_at = (is_cur && pre_n > 0).then(|| {
+                self.spans.clear();
+                splice_preedit(&mut self.text, &mut self.spans, head.col, &self.pre.text)
+            });
+            let doc_len = p.layout.len_chars().saturating_sub(if pre_at.is_some() { pre_n } else { 0 });
             let params = PaintLine {
                 area,
                 clip_bottom: if partial { area.bottom() } else { bottom_y },
@@ -568,10 +797,11 @@ impl EditorView {
                 y: p.y,
                 cur: is_cur,
                 bg: if is_cur && hl_line { palette::LINE } else { palette::BG },
-                sel: line_selection(p.line, sel, has_sel, p.layout.len_chars()),
-                caret: (is_cur && self.focused && self.cursor_on).then_some(head.col),
+                sel: line_selection(p.line, sel, has_sel, doc_len),
+                caret: (is_cur && self.focused && self.cursor_on).then_some(head.col.min(doc_len)),
                 newline_w: cell,
                 marks: &self.marks,
+                preedit: pre_at.map(|at| (at, pre_n, &self.pre.segs[..])),
             };
             paint_line(cx, &p.layout, &self.text, &params, &mut lut);
             let rows = RowRange::new(p.y.max(top_y) as u16, (p.y + p.height as i32).clamp(top_y, area.bottom()) as u16);
@@ -597,6 +827,10 @@ impl EditorView {
         }
         self.painted.extend(plans.drain(..).map(|(p, _)| p));
         self.plans = plans;
+        self.pre_shown = match self.painted.iter().find(|p| p.line == head.line) {
+            Some(p) if pre_n > 0 => Some((head.line, head.col.min(p.layout.len_chars().saturating_sub(pre_n)), pre_n)),
+            _ => None,
+        };
         self.all_dirty = false;
         self.check = None;
         self.stats = stats;
@@ -621,6 +855,15 @@ impl EditorView {
         h.u32(is_cur as u32 | (caret as u32) << 1 | (has_sel as u32) << 2);
         if caret {
             h.u32(cur_col);
+        }
+        if is_cur && self.pre.n > 0 {
+            // 文字そのものは `self.text` に挟んである。ここでは挟んだ桁と区間の見た目
+            h.u32(0x5052_4500);
+            h.u32(cur_col);
+            for (r, st) in &self.pre.segs {
+                h.u32(r.end);
+                h.u32(*st as u32);
+            }
         }
         match line_selection(line, sel, has_sel, u32::MAX) {
             Some((a, b, nl)) => {
@@ -707,6 +950,9 @@ struct PaintLine<'a> {
     caret: Option<u32>,
     newline_w: u16,
     marks: &'a [LineMark],
+    /// 未確定文字列: `(挟んだ桁, 文字数, 区間ごとの文字位置と見た目)`。あれば、`sel`・
+    /// `caret`・`marks` の桁（文書の桁）を表示上の桁に直してから使う。
+    preedit: Option<(u32, u32, &'a [PreSeg])>,
 }
 
 /// 論理行 1 つを描く（背景 → 行番号 → 選択 → 文字 → 下線・波線 → カーソル）。
@@ -714,7 +960,20 @@ fn paint_line(cx: &mut RenderCx<'_>, lay: &LineLayout, text: &str, p: &PaintLine
     let area = p.area;
     let mut chars = text.chars();
     let nrows = lay.rows().len();
-    let caret = p.caret.map(|c| lay.caret(c));
+    // 文書の桁 → 表示上の桁（未確定文字列を挟んだ行だけずれる）
+    let disp = |col: u32, after: bool| match p.preedit {
+        Some((at, n, _)) => to_display(col, at, n, after),
+        None => col,
+    };
+    // 表示上の桁 `c` の文字が未確定文字列なら、その見た目
+    let pre_style = |c: u32| {
+        let (at, n, segs) = p.preedit?;
+        if c < at || c >= at + n {
+            return None;
+        }
+        segs.iter().find(|(r, _)| r.contains(&(c - at))).map(|(_, st)| *st)
+    };
+    let caret = p.caret.map(|c| lay.caret(disp(c, true)));
     for (ri, row) in lay.rows().iter().enumerate() {
         let ry = p.y + row.y as i32;
         let top = ry.max(area.y as i32);
@@ -744,6 +1003,7 @@ fn paint_line(cx: &mut RenderCx<'_>, lay: &LineLayout, text: &str, p: &PaintLine
         let x_of = |col: u32| p.origin_x + xs[(col.clamp(row.chars.start, row.chars.end) - row.chars.start) as usize];
         // 選択範囲の背景
         let sel = p.sel.map(|(a, b, nl)| {
+            let (a, b) = (disp(a, true), disp(b, false).max(disp(a, true)));
             let (a, b) = (a.clamp(row.chars.start, row.chars.end), b.clamp(row.chars.start, row.chars.end));
             (a, b, nl && ri + 1 == nrows)
         });
@@ -755,6 +1015,15 @@ fn paint_line(cx: &mut RenderCx<'_>, lay: &LineLayout, text: &str, p: &PaintLine
             }
         }
         let selected = |c: u32| sel.is_some_and(|(a, b, _)| a <= c && c < b);
+        // 未確定文字列の背景（変換中）。選択の上に重ねる
+        if let Some((at, _, segs)) = p.preedit {
+            for (r, st) in segs {
+                let (Some(bg), x0, x1) = (st.colors().1, x_of(at + r.start), x_of(at + r.end)) else { continue };
+                if x1 > cl && x0 < cr {
+                    cx.canvas.fill_rect(Rect::new(x0.clamp(cl, cr) as i16, top as i16, (x1.clamp(cl, cr) - x0.clamp(cl, cr)) as u16, h), bg);
+                }
+            }
+        }
         // 文字
         for run in lay.runs(row) {
             let (rx0, rx1) = (x_of(run.chars.start), x_of(run.chars.end));
@@ -772,8 +1041,11 @@ fn paint_line(cx: &mut RenderCx<'_>, lay: &LineLayout, text: &str, p: &PaintLine
                 if x1 <= cl || x0 >= cr || ch == ' ' || ch.is_control() {
                     continue;
                 }
-                let bg = if selected(c) { palette::SELECTION } else { run_bg };
-                let l = lut.get(run.style.fg, bg);
+                let (fg, bg) = match pre_style(c) {
+                    Some(st) => (st.colors().0, st.colors().1.unwrap_or(p.bg)),
+                    None => (run.style.fg, if selected(c) { palette::SELECTION } else { run_bg }),
+                };
+                let l = lut.get(fg, bg);
                 cx.fonts.draw_char(cx.canvas, x0, base, ch, &run.font, &l, clip);
             }
             let attrs = run.style.attrs;
@@ -792,15 +1064,25 @@ fn paint_line(cx: &mut RenderCx<'_>, lay: &LineLayout, text: &str, p: &PaintLine
                 squiggle(cx, rx0, rx1, base + 1, palette::ERROR, clip);
             }
         }
+        // 未確定文字列の下線（表示行のいちばん下の画素行）
+        if let Some((at, _, segs)) = p.preedit {
+            let uy = ry + row.height as i32 - 1;
+            for (r, st) in segs {
+                let (a, b) = (x_of(at + r.start).clamp(cl, cr), x_of(at + r.end).clamp(cl, cr));
+                if b > a {
+                    cx.canvas.fill_rect(Rect::new(a as i16, uy as i16, (b - a) as u16, 1).intersect(&clip), st.colors().2);
+                }
+            }
+        }
         // 波線
         for m in p.marks.iter().filter(|m| m.line == p.line) {
             let (a, b) = match &m.cols {
-                Some(r) => (r.start, r.end.max(r.start + 1)),
+                Some(r) => (disp(r.start, true), disp(r.end.max(r.start + 1), false)),
                 None => (0, u32::MAX),
             };
             let (a, b) = (a.clamp(row.chars.start, row.chars.end), b.clamp(row.chars.start, row.chars.end));
             let (x0, mut x1) = (x_of(a), x_of(b));
-            if x1 <= x0 && ri + 1 == nrows && m.cols.as_ref().is_none_or(|r| r.start >= row.chars.end) {
+            if x1 <= x0 && ri + 1 == nrows && m.cols.as_ref().is_none_or(|r| disp(r.start, true) >= row.chars.end) {
                 x1 = x0 + p.newline_w as i32; // 空の行・行末: 1 字ぶんだけ引く
             }
             squiggle(cx, x0, x1, base + 1, m.color, clip);
@@ -999,6 +1281,8 @@ mod tests {
             view.cursor_on = self.view.cursor_on;
             view.focused = self.view.focused;
             view.marks = self.view.marks.clone();
+            view.set_preedit(self.view.preedit().cloned());
+            view.reveal = false;
             let mut canvas = Canvas::new();
             let mut cx = RenderCx::new(&mut canvas, &mut self.fonts, &self.theme);
             view.render(&mut cx, AREA, &Doc(&self.lines), &mut NoSpans);
@@ -1394,5 +1678,307 @@ mod tests {
         f.render_in(area);
         same(&mut f, "行の高さが変わった");
         assert_eq!(f.view.point_of(Pos::new(2, 0)).unwrap().y, 13 + 17 + 36);
+    }
+
+    // --- 未確定文字列 ---
+
+    #[test]
+    fn splice_preedit_inserts_and_shifts_spans() {
+        let sp = |s: u32, e: u32| Span { start: s, end: e, kind: TokenKind::Comment };
+        let run = |text: &str, spans: &[Span], col: u32| {
+            let (mut t, mut s) = (text.to_string(), spans.to_vec());
+            let at = splice_preedit(&mut t, &mut s, col, "▽か");
+            (t, s.iter().map(|s| (s.start, s.end)).collect::<Vec<_>>(), at)
+        };
+        // 「▽か」は 6 バイト
+        assert_eq!(run("abcd", &[], 0), ("▽かabcd".into(), vec![], 0));
+        assert_eq!(run("abcd", &[], 2), ("ab▽かcd".into(), vec![], 2));
+        assert_eq!(run("abcd", &[], 4), ("abcd▽か".into(), vec![], 4));
+        // 行末より後ろの桁は行末に丸める
+        assert_eq!(run("abcd", &[], 99), ("abcd▽か".into(), vec![], 4));
+        assert_eq!(run("", &[], 3), ("▽か".into(), vec![], 0));
+        // 桁は文字数（全角は 3 バイト）
+        assert_eq!(run("日本語", &[], 1), ("日▽か本語".into(), vec![], 1));
+        // 前のトークンはそのまま、後ろはずれ、またがるものは 2 つに分かれる
+        let spans = [sp(0, 2), sp(2, 6), sp(6, 8)];
+        assert_eq!(run("abcdefgh", &spans, 4).1, vec![(0, 2), (2, 4), (10, 12), (12, 14)]);
+        // 境目ちょうど: 分けない
+        assert_eq!(run("abcdefgh", &spans, 2).1, vec![(0, 2), (8, 12), (12, 14)]);
+        assert_eq!(run("abcdefgh", &spans, 8).1, vec![(0, 2), (2, 6), (6, 8)]);
+        assert_eq!(run("abcdefgh", &spans, 0).1, vec![(6, 8), (8, 12), (12, 14)]);
+    }
+
+    #[test]
+    fn display_columns_shift_after_preedit() {
+        // 桁 3 に 4 文字挟んだ行
+        assert_eq!(to_display(2, 3, 4, true), 2);
+        assert_eq!(to_display(3, 3, 4, false), 3);
+        assert_eq!(to_display(3, 3, 4, true), 7);
+        assert_eq!(to_display(4, 3, 4, false), 8);
+        assert_eq!(to_display(u32::MAX, 3, 4, false), u32::MAX);
+    }
+
+    #[test]
+    fn preedit_view_builder() {
+        let v = PreeditView::reading("▽てんめ").with(PreeditStyle::Pending, "t").with(PreeditStyle::Pending, "");
+        assert_eq!((v.segs().len(), v.len_chars(), v.text().as_str()), (2, 5, "▽てんめt"));
+        assert!(PreeditView::reading("").is_empty());
+        assert_eq!(PreeditView::converting("a\tb\n").text(), "a b ");
+    }
+
+    /// 未確定文字列の幅（コード表示の字幅で）。
+    fn pre_w(f: &mut Fx, s: &str) -> i32 {
+        let font = TextStyle::mono(crate::layout::CODE_PX);
+        s.chars().map(|c| if c.is_ascii() { 6 } else { f.fonts.advance(c, &font) as i32 }).sum()
+    }
+
+    /// 画面の行 `y` の、色 `c` の画素の x の範囲と数。
+    fn px(canvas: &Canvas, y: u16, c: Color) -> Option<(i32, i32, usize)> {
+        let row = canvas.row(y);
+        let first = row.iter().position(|&p| p == c.0)?;
+        let last = row.iter().rposition(|&p| p == c.0)?;
+        Some((first as i32, last as i32 + 1, row.iter().filter(|&&p| p == c.0).count()))
+    }
+
+    fn snapshot(c: &Canvas) -> Vec<Vec<u16>> {
+        (0..170).map(|y| c.row(y).to_vec()).collect()
+    }
+
+    #[test]
+    fn preedit_splices_at_start_middle_end() {
+        let Some(mut f) = Fx::new(30) else { return };
+        // 「てん」は全角（半角 2 つぶん）
+        assert_eq!(pre_w(&mut f, "てん"), 24);
+        let w = pre_w(&mut f, "▽てん");
+        let len = f.lines[4].chars().count() as u32; // "line 4 = value_4"
+        let y = 13 + 4 * CODE_LINE_H as i16;
+        for col in [0, 5, len, len + 7] {
+            let at = col.min(len);
+            f.caret(4, col);
+            f.view.set_preedit(Some(PreeditView::reading("▽てん")));
+            f.render();
+            let x0 = 23 + at as i16 * 6;
+            // 先頭は挟んだ桁、カーソルは後ろ
+            assert_eq!(f.view.preedit_rect(), Some(Rect::new(x0, y, 1, CODE_LINE_H)), "桁 {col}");
+            assert_eq!(f.view.caret_rect(), Some(Rect::new(x0 + w as i16, y, 1, CODE_LINE_H)), "桁 {col}");
+            assert_eq!(f.view.point_of(Pos::new(4, col)), f.view.caret_rect());
+            // 左の桁は動かず、右の桁は幅だけずれる
+            if at > 0 {
+                assert_eq!(f.view.point_of(Pos::new(4, at - 1)).unwrap().x, x0 - 6);
+                assert_eq!(f.view.pos_at(x0 as i32 - 6, y as i32 + 5), Some(Pos::new(4, at - 1)));
+            }
+            if at < len {
+                assert_eq!(f.view.point_of(Pos::new(4, at + 1)).unwrap().x, x0 + w as i16 + 6);
+                assert_eq!(f.view.pos_at(x0 as i32 + w + 6, y as i32 + 5), Some(Pos::new(4, at + 1)));
+            }
+            // 未確定文字列の上の点は、挟んだ桁
+            for dx in [1, w / 2, w - 1, w] {
+                assert_eq!(f.view.pos_at(x0 as i32 + dx, y as i32 + 5), Some(Pos::new(4, at)), "桁 {col} +{dx}");
+            }
+            // ほかの行はそのまま
+            assert_eq!(f.view.point_of(Pos::new(5, 5)).unwrap().x, 23 + 30);
+            // 下線は未確定文字列の幅ちょうど、カーソルはその右端
+            assert_eq!(px(&f.canvas, y as u16 + 11, Color::WHITE), Some((x0 as i32, x0 as i32 + w, w as usize)), "桁 {col}");
+            assert_eq!(px(&f.canvas, y as u16 + 5, palette::CURSOR).map(|p| p.0), Some(x0 as i32 + w));
+            f.assert_matches_fresh("未確定文字列");
+            // 文書は変わっていない
+            assert_eq!(f.lines[4], "line 4 = value_4");
+        }
+    }
+
+    #[test]
+    fn preedit_styles_and_colors() {
+        let Some(mut f) = Fx::new(30) else { return };
+        f.caret(2, 4);
+        let y = 13 + 2 * CODE_LINE_H;
+        let x0 = 23 + 4 * 6;
+        // 読み: 白い字と白い下線。青い背景は無い
+        f.view.set_preedit(Some(PreeditView::reading("▽てんめつ")));
+        f.render();
+        let w = pre_w(&mut f, "▽てんめつ");
+        assert_eq!(px(&f.canvas, y + 11, Color::WHITE), Some((x0, x0 + w, w as usize)));
+        assert!((y..y + 11).any(|r| px(&f.canvas, r, Color::WHITE).is_some()), "字が白い");
+        assert!((y..y + 12).all(|r| px(&f.canvas, r, palette::SELECTION).is_none()));
+        // 背景はカーソル行の色のまま
+        assert_eq!(f.canvas.get(x0 + 1, y as i32), Some(palette::LINE));
+        // 変換中: 青い背景が幅ちょうど（行の色は中に残らず、外にははみ出さない）、白い下線
+        f.view.set_preedit(Some(PreeditView::converting("▼点滅")));
+        f.render();
+        let w = pre_w(&mut f, "▼点滅");
+        assert_eq!(px(&f.canvas, y + 11, Color::WHITE), Some((x0, x0 + w, w as usize)));
+        let mut blue = 0;
+        for r in y..y + 11 {
+            let (a, b, n) = px(&f.canvas, r, palette::SELECTION).unwrap();
+            assert!(a >= x0 && b <= x0 + w, "画素行 {r}: 青が外にはみ出している");
+            assert!((x0..x0 + w).all(|x| f.canvas.get(x, r as i32) != Some(palette::LINE)), "画素行 {r}: 行の色が残っている");
+            // 右隣（カーソルの次の画素。文書では空白）は行の色
+            assert_eq!(f.canvas.get(x0 + w + 1, r as i32), Some(palette::LINE));
+            blue += n;
+        }
+        // 字（縁のぼかしも含む）に隠れない所は青
+        assert!(blue > 11 * w as usize / 3, "青い背景が少なすぎる: {blue}");
+        f.assert_matches_fresh("変換中");
+        // 読み + 打ちかけ: 下線が白と薄い色に分かれる
+        f.view.set_preedit(Some(PreeditView::reading("▽てんめ").with(PreeditStyle::Pending, "ts")));
+        f.render();
+        let w = pre_w(&mut f, "▽てんめ");
+        assert_eq!(px(&f.canvas, y + 11, Color::WHITE), Some((x0, x0 + w, w as usize)));
+        assert_eq!(px(&f.canvas, y + 11, palette::DIM), Some((x0 + w, x0 + w + 12, 12)));
+        assert_eq!(f.view.caret_rect().unwrap().x as i32, x0 + w + 12);
+        f.assert_matches_fresh("打ちかけ");
+    }
+
+    #[test]
+    fn preedit_repaints_only_cursor_line_and_restores() {
+        let Some(mut f) = Fx::new(100) else { return };
+        f.caret(4, 3);
+        f.render();
+        let before = snapshot(&f.canvas);
+        let y = 13 + 4 * CODE_LINE_H;
+        let only_cursor_line = vec![(y, y + CODE_LINE_H, Priority::Cursor)];
+        let one = RenderStats { lines_visible: 12, lines_checked: 1, lines_painted: 1, scrolled: 0 };
+        // 置く
+        f.view.set_preedit(Some(PreeditView::reading("▽て")));
+        let d = f.render();
+        assert_eq!(ranges(&d), only_cursor_line);
+        assert_eq!(f.view.stats(), one);
+        // 変える（字が増える・見た目だけ変わる）
+        f.view.set_preedit(Some(PreeditView::reading("▽てん")));
+        let d = f.render();
+        assert_eq!(ranges(&d), only_cursor_line);
+        assert_eq!(f.view.stats(), one);
+        f.view.set_preedit(Some(PreeditView::converting("▽てん")));
+        let d = f.render();
+        assert_eq!(ranges(&d), only_cursor_line);
+        f.assert_matches_fresh("見た目だけ変えた");
+        // 同じものを置き直しても何も描かない
+        f.view.set_preedit(Some(PreeditView::converting("▽てん")));
+        let d = f.render();
+        assert!(d.is_empty());
+        assert_eq!(f.view.stats().lines_checked, 0);
+        // 点滅しても未確定文字列は残る
+        f.view.set_cursor_on(false);
+        let d = f.render();
+        assert_eq!(ranges(&d), only_cursor_line);
+        assert!(px(&f.canvas, y, palette::SELECTION).is_some());
+        f.assert_matches_fresh("点滅");
+        f.view.set_cursor_on(true);
+        f.render();
+        // 消す: カーソル行だけ描き直して、置く前と 1 画素も違わない
+        f.view.set_preedit(None);
+        assert_eq!(f.view.preedit(), None);
+        let d = f.render();
+        assert_eq!(ranges(&d), only_cursor_line);
+        assert_eq!(f.view.stats(), one);
+        assert_eq!(f.view.preedit_rect(), None);
+        assert!(snapshot(&f.canvas) == before, "消したあとが、置く前と違う");
+        // 全部を描き直した結果とも同じ
+        let partial = snapshot(&f.canvas);
+        f.view.invalidate();
+        f.render();
+        assert!(snapshot(&f.canvas) == partial, "消したあとが、全部を描き直した結果と違う");
+        f.assert_matches_fresh("消した");
+        // 空の未確定文字列は「無し」と同じ
+        f.view.set_preedit(Some(PreeditView::new()));
+        assert!(f.render().is_empty());
+    }
+
+    #[test]
+    fn preedit_follows_cursor_and_edits() {
+        let Some(mut f) = Fx::new(100) else { return };
+        f.caret(2, 5);
+        f.view.set_preedit(Some(PreeditView::reading("▽かな")));
+        f.render();
+        let w = pre_w(&mut f, "▽かな") as i16;
+        // カーソルが別の行へ: 前の行は元に戻り、新しい行に付く
+        f.caret(6, 2);
+        let d = f.render();
+        let y = |l: u16| 13 + l * CODE_LINE_H;
+        assert_eq!(ranges(&d), vec![(y(2), y(3), Priority::Edit), (y(6), y(7), Priority::Cursor)]);
+        assert_eq!(f.view.preedit_rect().unwrap(), Rect::new(23 + 12, y(6) as i16, 1, CODE_LINE_H));
+        assert_eq!(f.view.caret_rect().unwrap().x, 23 + 12 + w);
+        assert_eq!(f.view.point_of(Pos::new(2, 5)).unwrap().x, 23 + 30);
+        f.assert_matches_fresh("カーソルを動かした");
+        // 確定前の文字が文書に入る（1 字入力）: 未確定文字列は新しい桁に付く
+        f.lines[6].insert(2, 'X');
+        f.view.lines_changed(LineChange { old: LineRange::new(6, 7), new: LineRange::new(6, 7) });
+        f.caret(6, 3);
+        let d = f.render();
+        assert_eq!(ranges(&d), vec![(y(6), y(7), Priority::Cursor)]);
+        assert_eq!(f.view.preedit_rect().unwrap().x, 23 + 18);
+        f.assert_matches_fresh("1 字入力");
+        // 選択と波線は文書の桁のまま（表示は未確定文字列の幅だけ右へ）
+        f.view.set_marks(vec![LineMark { line: 6, cols: Some(4..6), color: palette::ERROR }]);
+        f.render();
+        let (a, b, _) = (y(6)..y(7)).find_map(|r| px(&f.canvas, r, palette::ERROR)).unwrap();
+        assert_eq!((a, b), (23 + 24 + w as i32, 23 + 36 + w as i32));
+        f.assert_matches_fresh("波線");
+        f.view.set_marks(Vec::new());
+        f.view.set_selection(Pos::new(6, 1), Pos::new(6, 3));
+        f.render();
+        // 選択（桁 1〜3）はカーソルの手前まで。未確定文字列には掛からない
+        assert_eq!(px(&f.canvas, y(6), palette::SELECTION), Some((23 + 6, 23 + 18, 12)));
+        f.assert_matches_fresh("選択");
+    }
+
+    #[test]
+    fn long_preedit_scrolls_horizontally_to_keep_caret_visible() {
+        let Some(mut f) = Fx::new(30) else { return };
+        f.lines[3] = "abcdefghij".repeat(6);
+        f.caret(3, 42);
+        f.render();
+        assert_eq!(f.view.viewport().scroll_x, 0);
+        let before = snapshot(&f.canvas);
+        // 桁 42（x = 252）に長い読みを挟むと、カーソルが右へはみ出すので横にずれる
+        let s = "▽ながいながいよみがな";
+        f.view.set_preedit(Some(PreeditView::reading(s)));
+        f.render();
+        let w = pre_w(&mut f, s);
+        let vp = f.view.viewport();
+        assert!(vp.scroll_x > 0);
+        let r = f.view.caret_rect().unwrap();
+        assert_eq!(r.x as i32, 23 + 252 + w - vp.scroll_x);
+        assert!(r.x as i32 >= 23 && (r.x as i32) < 320 - 23, "カーソルが右端の余白より内側にある: {r:?}");
+        assert_eq!(f.view.preedit_rect().unwrap().x as i32, 23 + 252 - vp.scroll_x);
+        f.assert_matches_fresh("横スクロール");
+        // 消して行頭へ戻ると、置く前と同じ
+        f.view.set_preedit(None);
+        f.caret(3, 0);
+        f.render();
+        f.caret(3, 42);
+        f.render();
+        assert_eq!(f.view.viewport().scroll_x, 0);
+        assert!(snapshot(&f.canvas) == before);
+    }
+
+    #[test]
+    fn preedit_wraps_with_the_layouter() {
+        let Some(mut f) = Fx::new(0) else { return };
+        f.view = EditorView::new(Box::new(Varied));
+        f.lines = vec!["abcdefgh".into(), "next".into(), "last".into()];
+        let area = Rect::new(0, 13, 320, 100);
+        f.caret(0, 6);
+        f.render_in(area);
+        let before = snapshot(&f.canvas);
+        assert_eq!(f.view.point_of(Pos::new(1, 0)).unwrap().y, 13 + 12);
+        // 8 文字 + 5 文字 = 13 文字 → 10 文字で折り返して 2 表示行になる
+        f.view.set_preedit(Some(PreeditView::converting("▼かきくけ")));
+        let d = f.render_in(area);
+        // 先頭は 1 行目の桁 6、カーソルは 2 行目（表示上の桁 11）
+        assert_eq!(f.view.preedit_rect(), Some(Rect::new(4 + 36, 13, 1, 12)));
+        assert_eq!(f.view.caret_rect(), Some(Rect::new(4 + 6, 13 + 12, 1, 12)));
+        // 残りの「gh」はその右、下の行は 1 行ぶん下がる
+        assert_eq!(f.view.point_of(Pos::new(0, 8)).unwrap(), Rect::new(4 + 18, 13 + 12, 1, 12));
+        assert_eq!(f.view.point_of(Pos::new(1, 0)).unwrap().y, 13 + 24);
+        assert_eq!(f.view.pos_at(4 + 13, 13 + 15), Some(Pos::new(0, 7)));
+        // 下の行がずれるので、カーソル行から下が全部変わる
+        assert!(d.bounds().start == 13 && d.bounds().end >= 13 + 48, "{:?}", d.bounds());
+        // 青い背景は 2 つの表示行にまたがる
+        assert_eq!(px(&f.canvas, 13, palette::SELECTION).map(|p| (p.0, p.1)), Some((4 + 36, 4 + 60)));
+        assert_eq!(px(&f.canvas, 13 + 12, palette::SELECTION).map(|p| (p.0, p.1)), Some((4, 4 + 6)));
+        // 消すと元の高さに戻る
+        f.view.set_preedit(None);
+        f.render_in(area);
+        assert!(snapshot(&f.canvas) == before);
     }
 }
