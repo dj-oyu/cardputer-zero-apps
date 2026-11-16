@@ -38,6 +38,8 @@ zcode — CardputerZero 用コードエディタ（段階 1: 土台。エディ�
   --no-grab                キーボードを独占しない
   --backlight <値>         実行中に点けるバックライトの明るさ（既定は自動）
   --no-backlight           バックライトに触らない
+  --sleep-after <秒>       無操作でこの秒数たったら画面を消す（既定 60、0 で消さない）。
+                           消えている間の打鍵は画面を起こすだけで、アプリには渡さない
   --version / --help
 ";
 
@@ -101,6 +103,10 @@ fn parse_args() -> Result<Args, String> {
             "--no-grab" => a.opts.no_grab = true,
             "--backlight" => a.opts.backlight = Some(num("--backlight", val("--backlight")?)? as u32),
             "--no-backlight" => a.opts.no_backlight = true,
+            "--sleep-after" => {
+                let s = num("--sleep-after", val("--sleep-after")?)?;
+                a.opts.sleep_after = (s > 0).then(|| Duration::from_secs(s));
+            }
             "--version" => {
                 println!("zcode {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);

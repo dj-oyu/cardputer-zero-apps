@@ -8,8 +8,11 @@
 //! そこで zcode の実行中は、zcode がバックライトを受け持つ:
 //!
 //! - 起動時に 0 なら点ける
-//! - 打鍵のたびと 1 秒ごとに読み、0 にされていたら点け直す
-//! - 終了時は触らない（点けたまま）。独占を放せば打鍵は APPLaunch に届くので、
+//! - 使っている間は、打鍵のたびと 1 秒ごとに読み、0 にされていたら点け直す
+//! - 無操作が続いたら、zcode が自分で消す（[`Backlight::sleep`]。電池のため）。
+//!   眠っている間は点け直さない。次の打鍵で起こし、その打鍵はアプリに渡さない
+//!   （イベントループが捨てる）
+//! - 終了時は、眠っていても点けて終わる。独占を放せば打鍵は APPLaunch に届くので、
 //!   その先は APPLaunch が自分の状態に合わせて扱う
 //!
 //! 点ける明るさは、起動時の値（0 でなければ）→ 実行中に見た 0 でない値 →
@@ -33,6 +36,10 @@ pub struct Backlight {
     initial: u32,
     /// 点け直した回数（計測用）。
     pub restores: u32,
+    /// zcode が自分で消して眠っているか。
+    asleep: bool,
+    /// 眠らせた回数（計測用）。
+    pub sleeps: u32,
 }
 
 impl Backlight {
@@ -55,7 +62,7 @@ impl Backlight {
         let brightness = dir.join("brightness");
         let initial = read_u32(&brightness)?;
         let level = pick_level(level, initial, max);
-        Ok(Backlight { brightness, max, level, initial, restores: 0 })
+        Ok(Backlight { brightness, max, level, initial, restores: 0, asleep: false, sleeps: 0 })
     }
 
     /// 起動時の値。
@@ -68,10 +75,45 @@ impl Backlight {
         self.level
     }
 
-    /// 消えていたら点ける。点けたら `true`。読めない・書けないときは何もしない
-    /// （画面の更新を止めない）。
+    /// zcode が自分で消して眠っているか。
+    pub fn is_asleep(&self) -> bool {
+        self.asleep
+    }
+
+    /// 画面を消して眠る（無操作が続いたとき）。消せたら `true`。
+    pub fn sleep(&mut self) -> bool {
+        if self.asleep {
+            return false;
+        }
+        // 消す前の明るさを覚えておく（起こすときに戻す）
+        if let Ok(cur) = read_u32(&self.brightness) {
+            if cur > 0 {
+                self.level = cur.min(self.max);
+            }
+        }
+        if fs::write(&self.brightness, "0\n").is_ok() {
+            self.asleep = true;
+            self.sleeps += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 1 秒ごとの見張り。使っている間だけ、消されていたら点け直す。
+    /// 眠っている間は何もしない。
+    pub fn watch(&mut self) -> bool {
+        if self.asleep {
+            return false;
+        }
+        self.ensure_on()
+    }
+
+    /// 消えていたら点ける（眠っていたら起こす）。点けたら `true`。
+    /// 読めない・書けないときは何もしない（画面の更新を止めない）。
     pub fn ensure_on(&mut self) -> bool {
-        let Ok(cur) = read_u32(&self.brightness) else { return false };
+        let was_asleep = std::mem::replace(&mut self.asleep, false);
+        let Ok(cur) = read_u32(&self.brightness) else { return was_asleep };
         if cur > 0 {
             // ユーザーや APPLaunch が明るさを変えたら、それに合わせる
             self.level = cur.min(self.max);
@@ -81,7 +123,7 @@ impl Backlight {
             self.restores += 1;
             true
         } else {
-            false
+            was_asleep
         }
     }
 }
@@ -132,6 +174,16 @@ mod tests {
         assert!(bl.ensure_on());
         assert_eq!(fs::read_to_string(dir.join("brightness")).unwrap().trim(), "25");
         assert_eq!(bl.restores, 2);
+        // 自分で眠る → 見張りでは点けない → 打鍵で起こす（消す前の明るさに戻す）
+        assert!(bl.sleep());
+        assert!(bl.is_asleep());
+        assert_eq!(fs::read_to_string(dir.join("brightness")).unwrap().trim(), "0");
+        assert!(!bl.watch());
+        assert_eq!(fs::read_to_string(dir.join("brightness")).unwrap().trim(), "0");
+        assert!(bl.ensure_on());
+        assert!(!bl.is_asleep());
+        assert_eq!(fs::read_to_string(dir.join("brightness")).unwrap().trim(), "25");
+        assert_eq!(bl.sleeps, 1);
         fs::remove_dir_all(&dir).unwrap();
     }
 }

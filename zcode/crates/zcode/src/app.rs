@@ -181,6 +181,8 @@ pub struct Options {
     pub backlight: Option<u32>,
     /// バックライトに触らない（開発用）。
     pub no_backlight: bool,
+    /// 無操作がこの時間続いたら画面を消す（`None` なら消さない）。
+    pub sleep_after: Option<Duration>,
 }
 
 impl Default for Options {
@@ -195,6 +197,7 @@ impl Default for Options {
             print_stats: false,
             backlight: None,
             no_backlight: false,
+            sleep_after: Some(Duration::from_secs(60)),
         }
     }
 }
@@ -263,6 +266,8 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
     let mut flush_log: Vec<FlushRecord> = Vec::new();
     // 画面を起こすために捨てた打鍵のキーコード（離上のイベントも捨てるため）
     let mut swallowed: Vec<u16> = Vec::new();
+    // 最後に打鍵があった時刻（自前のスリープの判定用）
+    let mut last_input_us = now_us();
     let mut next_watch = opts.watch_fb.map(|d| now_us() + d.as_micros() as u64);
     let mut cx_quit = false;
     let mut force_present = false;
@@ -300,6 +305,7 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
             drop_swallowed_releases(&mut raw, &mut swallowed);
             let has_press = !keys.is_empty() || raw.iter().any(|r| r.ev.kind == EV_KEY && r.ev.value != 0);
             if has_press {
+                last_input_us = wake_us;
                 if let Some(bl) = backlight.as_mut() {
                     if bl.ensure_on() {
                         for r in raw.iter().filter(|r| r.ev.kind == EV_KEY && r.ev.value == 1) {
@@ -314,6 +320,8 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
                         raw.clear();
                         kb.cancel_repeat();
                         stats.wakes_swallowed += 1;
+                        // 眠っている間は描いていないので、起きたら全画面を送り直す
+                        force_present = true;
                     }
                 }
             }
@@ -331,7 +339,12 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
                 for id in cx.timers.take_due(wake_us) {
                     if id == TimerId::Backlight {
                         if let Some(bl) = backlight.as_mut() {
-                            bl.ensure_on();
+                            let idle = Duration::from_micros(wake_us.saturating_sub(last_input_us));
+                            if opts.sleep_after.is_some_and(|d| idle >= d) {
+                                bl.sleep();
+                            } else {
+                                bl.watch();
+                            }
                         }
                         cx.timers.set_after(TimerId::Backlight, Duration::from_secs(1));
                         continue;
@@ -349,6 +362,11 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
         }
         if cx_quit || crash::quit_requested() {
             break;
+        }
+
+        // 画面を消して眠っている間は描かない（電池のため）。起きたら全画面を送り直す
+        if backlight.as_ref().is_some_and(|b| b.is_asleep()) {
+            continue;
         }
 
         // 溜まっていた入力を全部処理してから、1 回だけ描く
@@ -390,6 +408,10 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
     }
 
     screen.stop();
+    // 眠っていたら点けて終わる（このあと APPLaunch に打鍵が届くようになる）
+    if let Some(bl) = backlight.as_mut() {
+        bl.ensure_on();
+    }
     // 後始末: 独占を放す → 送り残しを送り切る → 元の画面に戻す（Display の Drop）
     kb.ungrab();
     display.wait_idle(Duration::from_millis(500));
@@ -398,6 +420,7 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
     stats.fonts = fonts.stats();
     stats.syn_dropped = kb.syn_dropped_count();
     stats.backlight = backlight.as_ref().map(|b| (b.initial(), b.level(), b.restores));
+    stats.sleeps = backlight.as_ref().map_or(0, |b| b.sleeps);
     stats.read_proc(); // スレッドを止める前の値
     drop(display);
     drop(kb);

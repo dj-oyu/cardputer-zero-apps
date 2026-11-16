@@ -80,6 +80,8 @@ pub struct Stats {
     pub backlight: Option<(u32, u32, u32)>,
     /// 画面が消えていたので、起こすだけにして捨てた打鍵のまとまりの数。
     pub wakes_swallowed: u32,
+    /// 無操作で画面を消した回数。
+    pub sleeps: u32,
     /// fb0 の読み戻し: 調べた回数 / 上書きされていた回数 / 違っていた行数の最大。
     pub verify_checks: u32,
     pub verify_mismatch: u32,
@@ -202,8 +204,8 @@ impl Stats {
         if let Some((initial, level, restores)) = self.backlight {
             let _ = writeln!(
                 o,
-                "  backlight        : initial={initial} level={level} restores={restores} wakes_swallowed={}",
-                self.wakes_swallowed
+                "  backlight        : initial={initial} level={level} restores={restores} sleeps={} wakes_swallowed={}",
+                self.sleeps, self.wakes_swallowed
             );
         }
         o
