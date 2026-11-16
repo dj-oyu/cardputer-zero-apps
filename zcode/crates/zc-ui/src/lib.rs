@@ -29,7 +29,7 @@ pub mod textlayout;
 pub mod tree;
 pub mod widgets;
 
-pub use editor::{EditorView, LineMark, NoSpans, RenderStats, SpanSource, Viewport};
+pub use editor::{EditorView, LineMark, NoSpans, PreeditSeg, PreeditStyle, PreeditView, RenderStats, SpanSource, Viewport};
 pub use picker::{CompletionPopup, PickRow, PickerList, PopupItem};
 pub use status::{Chip, EditorStatus, ImeMode, StatusBar, TitleBar};
 pub use tabs::{Tab, TabBar};
