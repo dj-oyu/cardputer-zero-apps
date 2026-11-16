@@ -1,0 +1,168 @@
+# C（.c / .h）。色の付け方は VS Code の Dark+（cpp の C 部分）に寄せてある。
+#
+# 限界:
+# - アウトラインは付けない。関数の定義は戻り値の型の後ろに名前が来る（`static int main(`）
+#   ので、「行の最初の語がキーワード」という形式では拾えない（struct / enum も typedef の
+#   形が多い）
+# - 型の色は [words] の型名・`_t` で終わる名前・大文字で始まり小文字を含む名前
+#   （Node）だけ。typedef した小文字の名前（`typedef struct foo foo;` の foo）は塗れない
+# - マクロの本文（#define の続き）は普通のコードとして塗る。行末の `\` で次の行へ続く
+# - C++ のキーワード・テンプレート・生文字列は扱わない
+
+name = "C"
+extensions = ["c", "h"]
+line_comment = "//"
+indent = "    "
+run = "bash -c 'gcc \"$0\" -o /tmp/zc-run && /tmp/zc-run' {file}"
+check = "gcc -fsyntax-only {file}"
+# gcc の出力: `ファイル:行:桁: error: メッセージ`
+check_pattern = '^(?:.*?):(\d+):(\d+): (?:fatal error|error|warning): (.*)$'
+keywords = [
+    "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
+    "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register",
+    "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef",
+    "union", "unsigned", "void", "volatile", "while", "NULL", "size_t", "bool", "true", "false",
+    "printf", "malloc", "free", "memcpy", "strlen", "main", "uint8_t", "uint16_t", "uint32_t",
+    "uint64_t", "int8_t", "int16_t", "int32_t", "int64_t",
+]
+
+[variables]
+ident = '[A-Za-z_][A-Za-z0-9_]*'
+
+[words]
+keyword = [
+    "typedef", "struct", "union", "enum", "sizeof", "static", "extern", "const", "volatile",
+    "register", "inline", "auto", "restrict", "_Atomic", "_Noreturn", "_Alignas", "_Alignof",
+]
+control = [
+    "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue",
+    "return", "goto", "defined",
+]
+type = [
+    "int", "char", "short", "long", "float", "double", "void", "signed", "unsigned", "_Bool",
+    "bool", "size_t", "ssize_t", "ptrdiff_t", "intptr_t", "uintptr_t", "off_t", "time_t",
+    "FILE", "va_list", "wchar_t",
+]
+constant = ["NULL", "true", "false", "EOF", "stdin", "stdout", "stderr", "EXIT_SUCCESS", "EXIT_FAILURE"]
+
+# struct / union / enum の後ろは型名
+[word_push]
+struct = "typename"
+union = "typename"
+enum = "typename"
+
+[default_token]
+str = "string"
+block_comment = "comment"
+
+[[contexts.main]]
+# プリプロセッサ指令（行頭の # と指令名）。残りの行は pp で塗る
+match = '^[ \t]*#[ \t]*[A-Za-z_]*'
+token = "control"
+push = "pp"
+[[contexts.main]]
+include = "expr"
+
+[[contexts.expr]]
+match = '//.*'
+token = "comment"
+[[contexts.expr]]
+match = '/\*'
+token = "comment"
+push = "block_comment"
+# 文字列と文字（L / u / U / u8 の前置きは引用符の手前で見る）
+[[contexts.expr]]
+match = '(?:L|u8|u|U)'
+followed_by = '''["']'''
+token = "string"
+[[contexts.expr]]
+match = '"'
+token = "string"
+push = "str"
+[[contexts.expr]]
+match = '''\'(?:\\(?:x[0-9a-fA-F]+|[0-7]{1,3}|[^\n])|[^'\\\n])*\''''
+token = "string"
+# 識別子
+[[contexts.expr]]
+match = '{{ident}}'
+followed_by = '[ \t]*\('
+token = "function"
+words = true
+[[contexts.expr]]
+match = '{{ident}}_t'
+followed_by = '[^A-Za-z0-9_]'
+token = "type"
+[[contexts.expr]]
+match = '[A-Z][A-Z0-9_]*'
+followed_by = '[^A-Za-z0-9_]'
+token = "constant"
+words = true
+[[contexts.expr]]
+match = '[A-Z][A-Za-z0-9_]*'
+token = "type"
+words = true
+[[contexts.expr]]
+match = '[a-z_][A-Za-z0-9_]*'
+token = "text"
+words = true
+# 数（0x1F・1e-3f・10UL・0b101・1.5 などをまとめて）
+[[contexts.expr]]
+match = '(?:[0-9]|\.[0-9])(?:[eEpP][+-]|[0-9A-Za-z_.])*'
+token = "number"
+[[contexts.expr]]
+match = '[-+*/%&|^~<>!=?]+'
+token = "operator"
+[[contexts.expr]]
+match = '[(){}\[\],;:.#]'
+token = "punctuation"
+[[contexts.expr]]
+match = '[ \t]+'
+token = "text"
+
+# #include <stdio.h> の山括弧
+# 行末（継続行 `\` を除く）で抜ける
+[[contexts.pp]]
+match = '\\\n'
+token = "punctuation"
+[[contexts.pp]]
+match = '\n'
+pop = true
+[[contexts.pp]]
+match = '<[A-Za-z0-9_./+-]+>'
+token = "string"
+[[contexts.pp]]
+include = "expr"
+
+[[contexts.typename]]
+match = '[ \t]+'
+token = "text"
+[[contexts.typename]]
+match = '{{ident}}'
+token = "type"
+pop = true
+[[contexts.typename]]
+match = ''
+pop = true
+
+[[contexts.block_comment]]
+match = '\*/'
+pop = true
+[[contexts.block_comment]]
+match = '[^*\n]+|\*'
+
+# 文字列: 行末の `\` で次の行へ続く。閉じていなければ行末で終わる
+[[contexts.str]]
+match = '"'
+pop = true
+[[contexts.str]]
+match = '\\(?:x[0-9a-fA-F]+|[0-7]{1,3}|.|\n)'
+token = "escape"
+[[contexts.str]]
+match = '\n'
+pop = true
+# printf の書式（%d %5.2f %-8s %lu %%）
+[[contexts.str]]
+match = '%[-+ #0]*[0-9*]*(?:\.[0-9*]+)?(?:hh|h|ll|l|L|z|j|t)?[A-Za-z%]'
+token = "constant"
+[[contexts.str]]
+match = '[^"\\%\n]+|%'
