@@ -8,3 +8,6 @@ publish.workspace = true
 
 [dependencies]
 zc-core.workspace = true
+libc.workspace = true
+vte.workspace = true
+unicode-width.workspace = true

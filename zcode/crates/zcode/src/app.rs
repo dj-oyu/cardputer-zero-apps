@@ -190,6 +190,15 @@ pub trait Screen {
     fn wants_flush_events(&self) -> bool {
         false
     }
+    /// ほかに待つ fd（ターミナルの pty の master）。毎回の `poll()` の前に聞く。
+    fn poll_fd(&self) -> Option<std::os::fd::RawFd> {
+        None
+    }
+    /// [`Screen::poll_fd`] が読めるようになった（打鍵の処理の後に呼ぶ。§4.3）。
+    /// 読む量の上限に達してまだ残っていれば `true`（次の `poll()` を待たずに続きを読む）。
+    fn on_poll_fd(&mut self, _cx: &mut LoopCx<'_>) -> bool {
+        false
+    }
 }
 
 /// 実行時の指定（コマンドラインから）。
@@ -313,8 +322,9 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, mut stats: Stats) -> io::Res
     let mut force_present = false;
     let mut first = true;
     let kfds = kb.fds();
-    let fds = [kfds[0], kfds[1], timers.fd.as_raw_fd(), results_rx.fd()];
-    let mut ready = [false; 4];
+    let mut ready = [false; 5];
+    // 端末の出力が読み残しのまま（次は待たずに起きる）
+    let mut fd_more = false;
 
     loop {
         let mut wake_us = now_us();
@@ -326,10 +336,15 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, mut stats: Stats) -> io::Res
         } else {
             timers.arm();
             let timeout = match next_watch {
+                _ if fd_more => 0,
                 Some(t) => (t.saturating_sub(now_us()) / 1000) as i32 + 1,
                 None => -1,
             };
+            let fds = [kfds[0], kfds[1], timers.fd.as_raw_fd(), results_rx.fd(), screen.poll_fd().unwrap_or(-1)];
             poll_fds(&fds, &mut ready, timeout)?;
+            if fd_more && fds[4] >= 0 {
+                ready[4] = true;
+            }
             wake_us = now_us();
             keys.clear();
             raw.clear();
@@ -395,6 +410,8 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, mut stats: Stats) -> io::Res
                 stats.keys += keys.len() as u32;
                 screen.on_keys(&keys, &raw, &kb, &mut cx);
             }
+            // 端末の出力は打鍵の後に読む（打鍵を待たせない。読む量には上限がある）
+            fd_more = ready[4] && screen.on_poll_fd(&mut cx);
             cx_quit |= cx.quit;
             force_present |= cx.force_present;
         }
