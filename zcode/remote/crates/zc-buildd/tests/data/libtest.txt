@@ -1,0 +1,30 @@
+{"reason":"compiler-artifact","package_id":"path+file:///tmp/zc-sample/src#sample@0.1.0","manifest_path":"/tmp/zc-sample/src/Cargo.toml","target":{"kind":["lib"],"crate_types":["lib"],"name":"sample","src_path":"/tmp/zc-sample/src/src/lib.rs","edition":"2021","doc":true,"doctest":true,"test":true},"profile":{"opt_level":"0","debuginfo":2,"debug_assertions":true,"overflow_checks":true,"test":false},"features":[],"filenames":["/tmp/zc-sample/target/debug/build/sample/627755756d165078/out/libsample-627755756d165078.rlib","/tmp/zc-sample/target/debug/build/sample/627755756d165078/out/libsample-627755756d165078.rmeta"],"executable":null,"fresh":false}
+{"reason":"compiler-artifact","package_id":"path+file:///tmp/zc-sample/src#sample@0.1.0","manifest_path":"/tmp/zc-sample/src/Cargo.toml","target":{"kind":["lib"],"crate_types":["lib"],"name":"sample","src_path":"/tmp/zc-sample/src/src/lib.rs","edition":"2021","doc":true,"doctest":true,"test":true},"profile":{"opt_level":"0","debuginfo":2,"debug_assertions":true,"overflow_checks":true,"test":true},"features":[],"filenames":["/tmp/zc-sample/target/debug/build/sample/686f17040a83580f/out/sample-686f17040a83580f"],"executable":"/tmp/zc-sample/target/debug/build/sample/686f17040a83580f/out/sample-686f17040a83580f","fresh":false}
+{"reason":"build-finished","success":true}
+
+running 3 tests
+test tests::skipped ... ignored
+test tests::fails ... FAILED
+test tests::passes ... ok
+
+failures:
+
+---- tests::fails stdout ----
+
+thread 'tests::fails' (147) panicked at src/lib.rs:9:9:
+assertion `left == right` failed: 足し算が違う
+  left: 3
+ right: 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::fails
+
+test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
