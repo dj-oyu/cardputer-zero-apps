@@ -1,0 +1,685 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>zcode 外部ビルド設計</title>
+<style>
+  :root {
+    --bg: #15171a; --panel: #1e2125; --panel2: #252a30; --line: #343a42;
+    --fg: #d8dde3; --dim: #8b949e; --strong: #ffffff;
+    --blue: #3794ff; --green: #3dd68c; --red: #f47067; --yellow: #e5c07b; --purple: #c586c0; --teal: #4ec9b0;
+    --mono: "DejaVu Sans Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--bg); }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.75 system-ui, "Noto Sans JP", sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 32px 16px 80px; }
+  h1 { font-size: 26px; margin: 0 0 4px; color: var(--strong); }
+  h2 { font-size: 20px; margin: 56px 0 6px; color: var(--strong); display: flex; gap: 10px; align-items: baseline; }
+  h2 .no { color: var(--blue); font-family: var(--mono); font-size: 15px; }
+  h3 { font-size: 16px; margin: 22px 0 6px; color: var(--strong); }
+  p { margin: 6px 0; }
+  .lead { color: var(--dim); margin-bottom: 24px; }
+  code { font-family: var(--mono); font-size: .88em; background: var(--panel2); padding: 1px 5px; border-radius: 4px; color: #e6edf3; }
+  a { color: var(--blue); }
+  .muted { color: var(--dim); }
+  .grid { display: grid; gap: 14px; }
+  .g3 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .g2 { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .card h3 { margin-top: 0; }
+  .card.ok { border-top: 3px solid var(--green); }
+  .card.ng { border-top: 3px solid var(--red); }
+  .card.later { border-top: 3px solid var(--yellow); }
+  .card.ask { border: 1px solid var(--yellow); background: rgba(229,192,123,.06); }
+  .card.wide { grid-column: 1 / -1; }
+  .badge { display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; margin-left: 6px; vertical-align: 2px; }
+  .b-ok { background: rgba(61,214,140,.15); color: var(--green); }
+  .b-ng { background: rgba(244,112,103,.15); color: var(--red); }
+  .b-later { background: rgba(229,192,123,.15); color: var(--yellow); }
+  .b-rev { background: rgba(55,148,255,.15); color: var(--blue); }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 13px; }
+  td.c { text-align: center; font-size: 18px; }
+  .yes { color: var(--green); } .no { color: var(--red); } .maybe { color: var(--yellow); }
+  .scroll { overflow-x: auto; }
+  details { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; margin: 10px 0 0; }
+  details > summary { cursor: pointer; padding: 8px 12px; color: var(--strong); font-size: 14px; list-style: none; }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::before { content: "▸"; display: inline-block; width: 1.2em; color: var(--blue); transition: transform .15s; }
+  details[open] > summary::before { transform: rotate(90deg); }
+  details .body { padding: 2px 14px 14px; font-size: 14px; }
+  details .body ol, details .body ul { padding-left: 1.3em; margin: 6px 0; }
+  .svgbox { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto; }
+  svg text { font-family: system-ui, "Noto Sans JP", sans-serif; }
+  .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; counter-reset: s; margin-top: 14px; }
+  .step { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 14px; position: relative; }
+  .step::before { counter-increment: s; content: counter(s); position: absolute; top: -10px; left: 10px; background: var(--blue); color: #fff; font-weight: 700; font-size: 12px; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; }
+  pre { background: #0f1113; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; overflow-x: auto; font: 13px/1.6 var(--mono); color: #c9d1d9; }
+  .k { color: var(--blue); } .s { color: #ce9178; } .n { color: #b5cea8; } .cm { color: #6a9955; }
+  .callout { border-left: 3px solid var(--yellow); background: rgba(229,192,123,.07); padding: 8px 12px; border-radius: 0 8px 8px 0; margin: 10px 0; font-size: 14px; }
+  .callout.red { border-color: var(--red); background: rgba(244,112,103,.07); }
+  .callout.green { border-color: var(--green); background: rgba(61,214,140,.07); }
+  .callout.blue { border-color: var(--blue); background: rgba(55,148,255,.07); }
+  .phase { display: grid; grid-template-columns: 46px 1fr; gap: 12px; align-items: start; margin: 10px 0; }
+  .phase .dot { width: 46px; height: 46px; border-radius: 50%; background: var(--panel2); border: 2px solid var(--blue); display: grid; place-items: center; font-weight: 700; color: var(--blue); }
+  .checklist li { list-style: none; margin: 4px 0; }
+  .checklist li::before { content: "☐ "; color: var(--yellow); }
+  footer { margin-top: 64px; color: var(--dim); font-size: 13px; }
+  @media (max-width: 640px) { h1 { font-size: 22px; } main { padding: 20px 16px 60px; } }
+</style>
+</head>
+<body>
+<main>
+
+<h1>外でビルド・試験・型検査する仕組み</h1>
+<p class="lead">zcode の設計（2026-11-16。Fable のレビューを反映）。まだ何も実装していない。実機は CardputerZero（CM0: Cortex-A53 ×4・RAM 352MB・SD カード）。
+各項目の ▸ を開くと、理由や詳しい説明が出る。<span class="badge b-rev">レビュー</span> はレビューで足した・変えたところ。</p>
+
+<div class="grid g3">
+  <div class="card ok"><h3>実行は実機で</h3><p>書くプログラムは液晶・キー・カメラ・Bluetooth など実機にしか無いものに触る。外で動かしても意味が無い。</p></div>
+  <div class="card ok"><h3>重い仕事は外のビルド係に</h3><p>Rust のビルドと型検査、npm の依存があるプロジェクト、試験。ビルド係は <b>Cloudflare Containers</b> か <b>PC の開発コンテナ</b>（同じ中身）。</p></div>
+  <div class="card ok"><h3>実機側は小さな別プロセス <span class="badge b-rev">レビュー</span></h3><p><code>zc-remote</code>: 必要なときだけ起動し、使わなければ終わる。速さを決めるのは暗号の CPU ではなく、<b>往復の回数・運ぶバイト数・メインと SD に触らないこと</b>。</p></div>
+</div>
+
+<h3>決めたこと（2026-11-16 ユーザーが決定）</h3>
+<div class="grid g3">
+  <div class="card ok"><h3>① TLS の暗号の実装 <span class="badge b-ok">決定</span></h3><p><b>ring（2026-11-16 ユーザーが決定）</b>。C とアセンブリを含むが、クロスの gcc だけで作れ、監査と利用実績がある。「pure Rust だけ」の方針の例外は <code>zc-remote</code> に限る（zcode 本体は pure Rust のまま）。pure Rust の rustls-rustcrypto（試験的・未監査）は採らない。§6</p></div>
+  <div class="card ok"><h3>② 再起動後のオフライン <span class="badge b-ok">決定</span></h3><p><b>最後に成功した実行ファイルを 1 つだけ SD に残す（2026-11-16 ユーザーが決定）</b>。「再計算できるキャッシュは SD に書かない」の例外（ネットが無いと作り直せないため）。書く時機は控えの段 2 と同じ。§6.5</p></div>
+  <div class="card ok"><h3>③ Cloudflare は前提か <span class="badge b-ok">決定</span></h3><p><b>前提（2026-11-16 ユーザーが決定）</b>。レビューの異論（永続ディスクのある VM を tailnet に入れる案）は採らない。キャッシュはスナップショットと sccache で解く。§10</p></div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="no">1</span>何をどこでやるか</h2>
+<div class="scroll">
+<table>
+  <tr><th>作業</th><th>実機</th><th>ビルド係</th><th>備考</th></tr>
+  <tr><td>Rust のビルド</td><td class="c no">✕</td><td class="c yes">○</td><td><code>aarch64-unknown-linux-gnu</code>・<code>target-cpu=cortex-a53</code>。F5 用の軽いプロファイルで作り、strip して返す（§5.4）</td></tr>
+  <tr><td>Rust の型検査</td><td class="c no">✕</td><td class="c yes">○</td><td>保存時に <code>cargo check</code>。結果を波線に（§7）</td></tr>
+  <tr><td>C のビルド</td><td class="c maybe">△</td><td class="c yes">○</td><td>実機に gcc があるかは未確認</td></tr>
+  <tr><td>TS の型検査（依存なし）</td><td class="c yes">○</td><td class="c muted">—</td><td>公式の TypeScript 7（Go 版）の <code>tsc</code> を実機で</td></tr>
+  <tr><td>TS の型検査（npm の依存あり）</td><td class="c no">✕</td><td class="c yes">○</td><td><span class="badge b-rev">レビュー</span> 依存の型定義を実機に持ってくるのをやめ、<code>check</code> をビルド係で（§7.3）</td></tr>
+  <tr><td>npm の依存のまとめ</td><td class="c no">✕</td><td class="c yes">○</td><td><code>npm ci --ignore-scripts</code> → esbuild で 1 ファイルに</td></tr>
+  <tr><td>esbuild だけ</td><td class="c yes">○</td><td class="c muted">—</td><td>実機で 0.08 秒・11MB（実測）</td></tr>
+  <tr><td>試験</td><td class="c no">✕</td><td class="c yes">○</td><td><code>cargo test</code>・<code>npm test</code> を x86_64 のまま。結果だけ返す</td></tr>
+  <tr><td>実行</td><td class="c yes">○</td><td class="c no">✕</td><td>実行ファイル・JS は実機で</td></tr>
+  <tr><td>Python / Shell / JS（LLRT）</td><td class="c yes">○</td><td class="c muted">—</td><td>ネットが無くても動く</td></tr>
+</table>
+</div>
+
+<h3>却下した「どこでやるか」</h3>
+<div class="grid g2">
+  <div class="card ng"><h3>実機で cargo を使う <span class="badge b-ng">却下</span></h3>
+    <p>実機のメモリ・SD・時間のどれも足りない。</p>
+    <details><summary>理由を詳しく</summary><div class="body">
+      <ul>
+        <li><b>メモリ</b>: rustc は依存のある crate を 1 つビルドするだけで数百 MB 使うことがよくある。実機で OS から見えるのは 352MB で、空きは 80〜110MB。スワップ（zram）に追い出されて極端に遅くなるか、メモリ不足で殺される</li>
+        <li><b>SD への書き込み</b>: <code>target/</code> は数百 MB〜GB 単位になり、ビルドのたびに書き換わる</li>
+        <li><b>置き場</b>: Rust のツールチェーンそのものが 1GB 前後</li>
+        <li><b>時間</b>: A53（最大 1GHz）で依存込みのビルドは数分〜十数分の見込み</li>
+        <li><code>cargo check</code> も依存のメタデータをビルドするので同じ。rust-analyzer は論外</li>
+      </ul>
+      <p class="muted">数字は見込み。実機では測っていない。</p>
+    </div></details>
+  </div>
+  <div class="card ng"><h3>実機に npm を入れる <span class="badge b-ng">却下</span></h3>
+    <p>依存解決が重く、SD に小さなファイルを大量に書き、インストールスクリプトが実機で動く。</p>
+    <details><summary>理由を詳しく</summary><div class="body">
+      <ul>
+        <li><b>メモリ</b>: npm 自体が Node（V8）のプログラム。依存の木の解決に数十〜数百 MB 使う</li>
+        <li><b>SD</b>: 1 回のインストールで数千〜数万の小さなファイルを、キャッシュと <code>node_modules</code> の二重に書く。ext4 では 1 ファイルごとにメタデータとジャーナルも書かれ、SD は大きな消去単位で書き直すので、小さな書き込みは増幅される。途中で電池が切れると <code>node_modules</code> が半端に残る</li>
+        <li><b>サプライチェーン</b>: <code>postinstall</code> などが実機の <code>jimmy</code> の権限で動き、ファイルや SSH の鍵に届く</li>
+        <li>LLRT も「1 ファイルにまとめて」と言っているので、どのみちまとめる手順が要る</li>
+      </ul>
+    </div></details>
+  </div>
+  <div class="card ng"><h3>実行もビルド係でする <span class="badge b-ng">却下</span></h3>
+    <p>試験以外は実機で実行する。</p>
+    <details><summary>理由を詳しく</summary><div class="body">
+      <ul>
+        <li><b>実機にしか無いもの</b>: 液晶（fb0）・キー・カメラ・Bluetooth・GPIO は、ビルド係には無い</li>
+        <li><b>環境の違い</b>: ビルド係は x86_64。aarch64 の実行ファイルを動かすには qemu が要り、OS・ライブラリ・<code>/dev</code> も違う</li>
+        <li><b>対話と停止</b>: 入出力と Ctrl+C をネット越しに中継することになる</li>
+        <li><b>費用</b>: Containers は動いている間ずっと課金。常駐するプログラムを試すと読めなくなる</li>
+        <li>例外: ハードウェアに触らない<b>試験</b>はビルド係で動かして結果だけ返す</li>
+      </ul>
+    </div></details>
+  </div>
+  <div class="card ng"><h3>Workers だけでやる <span class="badge b-ng">却下</span></h3>
+    <p>Workers（V8 の上の JS）では任意の実行ファイルを動かせない。受付の役にだけ使う。</p>
+    <details><summary>理由を詳しく</summary><div class="body">
+      <ul>
+        <li>cargo・gcc・npm 本体・TS 7 の <code>tsc</code>（Go 製）はどれも実行ファイルなので、Workers では動かない</li>
+        <li>esbuild の wasm 版と npm レジストリからの取得なら JS で書けるが、1 回あたりの CPU 時間とスクリプトの大きさに上限がある</li>
+      </ul>
+    </div></details>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="no">2</span>全体の形</h2>
+<div class="svgbox">
+<svg viewBox="0 0 990 360" width="100%" role="img" aria-label="実機の zcode と zc-remote から Access、Worker、Durable Object、コンテナへの流れ">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#3794ff"/></marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#3dd68c"/></marker>
+    <marker id="ay" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#e5c07b"/></marker>
+  </defs>
+  <!-- device frame -->
+  <rect x="6" y="20" width="200" height="190" rx="12" fill="none" stroke="#3794ff" stroke-dasharray="4 4"/>
+  <text x="106" y="40" fill="#3794ff" font-size="12" text-anchor="middle">実機</text>
+  <rect x="20" y="50" width="172" height="58" rx="8" fill="#252a30" stroke="#3794ff"/>
+  <text x="106" y="74" fill="#fff" font-size="14" text-anchor="middle" font-weight="700">zcode</text>
+  <text x="106" y="94" fill="#8b949e" font-size="11" text-anchor="middle">専用スレッド 1 本・TLS なし</text>
+  <rect x="20" y="138" width="172" height="62" rx="8" fill="#252a30" stroke="#3794ff"/>
+  <text x="106" y="162" fill="#fff" font-size="14" text-anchor="middle" font-weight="700">zc-remote</text>
+  <text x="106" y="182" fill="#8b949e" font-size="11" text-anchor="middle">別プロセス・TLS・WebSocket 1 本</text>
+  <line x1="106" y1="108" x2="106" y2="136" stroke="#3794ff" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="150" y="126" fill="#8b949e" font-size="10" text-anchor="middle">UNIX ソケット</text>
+  <!-- access -->
+  <rect x="250" y="70" width="140" height="110" rx="10" fill="#252a30" stroke="#c586c0"/>
+  <text x="320" y="100" fill="#fff" font-size="15" text-anchor="middle" font-weight="700">Access</text>
+  <text x="320" y="124" fill="#8b949e" font-size="12" text-anchor="middle">サービストークンを</text>
+  <text x="320" y="142" fill="#8b949e" font-size="12" text-anchor="middle">確かめ、JWT を付ける</text>
+  <!-- worker -->
+  <rect x="440" y="70" width="150" height="110" rx="10" fill="#252a30" stroke="#c586c0"/>
+  <text x="515" y="100" fill="#fff" font-size="15" text-anchor="middle" font-weight="700">Worker</text>
+  <text x="515" y="124" fill="#8b949e" font-size="12" text-anchor="middle">JWT を確認・回数制限</text>
+  <text x="515" y="142" fill="#8b949e" font-size="12" text-anchor="middle">身元を device_id に</text>
+  <!-- DO -->
+  <rect x="640" y="70" width="150" height="110" rx="10" fill="#252a30" stroke="#c586c0"/>
+  <text x="715" y="100" fill="#fff" font-size="14" text-anchor="middle" font-weight="700">Durable Object</text>
+  <text x="715" y="124" fill="#8b949e" font-size="12" text-anchor="middle">ジョブの持ち主</text>
+  <text x="715" y="142" fill="#8b949e" font-size="12" text-anchor="middle">切れても続ける</text>
+  <!-- container -->
+  <rect x="840" y="60" width="140" height="130" rx="10" fill="#1b2a22" stroke="#3dd68c"/>
+  <text x="910" y="90" fill="#fff" font-size="15" text-anchor="middle" font-weight="700">コンテナ</text>
+  <text x="910" y="114" fill="#8b949e" font-size="12" text-anchor="middle">cz-dev ベース</text>
+  <text x="910" y="132" fill="#8b949e" font-size="12" text-anchor="middle">linux/amd64</text>
+  <text x="910" y="156" fill="#3dd68c" font-size="12" text-anchor="middle">cargo npm tsc</text>
+  <text x="910" y="174" fill="#3dd68c" font-size="12" text-anchor="middle">esbuild gcc</text>
+  <!-- arrows -->
+  <path d="M 192 170 L 222 170 L 222 125 L 248 125" fill="none" stroke="#3794ff" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="390" y1="125" x2="438" y2="125" stroke="#3794ff" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="590" y1="125" x2="638" y2="125" stroke="#3794ff" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="790" y1="125" x2="838" y2="125" stroke="#3794ff" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="414" y="116" fill="#3794ff" font-size="10" text-anchor="middle">TLS</text>
+  <path d="M 910 190 L 910 232 L 150 232 L 150 202" fill="none" stroke="#3dd68c" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#ag)"/>
+  <text x="530" y="252" fill="#3dd68c" font-size="12" text-anchor="middle">同じ WebSocket で: 目録への返事・ログ（まとめて）・診断・実行ファイル（バイナリのフレーム）</text>
+  <!-- PC path -->
+  <rect x="640" y="282" width="340" height="66" rx="10" fill="#252a30" stroke="#e5c07b" stroke-dasharray="5 4"/>
+  <text x="810" y="308" fill="#fff" font-size="14" text-anchor="middle" font-weight="700">または: PC の開発コンテナ</text>
+  <text x="810" y="330" fill="#8b949e" font-size="12" text-anchor="middle">同じ受付のプログラム。TLS なし（WireGuard 済み）</text>
+  <path d="M 60 200 L 60 315 L 636 315" fill="none" stroke="#e5c07b" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#ay)"/>
+  <text x="340" y="306" fill="#e5c07b" font-size="12" text-anchor="middle">Tailscale で直接（Access・Worker を通らない）</text>
+</svg>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="no">3</span>認証: 実機を誰だと認めるか</h2>
+<p>Cloudflare のビルド係はインターネットにいるので、「この依頼は自分の CardputerZero から来た」と確かめる必要がある。候補は 5 つ。</p>
+
+<div class="grid g2">
+  <div class="card ok"><h3>Access のサービストークン <span class="badge b-ok">採用</span></h3>
+    <p>実機ごとに ID と秘密の組を発行し、つなぐときのヘッダに付ける（<code>CF-Access-Client-Id</code> / <code>CF-Access-Client-Secret</code>）。Access が門番になり、合わなければ Worker まで届かない。</p>
+    <details><summary>持ち方と、失くしたとき</summary><div class="body">
+      <ul>
+        <li>実機では <code>~/.config/zcode/remote-token.json</code>（権限 0600。広ければ読まない）。<code>{"scheme":"cf-access-service-token", ...}</code> の形で方式を書いておく。リポジトリには入れない。ログにも出さない</li>
+        <li>有効期限は 1 年程度。期限の 1 週間前に通知、更新は 1 年ずつ。秘密のローテーションは古い秘密を 1 時間〜30 日まで並行して使える</li>
+        <li>機体ごとに別のトークン（タグに機体名）。失くしたらそのトークンだけ無効にする</li>
+        <li>Worker は Access が付ける JWT を Web Crypto（RS256・ES256・Ed25519）で確かめる。Worker に秘密は置かない</li>
+        <li>確かめるのは<b>つなぐとき（WebSocket の Upgrade）だけ</b>。長い接続の途中でトークンの期限が来ても切らない</li>
+        <li>F5 で動かすプログラムも <code>jimmy</code> なのでトークンを読める。守りはサーバ側に置く: 回数制限・1 日のジョブ数・同時に動かすコンテナ数の上限。漏れても「ビルド時間を使われる」だけにする</li>
+      </ul>
+    </div></details>
+  </div>
+
+  <div class="card later"><h3>Tailscale のノード ID トークン <span class="badge b-later">将来</span></h3>
+    <p>実機が <code>tailscale id-token &lt;宛先&gt;</code> で Tailscale に署名された短命のトークンをもらい、Worker が Tailscale の公開鍵で確かめる。秘密を実機に置かずに済む、いちばん良い形。</p>
+    <details><summary>今は使えない理由と、乗り換えを安くする作り</summary><div class="body">
+      <ol>
+        <li>コマンドはある（実機の Tailscale 1.104.7）が「作業中」の扱いで、<code>TAILSCALE_USE_WIP_CODE=1</code> を付けないと動かない</li>
+        <li>付けて試すと、Tailscale のサーバーが <b>"id-token access denied"</b> と断った（2026-11-16）。公式の文書に有効にする手順が無い</li>
+        <li>資料にあった「Workload Identity Federation」は<b>向きが逆</b>。GitHub Actions などが出したトークンを Tailscale が受け取るためのもので、Tailscale のノードが外向けのトークンを出す話ではない</li>
+      </ol>
+      <p><span class="badge b-rev">レビュー</span> 乗り換えを安くするため、<code>zc-remote</code> の中で認証を 1 つの口にまとめる:</p>
+<pre><span class="k">trait</span> Credential {
+    <span class="k">fn</span> headers(&amp;<span class="k">mut</span> self, out: &amp;<span class="k">mut</span> Vec&lt;(HeaderName, String)&gt;) -&gt; Result&lt;(), AuthError&gt;;
+    <span class="k">fn</span> rejected(&amp;<span class="k">mut</span> self) -&gt; Retry;   <span class="cm">// 401 / 403 / 302 を受けたとき</span>
+}
+<span class="cm">// 実装: None（PC・tailnet）、AccessServiceToken、将来の TailscaleIdToken { audience }</span></pre>
+      <ul>
+        <li>Worker で身元を 1 つの形（<code>device_id</code>）に直してから DO に渡す。DO と受付のプログラムは方式を知らない。移行中は 2 方式を並行して受ける</li>
+        <li>ID トークンは取るのに数十〜100ms かかる見込みなので、期限の 60 秒前まで RAM に持つ</li>
+        <li>PC の経路なら、受付のプログラムが tailscaled に「相手はどのノードか」（whois）を聞ける。<b>ノードの身元は PC の経路なら今日から使える</b></li>
+      </ul>
+    </div></details>
+  </div>
+
+  <div class="card ng wide"><h3>Tailscale（tsidp）を Access の OIDC ログインにする <span class="badge b-ng">却下</span></h3>
+    <p>OIDC は「<b>人がブラウザでログインする</b>」ための仕組みで、画面の無いプログラムが毎回の依頼で使う形になっていない。下で順を追って説明する。</p>
+    <details open><summary>なぜ OIDC が合わないのか（図つき）</summary><div class="body">
+      <p><b>OIDC の流れ（認可コードフロー）</b>。Access のログインに外部の IdP（ここでは tsidp）を使うと、こう動く:</p>
+      <div class="svgbox" style="margin:8px 0">
+      <svg viewBox="0 0 900 420" width="100%" role="img" aria-label="OIDC の認可コードフローと、合わない箇所">
+        <defs><marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/></marker></defs>
+        <text x="110" y="24" fill="#fff" font-size="14" text-anchor="middle" font-weight="700">ブラウザ（人）</text>
+        <text x="380" y="24" fill="#fff" font-size="14" text-anchor="middle" font-weight="700">Cloudflare Access</text>
+        <text x="650" y="24" fill="#fff" font-size="14" text-anchor="middle" font-weight="700">tsidp（IdP）</text>
+        <text x="650" y="40" fill="#8b949e" font-size="11" text-anchor="middle">tailnet の中で動く</text>
+        <line x1="110" y1="48" x2="110" y2="410" stroke="#343a42" stroke-dasharray="4 4"/>
+        <line x1="380" y1="48" x2="380" y2="410" stroke="#343a42" stroke-dasharray="4 4"/>
+        <line x1="650" y1="48" x2="650" y2="410" stroke="#343a42" stroke-dasharray="4 4"/>
+        <line x1="110" y1="70" x2="376" y2="70" stroke="#8b949e" stroke-width="1.5" marker-end="url(#m)"/>
+        <text x="245" y="64" fill="#d8dde3" font-size="12" text-anchor="middle">① 保護されたページを開く</text>
+        <line x1="380" y1="110" x2="114" y2="110" stroke="#8b949e" stroke-width="1.5" marker-end="url(#m)"/>
+        <text x="245" y="104" fill="#d8dde3" font-size="12" text-anchor="middle">② 「IdP でログインして」と転送</text>
+        <line x1="110" y1="150" x2="646" y2="150" stroke="#8b949e" stroke-width="1.5" marker-end="url(#m)"/>
+        <text x="380" y="144" fill="#d8dde3" font-size="12" text-anchor="middle">③ ブラウザが IdP のログイン画面へ（tsidp は tailnet の接続で人を見分ける）</text>
+        <line x1="650" y1="190" x2="114" y2="190" stroke="#8b949e" stroke-width="1.5" marker-end="url(#m)"/>
+        <text x="380" y="184" fill="#d8dde3" font-size="12" text-anchor="middle">④ 「コード」を持たせて Access の callback へ戻す</text>
+        <line x1="110" y1="226" x2="376" y2="226" stroke="#8b949e" stroke-width="1.5" marker-end="url(#m)"/>
+        <text x="245" y="220" fill="#d8dde3" font-size="12" text-anchor="middle">⑤ callback にコードを渡す</text>
+        <line x1="380" y1="268" x2="646" y2="268" stroke="#f47067" stroke-width="2" marker-end="url(#m)"/>
+        <text x="515" y="262" fill="#f47067" font-size="12" text-anchor="middle">⑥ コードをトークンに交換・公開鍵を取る</text>
+        <text x="515" y="284" fill="#f47067" font-size="11" text-anchor="middle">Cloudflare のサーバーから → インターネット越し</text>
+        <line x1="380" y1="320" x2="114" y2="320" stroke="#8b949e" stroke-width="1.5" marker-end="url(#m)"/>
+        <text x="245" y="314" fill="#d8dde3" font-size="12" text-anchor="middle">⑦ ログイン済みの印（Cookie）を渡す</text>
+        <circle cx="40" cy="150" r="14" fill="#f47067"/><text x="40" y="155" fill="#fff" font-size="14" text-anchor="middle" font-weight="700">A</text>
+        <circle cx="780" cy="268" r="14" fill="#f47067"/><text x="780" y="273" fill="#fff" font-size="14" text-anchor="middle" font-weight="700">B</text>
+        <circle cx="40" cy="320" r="14" fill="#f47067"/><text x="40" y="325" fill="#fff" font-size="14" text-anchor="middle" font-weight="700">C</text>
+        <text x="380" y="370" fill="#8b949e" font-size="12" text-anchor="middle">赤い丸 = 実機の zcode で使おうとすると詰まるところ（下の A・B・C）</text>
+        <text x="380" y="392" fill="#8b949e" font-size="12" text-anchor="middle">サービストークンなら ①〜⑦ は無く、つなぐときにヘッダを付けるだけ</text>
+      </svg>
+      </div>
+      <ol>
+        <li><b>A: ブラウザと人が前提</b>。③ でログイン画面を出し、④⑤ で画面を移って戻る。zcode が F5 や保存のたびに出す依頼は、画面の無いプログラムの通信なので、この流れを踏めない。Access の OIDC 連携の文書も、ブラウザが移る先の URL（callback）を登録して、ダッシュボードの「Test」ボタンで試す、という人向けの手順しか書いていない</li>
+        <li><b>B: tsidp に「内」と「外」の両方から届く必要がある</b>（文書と仕組みからの推測で、試してはいない）。
+          <ul>
+            <li>③ で tsidp は「どの tailnet の接続から来たか」で人を見分けるので、ブラウザは tailnet の中から tsidp に届く必要がある</li>
+            <li>⑥ は Cloudflare のサーバーが直接 tsidp に問い合わせる。Cloudflare は tailnet の中にいないので、tsidp のトークンと公開鍵の窓口を Funnel などで<b>インターネットに出す</b>必要がある</li>
+            <li>自分の IdP をインターネットに公開することになる。tsidp の文書は tailnet の中で使う前提で、公開の話は無い。しかも tsidp は「実験的・互換性が壊れることがある」と書かれている</li>
+          </ul>
+        </li>
+        <li><b>C: 決まるのは「人」で、「機体」ではない</b>。⑦ で手に入るのはログインした人のセッション。一定時間で切れるので、切れるたびに人がログインし直す必要がある。zcode が無人で依頼を出し続ける用途に合わない。失くした実機だけ止めたい、という要求にもサービストークン（機体ごとに 1 つ）の方が素直</li>
+      </ol>
+      <div class="callout"><b>抜け道もある</b>: <code>cloudflared access login &lt;URL&gt;</code> を実機で動かすと、ログイン用の URL が出る。それを手元のスマホのブラウザで開いてログインすると、実機の cloudflared がトークンを受け取れる。画面の無い機械でも OIDC を通せるが、cloudflared を実機に入れる必要があり、セッションが切れるたびに人の手が要る。F5 を押したら「ログインし直して」と止まる作りになるので、採らない。</div>
+      <div class="callout green"><b>OIDC が向いている場面</b>: 人がブラウザで見る画面（ビルドの履歴・試験の結果を見るダッシュボードなど）を作るなら、Access のログインに Tailscale の身元を使う形は自然。そのときにもう一度考える。</div>
+    </div></details>
+  </div>
+
+  <div class="card ng"><h3>Tailscale の OAuth クライアントで確かめる <span class="badge b-ng">却下</span></h3>
+    <p>Worker が Tailscale の API に「この機体は tailnet にいるか」を聞く形。証明にならない。</p>
+    <details><summary>理由を詳しく</summary><div class="body">
+      <ul>
+        <li>Worker が API で分かるのは「その名前の機体が tailnet にいる」ことまで。<b>今の依頼が本当にその機体から来たか</b>は分からない。名前を名乗るだけなら誰でもできる</li>
+        <li>デバイス一覧を読む権限（<code>devices:core</code>）は機体の承認・削除・タグの変更もできる強い権限で、その秘密を Worker に置くことになる</li>
+        <li>API トークンは 1 時間で切れるので、Worker が取り直し続ける必要もある</li>
+      </ul>
+    </div></details>
+  </div>
+
+  <div class="card ng"><h3>Cloudflare Tunnel で tailnet とつなぐ <span class="badge b-ng">却下</span></h3>
+    <p>PC をビルド係にする場合の通り道の候補。実機と PC はすでに Tailscale でつながっているので要らない。</p>
+    <details><summary>理由を詳しく</summary><div class="body">
+      <ul>
+        <li>Tunnel のプライベートネットワークは、Cloudflare の端末アプリを入れて組織に登録した利用者が、社内のネットワークに入るためのもの</li>
+        <li>文書に「cloudflared は利用者側から始まった通信だけを中継する」とある。Worker やコンテナから tailnet の中の PC へ向かう通信に使えるかは書かれていない</li>
+        <li>実機 → PC は Tailscale でそのまま届くので、Cloudflare を挟む利点が無い</li>
+      </ul>
+    </div></details>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="no">4</span>ビルド係（Cloudflare Containers）</h2>
+<div class="grid g3">
+  <div class="card"><h3>イメージ</h3><p>開発コンテナ（<code>container/Dockerfile</code>）がもと。Containers は <code>linux/amd64</code> で作る前提で、開発コンテナも x86_64 で動いて aarch64 にクロスビルドするので合う。足すのは Node・npm・esbuild・TS 7 の <code>tsc</code>・受付のプログラム。</p></div>
+  <div class="card"><h3>振り分けと寿命</h3><p>DO がジョブの持ち主。使わなくなって 10〜30 分で止める。止めるときは SIGTERM、最大 15 分後に SIGKILL。冷えた状態からの起動は公式の目安で 1〜3 秒だが、<span class="badge b-rev">レビュー</span> Rust・クロス・Node 入りの GB 級のイメージで成り立つかは<b>未確認</b>。</p></div>
+  <div class="card"><h3>大きさ</h3><p><code>standard-2</code>（1 vCPU・6GiB）だと、依存込みの Rust の初回ビルドは分単位の見込み。冷えるたびに起きるので、<code>standard-4</code>（4 vCPU・12GiB）とキャッシュを最初から組みにする。</p></div>
+</div>
+
+<h3>キャッシュ（いちばんの課題）</h3>
+<p>ディスクは使い捨て。止まると cargo の <code>target/</code>・crate のキャッシュ・npm のキャッシュが全部消える。<span class="badge b-rev">レビュー</span> スナップショットか sccache は「次に試す」ではなく<b>最初から計画に入れる</b>。</p>
+<div class="scroll"><table>
+  <tr><th>手</th><th>内容</th><th>使いどころ</th></tr>
+  <tr><td>温めておく</td><td>止めるまでの時間を長めに</td><td>続けて作業している間は効く。ただし<b>メモリの料金がずっとかかる</b>（§9）</td></tr>
+  <tr><td>スナップショット</td><td>依存をそろえた状態を写しておき、冷えたらそこから始める。<code>durable_object</code> 方式で使え、30 日保持、公開ベータの間は無料</td><td>初回のビルドの重さを消す本命</td></tr>
+  <tr><td>R2 を FUSE でつなぐ</td><td>公式に例がある。「SSD ほど速くない」</td><td>ダウンロードしたものの置き場向き</td></tr>
+  <tr><td>sccache（置き場を R2）</td><td>rustc の出力を crate ごとに R2 へ</td><td>Rust の依存のビルドを使い回す</td></tr>
+</table></div>
+
+<details><summary>DO の名前の付け方と、2 台の機体 <span class="badge b-rev">レビュー</span></summary><div class="body">
+  <ul>
+    <li>機体が 2 台ある。DO の名前を「プロジェクト」だけにすると、2 台の同じプロジェクトが同じコンテナに当たる。キャッシュの共有には良いが、作業フォルダを取り合う</li>
+    <li>どちらかにする: DO の中でジョブを直列にする、またはジョブごとに作業の木を分ける（キャッシュは共有）</li>
+    <li>試験を x86_64 で動かすと、aarch64 用とホスト用で <code>target/</code> が 2 つになり、キャッシュもビルド時間も倍になる。承知の上で採る</li>
+  </ul>
+</div></details>
+
+<details><summary>安全面</summary><div class="body">
+  <ul>
+    <li><code>build.rs</code>・<code>postinstall</code> などの任意のコードと試験は、このコンテナの中だけで動く。実機にも PC にも届かない。コンテナには秘密を入れない</li>
+    <li>出来上がった実行ファイルは、結局実機で <code>jimmy</code> の権限で動く。ビルドを外に出しても、実行するコードそのものの安全性は変わらない</li>
+  </ul>
+</div></details>
+
+<!-- ============================================================ -->
+<h2><span class="no">5</span>送る形・返す形 <span class="badge b-rev">レビューで変更</span></h2>
+<p><code>zc-remote</code> とビルド係の中の受付のプログラムの約束。Cloudflare でも PC でも同じ。<b>WebSocket 1 本</b>に全部流す（制御は JSON、ファイルと実行ファイルはバイナリのフレーム。base64 にしない。64〜256KB に刻む）。全メッセージにジョブ id、最初の <code>hello</code> に約束の版。</p>
+
+<h3>5.1 送り方: 目録 → 足りない分だけ</h3>
+<div class="svgbox">
+<svg viewBox="0 0 900 250" width="100%" role="img" aria-label="目録を送り、足りないファイルだけ送る流れ">
+  <defs><marker id="mb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#3794ff"/></marker>
+  <marker id="mg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#3dd68c"/></marker></defs>
+  <text x="120" y="24" fill="#fff" font-size="14" text-anchor="middle" font-weight="700">zc-remote（実機）</text>
+  <text x="760" y="24" fill="#fff" font-size="14" text-anchor="middle" font-weight="700">受付のプログラム（ビルド係）</text>
+  <line x1="120" y1="36" x2="120" y2="240" stroke="#343a42" stroke-dasharray="4 4"/>
+  <line x1="760" y1="36" x2="760" y2="240" stroke="#343a42" stroke-dasharray="4 4"/>
+  <line x1="120" y1="64" x2="756" y2="64" stroke="#3794ff" stroke-width="2" marker-end="url(#mb)"/>
+  <text x="440" y="56" fill="#d8dde3" font-size="12" text-anchor="middle">① manifest: パス・大きさ・SHA-256 の一覧（100 ファイルで数 KB）</text>
+  <line x1="760" y1="104" x2="124" y2="104" stroke="#3dd68c" stroke-width="2" marker-end="url(#mg)"/>
+  <text x="440" y="96" fill="#d8dde3" font-size="12" text-anchor="middle">② need: 持っていない中身の一覧（2 回目からはふつう 1〜2 個）</text>
+  <line x1="120" y1="144" x2="756" y2="144" stroke="#3794ff" stroke-width="2" marker-end="url(#mb)"/>
+  <text x="440" y="136" fill="#d8dde3" font-size="12" text-anchor="middle">③ その中身だけ（バイナリのフレーム）</text>
+  <line x1="120" y1="184" x2="756" y2="184" stroke="#3794ff" stroke-width="2" marker-end="url(#mb)"/>
+  <text x="440" y="176" fill="#d8dde3" font-size="12" text-anchor="middle">④ job: kind と オプション（tree id = 目録の SHA-256）</text>
+  <line x1="760" y1="224" x2="124" y2="224" stroke="#3dd68c" stroke-width="2" marker-end="url(#mg)"/>
+  <text x="440" y="216" fill="#d8dde3" font-size="12" text-anchor="middle">⑤ log・diagnostic・test・done・実行ファイル</text>
+</svg>
+</div>
+<details><summary>なぜ tar をやめるのか（mtime の罠） <span class="badge b-rev">レビュー</span></summary><div class="body">
+  <ul>
+    <li><b>正しさの問題</b>: CM0 には時計の電池（RTC）が無く、NTP が合うまで時計がずれる。cargo はファイルの更新時刻（mtime）で変更を判定する
+      <ul>
+        <li>tar で実機の mtime を持ち込み、時計が進んでいれば → 毎回全部ビルドし直し</li>
+        <li>時計が遅れていれば → <b>変更が拾われず、古いビルドが黙って返る</b></li>
+        <li>mtime を捨てて毎回全部書き直せば → 毎回全部ビルドし直し</li>
+      </ul>
+      なので受付側は必ず「中身のハッシュが変わったファイルだけ書く」。それなら最初から目録で送る</li>
+    <li>コンテナが冷えても、木を DO か R2 に持っていれば実機は送り直さない。切れた後の再送も足りない分だけ</li>
+    <li>手打ちのプロジェクトは数十 KB なので、転送量の差は小さい。採る理由は正しさと、やり直しの強さ</li>
+  </ul>
+</div></details>
+<details><summary>変わったファイルの見つけ方・ハッシュ</summary><div class="body">
+  <ul>
+    <li><code>zc-remote</code> は RAM に <code>{パス → (大きさ, mtime_ns, inode, sha256)}</code> を持つ。依頼のたびに <code>stat</code> で木を歩き（数百ファイルで数 ms の見込み）、食い違ったものだけ読み直す。SD には何も書かない</li>
+    <li>「エディタが保存したファイル」だけに頼らない。ターミナルの <code>git pull</code> や scp でも変わる。走査の直前 2 秒以内の mtime のものは無条件に読み直す</li>
+    <li>ハッシュは <b>SHA-256 だけ</b>。実機の CPU には SHA の命令が無い（<code>/proc/cpuinfo</code> の Features は <code>fp asimd evtstrm crc32 cpuid</code>、実測）ので 30〜60MB/s の見込みだが、ソースの量なら問題にならない。TLS・Web Crypto・R2 もどのみち SHA-256。BLAKE3 は速いが NEON 版は C で、サーバ側に無い</li>
+    <li>再起動後の初回は全部ハッシュし直す（1MB で 20〜30ms の見込み）</li>
+  </ul>
+</div></details>
+<details><summary>決める必要があるもの（プロジェクトの範囲・lock）</summary><div class="body">
+  <ul>
+    <li>プロジェクトの根: <code>[workspace]</code> のある <code>Cargo.toml</code> までさかのぼるか</li>
+    <li>根の外への <code>path = "../x"</code> の扱い</li>
+    <li>除外: <code>target</code>・<code>node_modules</code>・<code>.git</code> と <code>.gitignore</code>。シンボリックリンクはたどらない。上限は「1 ファイルの上限 + 1 回の合計の上限」</li>
+    <li><b><code>Cargo.lock</code> が無いとき</b>、ビルド係が作った lock を実機へ返して書く（無いと鍵が安定しない）。SD への書き込みは変わったときだけ、zc-store の原子的な保存で</li>
+  </ul>
+</div></details>
+
+<h3>5.2 ジョブの種類</h3>
+<div class="scroll"><table>
+  <tr><th>kind</th><th>中でやること</th><th>返すもの</th></tr>
+  <tr><td><code>build</code></td><td>Rust: F5 用のプロファイル（§5.4）で <code>--target aarch64-unknown-linux-gnu</code> ／ C: <code>aarch64-linux-gnu-gcc -mcpu=cortex-a53</code> ／ JS・TS: <code>npm ci --ignore-scripts</code> → <code>tsc</code> → esbuild</td><td>実行ファイル（または 1 ファイルの JS）、診断</td></tr>
+  <tr><td><code>check</code></td><td>Rust: <code>cargo check --message-format=json</code> ／ TS（npm の依存あり）: <code>tsc --noEmit</code></td><td>診断だけ</td></tr>
+  <tr><td><code>test</code></td><td><code>cargo test</code> ／ <code>npm test</code>（x86_64 のまま）</td><td>試験の結果、診断</td></tr>
+</table></div>
+<p class="muted"><span class="badge b-rev">レビュー</span> 以前の案の <code>deps</code>（依存の <code>.d.ts</code> 一式を実機に返す）はやめた。型定義は数千ファイル・数十 MB になりうり、SD に置けば npm を却下した理由と同じ、tmpfs に置けば RAM を食う。<code>--lib es2022,dom</code> だけで 91MB（実測）なので、依存の型まで読ませれば空きメモリを超える見込み。</p>
+
+<h3>5.3 ジョブは接続から切り離す</h3>
+<ul>
+  <li><b>ジョブの持ち主は DO</b>。接続が切れても続ける。実機はつなぎ直して <code>attach {job, log_offset, artifact_offset}</code> で続きを受ける</li>
+  <li>ジョブ id は「tree id + kind + オプション」のハッシュ。出し直しが自然に同じジョブに当たり、同じ鍵の結果があればビルドせずに返す</li>
+  <li><b>取り消し</b>: 新しい保存の <code>check</code> は、同じ接続で <code>cancel</code> を送ってから新しい <code>job</code>。受付側は cargo をプロセスグループごと止める。編集しただけ（保存なし）では取り消さない。F5 のビルドは次の F5 でだけ取り消す</li>
+  <li>受付側は遅い相手を待たない。ログは受付側に全部残し、実機へはまとめて送る（§6.4）</li>
+</ul>
+
+<h3>5.4 返事の例と、F5 のビルド設定</h3>
+<pre>{<span class="k">"type"</span>:<span class="s">"log"</span>,<span class="k">"job"</span>:<span class="s">"j7f…"</span>,<span class="k">"text"</span>:<span class="s">"   Compiling foo v0.1.0\n   Compiling bar v0.2.1\n"</span>}
+{<span class="k">"type"</span>:<span class="s">"diagnostics"</span>,<span class="k">"job"</span>:<span class="s">"j7f…"</span>,<span class="k">"complete"</span>:<span class="k">true</span>,<span class="k">"files"</span>:[{<span class="k">"path"</span>:<span class="s">"src/main.rs"</span>,<span class="k">"diags"</span>:[{<span class="k">"line"</span>:<span class="n">11</span>,<span class="k">"col"</span>:<span class="n">4</span>,<span class="k">"severity"</span>:<span class="s">"error"</span>,<span class="k">"code"</span>:<span class="s">"E0308"</span>,<span class="k">"message"</span>:<span class="s">"mismatched types"</span>}]}]}
+{<span class="k">"type"</span>:<span class="s">"done"</span>,<span class="k">"job"</span>:<span class="s">"j7f…"</span>,<span class="k">"exit"</span>:<span class="n">0</span>,<span class="k">"artifact"</span>:{<span class="k">"name"</span>:<span class="s">"foo"</span>,<span class="k">"sha256"</span>:<span class="s">"…"</span>,<span class="k">"bytes"</span>:<span class="n">912384</span>}}
+<span class="cm">// このあと同じ接続に、実行ファイルを zstd で圧縮したバイナリのフレーム</span></pre>
+<ul>
+  <li><b>F5 は <code>--release</code> 固定にしない</b>。待ち時間はビルドの時間と実行ファイルの大きさで決まる。F5 用は <code>opt-level=2</code>・LTO なし・incremental・<code>debug=0</code>・strip。配布用は別のオプションで</li>
+  <li>返す前に strip し、zstd を高い圧縮率で（x86 側の仕事）。窓は 2MB 以下（実機の展開メモリを抑える）</li>
+  <li>診断の行・桁は 0 始まり、桁は<b>行の中の UTF-8 のバイト位置</b>（zcode の <code>Span</code> と同じ）。rustc の JSON の桁は 1 始まりの文字数なので、受付のプログラムが直す。日本語のコメントでずれないように</li>
+  <li>依存 crate やマクロ展開の先を指す診断は、手元の呼び出し元の位置に寄せる。寄せられなければ位置なしにしてステータスバーにだけ出す</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2><span class="no">6</span>実機側のクライアント（性能） <span class="badge b-rev">レビュー</span></h2>
+<div class="callout blue">速さを決めるのは暗号の CPU ではない。TLS のハンドシェイクの CPU は 600MHz でも 10〜30ms の見込みで、Wi-Fi の往復 2 回（40〜200ms）より小さい。効くのは <b>往復の回数</b>・<b>運ぶバイト数（とくに実行ファイル）</b>・<b>メインスレッドと SD に触らないこと</b>。iPhone の Bluetooth テザリング（0.5〜1.5Mbit/s の見込み）では 3.2MB の実行ファイルの受信に 20〜50 秒かかり、ここが最大の時間になる。</div>
+
+<h3>6.1 プロセスの形: 別プロセス <code>zc-remote</code></h3>
+<div class="scroll"><table>
+  <tr><th></th><th>zcode の中のスレッド</th><th>別プロセス（必要なとき起動・使わなければ終了）</th></tr>
+  <tr><td>起動</td><td>0</td><td>10ms 前後の見込み（zcode 自体が 10〜12ms）</td></tr>
+  <tr><td>メモリ</td><td>実行ファイル +1〜1.5MB、RSS +0.5〜1.5MB の見込み。圧縮・展開のバッファで zcode のヒープが断片化し、返らない</td><td>動作中 2〜4MB の見込み。終了すれば 0</td></tr>
+  <tr><td>接続の維持</td><td>zcode が動いている間</td><td>zcode を再起動しても残る。CLI と共有できる</td></tr>
+  <tr><td>落ちたとき</td><td>エディタごと落ちる</td><td>エディタは無傷</td></tr>
+  <tr><td>ビルド</td><td>zcode の fat LTO に TLS・JSON が入る（<code>toml</code> が fat LTO の aarch64 で異常終了した原因は未特定）</td><td>別のプロファイル（thin LTO）。zcode は pure Rust のまま</td></tr>
+  <tr><td>止まる呼び出し</td><td><code>getaddrinfo</code> は取り消せない。DNS が死ぬとスレッドが 10 秒以上戻らない</td><td>プロセスごと殺せる</td></tr>
+</table></div>
+<ul>
+  <li>中身はライブラリ crate（<code>zc-remote</code>）: I/O を持たない状態機械 + <code>poll()</code> のループ。<b>tokio は使わない</b></li>
+  <li>実行ファイルは 1 つで 2 通りに動く: CLI（<code>zc-remote build|check|test</code>。段階 1 の「zcode なしで試す」にそのまま使う）と <code>serve</code>（<code>/run/user/1000/zcode/remote.sock</code> で待ち、無通信が数分続いたら終了。zcode か CLI が、無ければ起動する）。systemd の常駐サービスにはしない</li>
+  <li>zcode 側は専用スレッド 1 本（スタック 256KB 程度）がソケットを読み、<code>AppEvent</code> に直す。ローカルの約束は長さつきの固定の並びにして、zcode に JSON の解釈も TLS も入れない</li>
+  <li>ライブラリにしておけば、測った結果「中に入れる方が良い」となっても移せる</li>
+  <li>APPLaunch の Esc 長押しはプロセスグループに SIGTERM を送る。同じグループにしておけば一緒に終わる（ジョブは DO が持つので害は無い）</li>
+</ul>
+
+<h3>6.2 通信と TLS</h3>
+<p>実機の CPU（実測）: <code>fp asimd evtstrm crc32 cpuid</code> — <b>AES・SHA・PMULL の命令が無い</b>。ondemand ガバナは短い処理では上がりきらないので、ハンドシェイクのような 10ms 級の処理は <b>600MHz 前提</b>で見積もる。</p>
+<div class="scroll"><table>
+  <tr><th>処理（見込み）</th><th>ring（アセンブリ）— 採用</th><th>pure Rust（RustCrypto）— 不採用</th></tr>
+  <tr><td>X25519</td><td>0.3〜1ms</td><td>0.5〜1.5ms</td></tr>
+  <tr><td>ECDSA P-256 検証（証明書の鎖で 2〜3 回）</td><td>1〜2ms / 回</td><td>3〜8ms / 回</td></tr>
+  <tr><td>TLS 1.3 のハンドシェイク全体の CPU</td><td>5〜10ms</td><td>15〜30ms</td></tr>
+  <tr><td>再開（PSK）の CPU</td><td>1〜2ms</td><td>2〜4ms</td></tr>
+  <tr><td>ChaCha20-Poly1305</td><td>60〜120MB/s</td><td>30〜60MB/s</td></tr>
+  <tr><td>AES-128-GCM（AES 命令なし）</td><td>15〜35MB/s</td><td>さらに遅い</td></tr>
+  <tr><td>SHA-256</td><td>30〜60MB/s</td><td>同程度</td></tr>
+</table></div>
+<p class="muted">Wi-Fi の実効は良くて 1〜3MB/s、テザリングは 0.1MB/s 級なので、どの暗号でも回線より速い。冷えた接続は DNS + TCP + TLS + Upgrade で往復 3〜4 回（往復 20〜50ms なら 100〜250ms）。温まっていれば 0。</p>
+<div class="grid g2">
+  <div class="card ok"><h3>使うもの</h3><ul>
+    <li>rustls + 自前の小さな HTTP/1.1 Upgrade と WebSocket の枠組み。rustls の <code>read_tls</code> / <code>write_tls</code> を自分の <code>poll()</code> ループに載せる</li>
+    <li>暗号の実装は <b>ring</b>（決定 ①）。C とアセンブリはクロスの gcc で作る。実機の CPU で使えない命令が入らないか、出来上がりを objdump で確かめる（<code>runtimes/llrt/</code> と同じ確かめ方）</li>
+    <li>TLS 1.3 のみ、鍵交換は X25519 のみ、<b>暗号は ChaCha20-Poly1305 だけを出す</b>（サーバに AES-GCM を選ばせない。AES のコードも入らない）</li>
+    <li>ALPN は <code>http/1.1</code> だけ。permessage-deflate は交渉しない（圧縮は自前）</li>
+    <li>根の証明書は <code>webpki-roots</code>（埋め込み）。<code>/etc/ssl/certs</code> を SD から読まない</li>
+    <li>実行ファイルの展開は pure Rust の <code>ruzstd</code></li>
+    <li><b>PC の経路は TLS なし</b>（tailnet の中は WireGuard で暗号化済み）。ssh を通り道にする案は暗号が二重になるのでやめ、ACL にポートを 1 つ足す</li>
+  </ul></div>
+  <div class="card ng"><h3>使わないもの</h3><ul>
+    <li>tokio・hyper・reqwest（実行ファイルが数 MB 増え、ランタイムのスレッドが増える）</li>
+    <li>aws-lc-rs（rustls の既定。大きくビルドが重い）</li>
+    <li>native-tls / openssl（aarch64 の libssl-dev が要る）</li>
+    <li>graviola（aarch64 で AES・SHA・PMULL を要求すると理解している。要確認。そうならこの CPU では動かない）</li>
+    <li>h2・HTTP/3（1 本の WebSocket では多重化の利点が無い）</li>
+    <li>0-RTT（1 往復のために再送攻撃の扱いが増える）</li>
+  </ul></div>
+</div>
+<details><summary>接続を温める・時間切れ・時計</summary><div class="body">
+  <ul>
+    <li><b>温める方が再開より効く</b>: Rust のプロジェクトを開いたとき、または最初の保存で、先につないでコンテナも起こす。TLS の再開チケットは RAM にだけ持つ（減るのは CPU 数 ms と証明書の数 KB で、往復は減らない）</li>
+    <li>温める時間は 60〜90 秒。Cloudflare は無通信の WebSocket を 100 秒前後で切る（要確認）。待機中に ping は打たない（無線を起こし続ける）。静かに閉じ、次は再開でつなぐ</li>
+    <li>時間切れ: DNS 2 秒、接続 3 秒、ハンドシェイク 5 秒。前回つながった IP を RAM に覚えて先に試す。IPv4 と IPv6 は少しずらして並行に（テザリングで IPv6 が通らない場合がある）</li>
+    <li>つなぐ前に分かることは待たない: <code>/sys/class/net/&lt;if&gt;/operstate</code> と既定の経路を見て、無ければ即「オフライン」</li>
+    <li>ジョブ中に 30〜45 秒何も届かなければ切れたとみなし、つなぎ直して <code>attach</code>。受付側は 15 秒黙ったら <code>ping</code></li>
+    <li>やり直し: F5 は 0.5 秒から倍々で 3 回まで。保存時の check はやり直さない（次の保存が代わり）</li>
+    <li>Access の方針が Service Auth でないとログイン画面へ 302 が返る。302 と HTML は認証の失敗として扱い、たどらない</li>
+    <li><b>時計</b>: RTC が無いので、NTP の同期前は証明書の検証が「まだ有効でない」で落ちうる。その種類のエラーを見分け、<code>/run/systemd/timesync/synchronized</code> の有無を見て「時計が合っていない」と出す（実機にこのファイルがあるのは確認済み）</li>
+  </ul>
+</div></details>
+
+<h3>6.3 SD に書かない</h3>
+<div class="scroll"><table>
+  <tr><th>もの</th><th>置き場</th><th>備考</th></tr>
+  <tr><td>実行ファイル</td><td><code>/run/user/1000/zcode/bin/&lt;名前&gt;-&lt;tree id の先頭&gt;</code></td><td>一時名に流し書き → SHA-256 を確かめる → chmod → rename。途中のものは実行しない。ヒープに全体を持たない</td></tr>
+  <tr><td>目録の覚え・TLS のチケット・DNS の結果</td><td><code>zc-remote</code> の RAM</td><td>再起動で消えてよい</td></tr>
+  <tr><td>ログ</td><td>RAM</td><td>上限つき</td></tr>
+  <tr><td>トークン・設定</td><td>SD（<code>~/.config/zcode/</code>）</td><td>書くのは 1 回</td></tr>
+  <tr><td>最後に成功した実行ファイル（オフライン用）</td><td>SD（<code>~/.cache/zcode/bin/</code>）</td><td>決定 ②。プロジェクトごとに 1 つ、圧縮して。控えの段 2 と同じ時機に、変わったときだけ</td></tr>
+  <tr><td><code>Cargo.lock</code> / <code>package-lock.json</code> の書き戻し</td><td>SD（プロジェクト）</td><td>変わったときだけ、zc-store の原子的な保存で</td></tr>
+</table></div>
+<p><code>/run/user/1000</code> は実測で <b>35.3MB</b>（RAM の約 10%）が上限で、<code>noexec</code> は付いていない（実行できる）。控え（zc-store の段 1）と共用なので、実行ファイルはプロジェクトごとに最新 1 つ、合計の上限（たとえば 16MB）を決めて古い順に消す。tmpfs の中身は RAM そのもの。</p>
+
+<h3>6.4 ログをターミナルパネルへ（打鍵を遅らせない）</h3>
+<ul>
+  <li>打鍵の邪魔になるのは CPU ではなく、<b>メインの起床の回数と、パネルの行の SPI 転送</b>（1 行で約 12.9KB、続けて fsync すると最大 7ms 止まる）</li>
+  <li>受付側: ログは 50〜100ms か 4KB ごとにまとめて送る。全体に上限（たとえば 1MB）、超えたら末尾だけ + 「省略」の印</li>
+  <li>zcode 側: 専用スレッドは 1 行ごとに送らず、上限つきのバッファに足して、<b>メインを起こすのは最短 33ms に 1 回</b>（design.md §4.3 のターミナルの間引きと同じ）。直近 100ms 以内に打鍵があれば、ログの描画は次へ送る。あふれたら古い方を捨てる</li>
+  <li>いちばん簡単な形: F5 は「ターミナルパネルの pty で <code>zc-remote build &amp;&amp; 実行</code>」。ログ・間引き・Ctrl+C がターミナルの仕組みで済み、診断だけ <code>serve</code> 経由で zcode に届ける。段階 3 のターミナルと合わせて決める</li>
+</ul>
+
+<h3>6.5 オフライン・電池</h3>
+<ul>
+  <li>電池: 暗号の CPU は 1 回の往復で数十 ms なので効かない。効くのは無線を起こす回数。待機中は ping を打たない。保存時の check は設定で「常に / 接続が温かいときだけ / 手動」</li>
+  <li><b>再起動後のオフライン</b>（決定 ②）: tmpfs は消えるので、最後に成功した実行ファイルを圧縮して <code>~/.cache/zcode/bin/</code> に <b>プロジェクトごとに 1 つだけ</b>残す。書くのは控えの段 2 と同じ時機（60 秒操作が止まったとき・電池が少ないとき・終了時）で、中身が変わったときだけ。書き方は zc-store の原子的な保存（一時ファイル → fsync → rename）。ネットが無いときの F5 は「前の版を実行する？」と聞き、RAM に無ければここから戻す</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2><span class="no">7</span>zcode 側</h2>
+<h3>7.1 F5（コンパイルの要る言語）</h3>
+<div class="steps">
+  <div class="step">保存する</div>
+  <div class="step"><code>zc-remote</code> に <code>build</code> を頼む（無ければ起動）。目録 → 足りない分だけ送る</div>
+  <div class="step">ログをターミナルパネルに流す（間引いて）</div>
+  <div class="step">診断があれば波線とステータスバーに（モック 13 と同じ見せ方）</div>
+  <div class="step">実行ファイルを RAM に置き、確かめてからターミナルパネルで実行</div>
+</div>
+
+<h3>7.2 リモートの仕事は batch に載せない <span class="badge b-rev">レビュー</span></h3>
+<p><code>rt.rs</code> の <code>Worker</code> は依頼を 1 本で直列に実行する。batch はファイルを開く・ハイライトの残り・検索も受け持つので、数秒〜数分かかるリモートの check / build を載せると、その間ファイルが開けなくなる。<code>zc-remote</code> の相手をする専用スレッドを使う。今の保存時チェック（<code>editor.rs</code> の <code>run_check</code>、<code>CancelToken::never()</code>）も同じ問題を持っている（0.4 秒なので目立たないだけ）。</p>
+
+<h3>7.3 診断の型と、届くまでの編集 <span class="badge b-rev">レビュー</span></h3>
+<pre><span class="cm">// zc-intel（crate をまたぐなら zc-core）</span>
+<span class="k">pub struct</span> Diagnostic {            <span class="cm">// 今のまま + 任意の項目</span>
+    <span class="k">pub</span> line: u32, <span class="k">pub</span> col: Option&lt;u32&gt;,
+    <span class="k">pub</span> end: Option&lt;(u32, u32)&gt;,   <span class="cm">// 範囲の終わり（あれば）</span>
+    <span class="k">pub</span> severity: Severity, <span class="k">pub</span> code: Option&lt;Box&lt;str&gt;&gt;,  <span class="cm">// "E0308"</span>
+    <span class="k">pub</span> message: String,
+}
+<span class="k">pub struct</span> FileDiagnostics { <span class="k">pub</span> path: Arc&lt;Path&gt;, <span class="k">pub</span> diags: Vec&lt;Diagnostic&gt; }  <span class="cm">// プロジェクト相対・'/' 区切り</span>
+<span class="k">pub enum</span> DiagSource { Syntax, Remote }
+<span class="k">pub struct</span> DiagnosticSet {
+    <span class="k">pub</span> source: DiagSource,
+    <span class="k">pub</span> base: Version,             <span class="cm">// 依頼したときの版</span>
+    <span class="k">pub</span> complete: bool,            <span class="cm">// 取り消し・失敗の結果では false</span>
+    <span class="k">pub</span> files: Vec&lt;FileDiagnostics&gt;,
+}</pre>
+<ul>
+  <li><code>Diagnostic</code> に <code>file</code> を 1 件ずつ足す形はやめる（確保が増え、タブ単位で動いている <code>shift_diagnostics</code>・<code>marks_of</code>・<code>t.diags</code> を全部直すことになる）</li>
+  <li><b>置き換えは source ごと</b>。今は <code>t.diags = diags</code> で丸ごと差し替えていて、実機の構文チェックとリモートの check が互いを消してしまう</li>
+  <li><code>complete</code> のときだけ「今回出てこなかったファイルの診断」を消す。途中で切れた結果で波線を消さない</li>
+  <li>開いていないファイルの分はプロジェクト側に持ち、開いたときに付ける（ツリーの赤い印・問題一覧にも使える）</li>
+  <li><b>版</b>: 今の <code>AppEvent::Checked</code> には版が無く、届いた診断がその時点のバッファにそのまま付く。リモートは数秒かかるので、その間に行を足すと波線がずれる。依頼時の <code>Version</code> を持たせ、タブ側はその版以降の行の変化を小さな記録（上限つき）に残して、届いた診断をずらしてから付ける。記録があふれたら桁を捨てる</li>
+  <li>診断は 1 件ずつ <code>AppEvent</code> にせず、<code>done</code> でまとめて 1 回</li>
+</ul>
+
+<h3>7.4 TypeScript と試験</h3>
+<div class="grid g2">
+  <div class="card"><h3>TypeScript</h3><p>npm の依存が無ければ実機の <code>tsc</code>（TS 7）。依存があれば <code>check</code> をビルド係で。<code>--lib es2022,dom</code> は約 3.8 秒・91MB（実測）なので、LLRT のグローバルだけの型定義に替えて軽くしたい。</p></div>
+  <div class="card"><h3>試験</h3><p>F5 とは別のコマンド。<code>test</code> を頼んで結果を一覧に。落ちた試験を選んで Enter でその行へ。</p></div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="no">8</span>PC をビルド係にする場合</h2>
+<div class="grid g2">
+  <div class="card ok"><h3>良い点</h3><ul><li>無料・速い・cargo のキャッシュ（<code>cz-cargo-target</code>）が温かい</li><li>認証は Tailscale の ACL と whois（ノードの身元が今日から使える）</li><li>TLS が要らない（WireGuard で暗号化済み）</li></ul></div>
+  <div class="card ng"><h3>弱点</h3><ul><li>PC が点いていないと使えない</li><li>いまの ACL は 22 番だけ。ポートを 1 つ足す</li></ul></div>
+</div>
+<p><span class="badge b-rev">レビュー</span> 設定に <code>auto</code> を入れる: PC に届けば PC、届かなければ Cloudflare。届くかは 300ms の接続の試みで分かる。</p>
+
+<!-- ============================================================ -->
+<h2><span class="no">9</span>費用（Cloudflare Containers）</h2>
+<div class="grid g3">
+  <div class="card"><h3>含まれる分（月 $5）</h3><p>CPU 375 vCPU 分・メモリ 25 GiB 時間・ディスク 200 GB 時間。外への通信は北米・欧州で 1TB、それ以外で 500GB。</p></div>
+  <div class="card"><h3>超過分</h3><p>CPU $0.000020 / vCPU 秒、メモリ $0.0000025 / GiB 秒、ディスク $0.00000007 / GB 秒。動いている間だけ 10ms 単位。</p></div>
+  <div class="card"><h3>1 回のビルド</h3><p><code>standard-4</code> で 1 分 = CPU 4 vCPU 分（含まれる分の約 1%）。超過していても約 0.7 セント。</p></div>
+</div>
+<div class="callout red"><span class="badge b-rev">レビュー</span> <b>温めておく間のメモリが本当の費用</b>。メモリは CPU と違い、動いている間ずっと割り当てた分にかかる。<code>standard-4</code>（12GiB）は 1 時間 0.108 ドルで、含まれる 25GiB 時間は<b>約 2 時間分</b>。30 分温めると 1 回で含まれる分の 24% を使う。1 日 2 時間 × 30 日なら月 6 ドル強の超過の見込み。金額は小さいが、温める時間は短めにし、スナップショットで冷えた起動を速くする方を主にする。</div>
+
+<!-- ============================================================ -->
+<h2><span class="no">10</span>レビューの異論: Containers でなく常設の VM <span class="badge b-ng">採らない</span></h2>
+<div class="callout"><b>2026-11-16 ユーザーが決定: Cloudflare が前提。</b>この案は採らない。記録として残す。</div>
+<div class="card">
+  <p>いちばんの課題（使い捨てのディスクとキャッシュ）は Containers を選んだことから来ている。<b>永続ディスク付きで、止めておける VM を tailnet に入れる</b>形なら:</p>
+  <ul>
+    <li>キャッシュの問題が消える（<code>target/</code> もレジストリも残る）</li>
+    <li>認証は tailnet（ACL と whois）で済み、サービストークンが要らない</li>
+    <li><b>実機に TLS が要らない</b>（PC の経路と同じ 1 本になる。決定 ① も消える）</li>
+  </ul>
+  <p>代わりに、VM の起動・停止の管理と、止まっている間のディスクの料金がかかる。Cloudflare が前提なので採らない（決定 ③）。</p>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="no">11</span>段階</h2>
+<div class="phase"><div class="dot">1</div><div><b><code>zc-remote</code>（CLI）と受付のプログラム</b>、約束（§5）<br><span class="muted">PC の開発コンテナで動かし、zcode なしでコマンドから試す。PC の経路（TLS なし）が先にできる</span></div></div>
+<div class="phase"><div class="dot">2</div><div><b>Cloudflare</b>: Worker・DO・Containers・サービストークン・TLS<br><span class="muted">キャッシュはスナップショットか sccache を最初から</span></div></div>
+<div class="phase"><div class="dot">3</div><div><b>zcode につなぐ</b>（段階 3 のターミナル・F5 と合わせて）<br><span class="muted">専用スレッド、DiagnosticSet と版、Rust の F5・保存時の check、試験のコマンド、TS の check</span></div></div>
+<div class="phase"><div class="dot">4</div><div><b><code>auto</code> の切り替え</b>（PC に届けば PC）</div></div>
+<div class="phase"><div class="dot">5</div><div><b>Tailscale のノード ID トークンへ</b><br><span class="muted">使えるようになったら、サービストークンをやめる</span></div></div>
+
+<!-- ============================================================ -->
+<h2><span class="no">12</span>未確認・測ること</h2>
+<ul class="checklist">
+  <li>コンテナから外への通信（crates.io・npm レジストリ）、1 回の依頼の時間の上限、WebSocket が無通信で切れるまでの時間、1 メッセージの大きさの上限</li>
+  <li>Access の JWT が Worker に届くヘッダ名と、公開鍵の取り方</li>
+  <li>GB 級のイメージの冷えた起動の時間、スナップショットの手順と写しから起動する時間</li>
+  <li>実機に gcc・rustc があるか</li>
+  <li><code>tailscale id-token</code> を tailnet で使えるようにする方法（今は "access denied"）</li>
+  <li>graviola が ARMv8.0 で動かないか</li>
+  <li>LLRT のグローバルの型定義</li>
+</ul>
+<div class="scroll"><table>
+  <tr><th>実機で測ること（ssh で）</th><th>やり方</th></tr>
+  <tr><td>暗号の上限の速さ</td><td><code>openssl speed -evp chacha20-poly1305</code>・<code>-evp aes-128-gcm</code>・<code>sha256</code>・<code>ecdsap256</code>・<code>x25519</code>。ガバナが上がる前後の両方</td></tr>
+  <tr><td>接続の内訳</td><td><code>curl -w '%{time_namelookup} %{time_connect} %{time_appconnect} %{time_starttransfer}\n'</code> を Worker の軽い口へ。冷えた状態と keep-alive の両方、Wi-Fi とテザリングで</td></tr>
+  <tr><td>上りと下りの実効</td><td>1MB を <code>curl -T</code> で送る、3MB を受ける</td></tr>
+  <tr><td>無線の省電力</td><td>実機に <code>iw</code> が無い（確認済み）。<code>/sys/class/net/wlan0/</code> か <code>iwconfig</code>、ゲートウェイへ <code>ping -c 20</code></td></tr>
+  <tr><td><code>zc-remote</code> のメモリ</td><td><code>/proc/&lt;pid&gt;/smaps_rollup</code> の Pss と Private_Dirty（待機中・転送中・展開中）</td></tr>
+  <tr><td>段階ごとの時間</td><td>zcode と同じ <code>--stats</code>: DNS / TCP / TLS / Upgrade / 走査 / ハッシュ / 送信 / 最初のログ / done / 受信 / 検証</td></tr>
+  <tr><td>打鍵への影響</td><td>ログを流しながら <code>--bench line</code> の p50 / p95 を、流さないときと比べる</td></tr>
+  <tr><td>ハッシュ・展開・走査</td><td><code>zcode/bench/</code> に小さなベンチを足す（SHA-256、zstd 展開、木の <code>stat</code> 走査）</td></tr>
+</table></div>
+
+<details><summary>あとでよいもの</summary><div class="body"><ul>
+  <li>実行ファイルの差分配信（前の版を辞書にした zstd の patch。テザリングで効くが C の zstd が要る見込み。まず圧縮後の大きさを測る）</li>
+  <li>保存せずに check（目録の中身を未保存のバッファから作れば、SD に書かずに型検査できる。目録方式の副産物）</li>
+  <li>問題一覧の画面、ツリーの赤い印（DiagnosticSet があれば作れる）</li>
+  <li>実行するプログラムのメモリの上限（空きの 80〜110MB を食い尽くさせない）</li>
+  <li>ログの色（<code>--color=always</code>）をターミナルパネルでそのまま見せる</li>
+</ul></div></details>
+
+<!-- ============================================================ -->
+<h2><span class="no">13</span>出典</h2>
+<ul>
+  <li>Cloudflare Containers:
+    <a href="https://developers.cloudflare.com/containers/">概要</a>・
+    <a href="https://developers.cloudflare.com/containers/concepts/architecture/">寿命</a>・
+    <a href="https://developers.cloudflare.com/containers/examples/">例</a>・
+    <a href="https://developers.cloudflare.com/containers/platform-details/limits/">上限</a>・
+    <a href="https://developers.cloudflare.com/containers/pricing/">料金</a></li>
+  <li>Cloudflare Access:
+    <a href="https://developers.cloudflare.com/cloudflare-one/identity/idp-integration/generic-oidc/">汎用 OIDC</a>・
+    <a href="https://developers.cloudflare.com/cloudflare-one/identity/service-tokens/">サービストークン</a>・
+    <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/private-net/">Tunnel のプライベートネットワーク</a></li>
+  <li><a href="https://developers.cloudflare.com/workers/runtime-apis/web-crypto/">Workers の Web Crypto</a></li>
+  <li>Tailscale:
+    <a href="https://tailscale.com/docs/features/workload-identity-federation">Workload Identity Federation</a>・
+    <a href="https://tailscale.com/docs/features/tsidp">tsidp</a>・
+    <a href="https://tailscale.com/kb/1215/oauth-clients">OAuth クライアント</a></li>
+  <li>実機での確認（2026-11-16）: CPU の Features、<code>/run/user/1000</code> の上限と <code>noexec</code> の有無、NTP の同期の印、<code>tailscale id-token</code> の "access denied"。TS 7・tsc-rs・esbuild・LLRT の実測はリポジトリ直下の <code>AGENTS.md</code></li>
+  <li>レビュー: Fable（2026-11-16）。§5〜§7 の多くと、費用・異論・測り方。数字のうち「実測」以外は見込み</li>
+</ul>
+
+<footer>zcode/docs/remote-build.html — 2026-11-16。実装の前の設計。</footer>
+</main>
+</body>
+</html>
