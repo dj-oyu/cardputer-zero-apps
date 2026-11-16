@@ -8,7 +8,8 @@
 //! - 部品は入力を直接受け取らない。アプリ（`zcode`）が `Command` に直してから、
 //!   部品の操作用の関数を呼ぶ
 //!
-//! 段階 1 で実装済みなのは [`RenderCx`] の文字描画と [`StatusBar`]、[`TitleBar`]。
+//! 実装済み: [`RenderCx`] の文字描画、[`StatusBar`]・[`TitleBar`]、エディタ本体
+//! （[`EditorView`]。行の組み方は [`textlayout`]）、[`TabBar`]、[`FileTree`]。
 //! ほかの部品は雛形（[`widgets`]）。
 
 // 段階 2 以降の部品が使う crate（依存の向きを先に決めておく）
@@ -19,11 +20,19 @@ use zc_markdown as _;
 use zc_skk as _;
 use zc_term as _;
 
+pub mod editor;
 pub mod layout;
 pub mod status;
+pub mod tabs;
+pub mod textlayout;
+pub mod tree;
 pub mod widgets;
 
-pub use status::{Chip, StatusBar, TitleBar};
+pub use editor::{EditorView, LineMark, NoSpans, RenderStats, SpanSource, Viewport};
+pub use status::{Chip, EditorStatus, ImeMode, StatusBar, TitleBar};
+pub use tabs::{Tab, TabBar};
+pub use textlayout::{Caret, CodeLayouter, LineInput, LineLayout, LineLayouter, VisualRow, VisualRun};
+pub use tree::{FileTree, TreeNode};
 
 use zc_core::{BlendLut, Canvas, Color, Damage, Rect, Theme};
 use zc_font::{Fonts, Metrics, TextStyle};

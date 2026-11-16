@@ -20,6 +20,8 @@ zc-display.workspace = true
 zc-font.workspace = true
 zc-input.workspace = true
 zc-ui.workspace = true
+zc-buffer.workspace = true
+zc-highlight.workspace = true
 libc.workspace = true
 
 [dev-dependencies]

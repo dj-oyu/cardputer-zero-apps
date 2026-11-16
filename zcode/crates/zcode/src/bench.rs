@@ -170,7 +170,7 @@ impl Screen for Bench {
                 dmg |= Damage::rect(text_area);
             }
             BenchKind::Full => {
-                sample::draw_editor(cx, body, &ts, CODE_LINE_H, n % 13);
+                sample::draw_editor(cx, body, &ts, CODE_LINE_H, n % (body.h / CODE_LINE_H) as usize);
                 dmg |= Damage::rect(body);
             }
         }

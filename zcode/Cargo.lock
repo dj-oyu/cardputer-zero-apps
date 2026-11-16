@@ -433,9 +433,11 @@ name = "zcode"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "zc-buffer",
  "zc-core",
  "zc-display",
  "zc-font",
+ "zc-highlight",
  "zc-input",
  "zc-ui",
 ]
