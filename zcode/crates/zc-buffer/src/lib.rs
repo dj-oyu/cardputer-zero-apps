@@ -160,7 +160,7 @@ impl Snapshot {
                 LineEnding::CrLf => {
                     let mut rest = chunk;
                     while let Some(i) = rest.find('\n') {
-                        out.write_all(rest[..i].as_bytes())?;
+                        out.write_all(&rest.as_bytes()[..i])?;
                         out.write_all(b"\r\n")?;
                         rest = &rest[i + 1..];
                     }

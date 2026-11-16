@@ -8,3 +8,5 @@ publish.workspace = true
 
 [dependencies]
 zc-core.workspace = true
+# 構文チェックの子プロセスを、孫ごと止めるのに使う（unix のみ）
+libc.workspace = true
