@@ -732,7 +732,7 @@ impl EditorScreen {
         self.status_due = true;
     }
 
-    /// Ctrl+`: 閉じていれば開いて端末へ、端末にいれば閉じてエディタへ、エディタにいれば端末へ。
+    /// F12: 閉じていれば開いて端末へ、端末にいれば閉じてエディタへ、エディタにいれば端末へ。
     fn toggle_terminal(&mut self) {
         if !self.panel_open {
             self.open_terminal();
@@ -829,9 +829,9 @@ impl EditorScreen {
 
     /// パネルの見出し（モック 3・4）。
     fn panel_header(&self) -> (String, &'static str) {
-        let Some(t) = self.term.as_ref() else { return (String::new(), "Ctrl+` 戻る") };
+        let Some(t) = self.term.as_ref() else { return (String::new(), "F12 戻る") };
         let title = if self.panel_full { format!("全画面  {}", t.title) } else { t.title.clone() };
-        let hint = if t.running.is_some() { "Ctrl+C 停止" } else { "Ctrl+` 戻る" };
+        let hint = if t.running.is_some() { "Ctrl+C 停止" } else { "F12 戻る" };
         (title, hint)
     }
 

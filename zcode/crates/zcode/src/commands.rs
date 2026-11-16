@@ -84,7 +84,7 @@ pub const BINDINGS: &[Binding] = &[
     b("表示", "ツリーで選んだファイルを開く", "", Command::TreeOpen),
     b("表示", "アウトライン", "Ctrl+O", Command::ShowOutline),
     b("実行", "保存して実行", "F5", Command::Run),
-    b("実行", "ターミナル開閉", "Ctrl+`", Command::ToggleTerminal),
+    b("実行", "ターミナル開閉", "F12", Command::ToggleTerminal),
     b("実行", "ターミナル全画面", "F11", Command::ToggleTerminalFullscreen),
     b("Markdown", "プレビュー ⇔ ソース", "Ctrl+Shift+V", Command::TogglePreview),
     b("Markdown", "チェックボックスを切り替え", "Ctrl+Enter", Command::ToggleCheckbox),

@@ -70,6 +70,9 @@ fn ctrl(c: char) -> KeyEvent {
 fn f5() -> KeyEvent {
     KeyEvent::new(Key::F(5), Mods::NONE)
 }
+fn f12() -> KeyEvent {
+    KeyEvent::new(Key::F(12), Mods::NONE)
+}
 
 fn tmp_dir(tag: &str) -> PathBuf {
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -116,8 +119,8 @@ fn f5_runs_the_file_and_reports_exit_code() {
     // シェルは残っていて、続けてコマンドを打てる
     lp.type_str(&mut ed, "echo still-$((40+2))\n");
     lp.until(&mut ed, "シェルの応答", |ed| screen_has(ed, "still-42"));
-    // Ctrl+` で閉じてエディタへ。別のファイルを F5 すると、新しい端末で実行する
-    lp.keys(&mut ed, &[ctrl('`')]);
+    // F12 で閉じてエディタへ。別のファイルを F5 すると、新しい端末で実行する
+    lp.keys(&mut ed, &[f12()]);
     assert_eq!(ed.terminal_state(), (false, false, false));
     lp.with(|cx| ed.open_path(&dir.join("bad.py"), cx));
     lp.pump(&mut ed);
@@ -179,14 +182,14 @@ fn ctrl_backtick_opens_a_shell_and_toggles_focus() {
     fs::write(dir.join("a.py"), "x = 1\n").unwrap();
     let mut lp = Loop::new();
     let mut ed = open(&mut lp, &dir, "a.py");
-    lp.keys(&mut ed, &[ctrl('`')]);
+    lp.keys(&mut ed, &[f12()]);
     assert_eq!(ed.terminal_state(), (true, false, true));
     lp.type_str(&mut ed, "echo shell-$((6*7))\n");
     lp.until(&mut ed, "シェル", |ed| screen_has(ed, "shell-42"));
-    // 端末にいるとき: Ctrl+` で閉じてエディタへ。もう一度で同じシェルに戻る
-    lp.keys(&mut ed, &[ctrl('`')]);
+    // 端末にいるとき: F12 で閉じてエディタへ。もう一度で同じシェルに戻る
+    lp.keys(&mut ed, &[f12()]);
     assert_eq!(ed.terminal_state(), (false, false, false));
-    lp.keys(&mut ed, &[ctrl('`')]);
+    lp.keys(&mut ed, &[f12()]);
     assert_eq!(ed.terminal_state(), (true, false, true));
     assert!(screen_has(&ed, "shell-42"));
     // F11（Fn+O）で全画面
