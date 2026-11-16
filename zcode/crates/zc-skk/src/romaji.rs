@@ -77,16 +77,6 @@ pub fn to_katakana(s: &str) -> String {
         .collect()
 }
 
-/// カタカナをひらがなに（ァ〜ヶ・ヽヾ だけ。ほかはそのまま）。
-pub fn to_hiragana(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            '\u{30A1}'..='\u{30F6}' | '\u{30FD}' | '\u{30FE}' => char::from_u32(c as u32 - 0x60).unwrap_or(c),
-            _ => c,
-        })
-        .collect()
-}
-
 /// 出てきたかな（ひらがなとカタカナの両方の形）。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Kana {
@@ -260,7 +250,6 @@ mod tests {
     #[test]
     fn kana_conversion() {
         assert_eq!(to_katakana("きゃっぷゔー"), "キャップヴー");
-        assert_eq!(to_hiragana("キャップヴー"), "きゃっぷゔー");
-        assert_eq!(to_hiragana("ヵabc"), "ゕabc");
+        assert_eq!(to_katakana("ゝabc"), "ヽabc");
     }
 }

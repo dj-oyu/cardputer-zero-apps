@@ -72,7 +72,6 @@ mod romaji;
 mod tests;
 
 pub use dict::{SystemDict, UserDict};
-pub use romaji::{to_hiragana, to_katakana};
 
 use engine::{classify, Ctx, Engine, K};
 use zc_core::{KeyEvent, Version, Versioned};
