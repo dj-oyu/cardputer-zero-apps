@@ -42,6 +42,8 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - 描画は fb0 へ直接（Python の zero_ui は使わず、Rust で同等のものを持つ）。
   配色は VS Code の Dark+、等幅フォントは実機の DejaVu Sans Mono
   （日本語は Noto Sans Mono CJK にフォールバック）
+- エディタの文字は DejaVu Sans Mono 10px・行の高さ 12px（ユーザーが実機で決定。`zc-ui` の
+  `CODE_PX` / `CODE_LINE_H`）
 - 作業フォルダの既定は `~/code`。終了は Ctrl+Q（Esc は終了に使わない）
 - 日本語入力: **SKK を zcode に組み込む**。uim-skk は GTK / Qt / uim-fep 経由でしか
   効かず fb0 アプリに届かないため。辞書は実機の `/usr/share/skk/SKK-JISYO.L` と
@@ -118,8 +120,6 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 
 - モディファイアの届き方と読み取りの遅延は確認済み（`docs/measurements.md` §8）。
   打鍵 → fsync を呼ぶまで p50 1.4ms
-- フォント比較画面をユーザーに見てもらい、文字の大きさと行の高さを決める
-  （`crates/zc-ui/src/layout.rs` の `CODE_PX` / `CODE_LINE_H`）
 - 実機で試すときはランチャーの「zcode (dev)」から起動する（`dev/README.md`）。
   SSH から直接起動すると APPLaunch と画面・キーボードを取り合う
 - `docs/stage1-notes.md` §3 の提案を design.md に取り込むか決めてから、段階 2 へ

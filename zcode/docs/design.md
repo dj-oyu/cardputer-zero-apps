@@ -546,3 +546,4 @@ check_pattern = 'line (\d+)'     # エラー行を拾う正規表現
 | 9 | §6.2 | キーボードは sysfs の名前（`tca8418c`）で探し、ほかの evdev は開かない（全部開くと起動が 60〜85ms 遅れた） |
 | 10 | §8.1 | 実機の実行ファイルで TOML を読まない（fat LTO の aarch64 ビルドで `toml` が異常終了した、原因未特定）。言語の定義（`language.toml`）は `build.rs` でビルド時に変換する。実行時にユーザーの TOML（`~/.config/zcode/`）を読む機能は、この件を片づけるまで入れない |
 | 11 | §6.2 | キーボードは独占しない。画面のスリープはランチャーの設定 `dark_time` に従い zcode が受け持つ。Sym レイヤーの記号はドライバの付属ファイルの表（`measurements.md` §8、`AGENTS.md`）。実機では `dev/` の「zcode (dev)」から起動して試す |
+| 12 | §5.4 | エディタのコードの文字は **DejaVu Sans Mono（ヒンティングあり）10px、行の高さ 12px**（2026-11-16、ユーザーが実機の `--fonttest` 3/5 を見て決定）。日本語は Noto Sans Mono CJK にフォールバック |
