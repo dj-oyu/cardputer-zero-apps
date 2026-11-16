@@ -165,6 +165,21 @@ impl Display {
         PresentInfo { seq: st.seq, rows_changed: self.h, t_handoff_us: now_us() }
     }
 
+    /// 指定した行範囲だけ、中身が同じでも送り直す（ほかのプロセスに一部を
+    /// 上書きされたとき用。[`Display::take_verify`] の結果の範囲を渡す）。
+    pub fn present_forced_rows(&mut self, canvas: &Canvas, rows: RowRange) -> PresentInfo {
+        assert_eq!((canvas.width(), canvas.height()), (self.w, self.h));
+        let rows = RowRange::new(rows.start.min(self.h), rows.end.min(self.h));
+        let mut st = self.shared.state.lock().unwrap();
+        let w = self.w as usize;
+        let (a, b) = (rows.start as usize * w, rows.end as usize * w);
+        st.front[a..b].copy_from_slice(&canvas.pixels()[a..b]);
+        st.pending.mark(rows, zc_core::Priority::Normal);
+        st.seq += 1;
+        self.shared.wake.notify_one();
+        PresentInfo { seq: st.seq, rows_changed: rows.end - rows.start, t_handoff_us: now_us() }
+    }
+
     /// fsync のたびに flush スレッドから呼ばれる関数を登録する。メインを起こす
     /// 通知（`MainSender::send`）を入れる。**flush スレッドで走るので、重い処理や
     /// `Display` の呼び出しはしないこと。**

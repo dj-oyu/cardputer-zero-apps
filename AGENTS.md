@@ -78,6 +78,11 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
   自分でバックライト（`/sys/class/backlight/backlight/brightness`、0〜100、
   video グループで書ける）を点けておく。zcode は `zc_display::backlight` で、
   起動時・打鍵ごと・1 秒ごとに 0 なら点け直している
+- **APPLaunch はスリープに入るとき、画面（fb0）も黒く塗る。** バックライトを
+  点け直すだけでは、自分が描き直さない行が黒いまま残る。fb0 を差分だけで更新する
+  アプリは、ほかのプロセスに上書きされた行を検出して送り直すこと（zcode は毎秒
+  fb0 を読み戻して比べ、違った行の範囲だけ送り直す。消されていたら全画面）。
+  APPLaunch がバックライトを点けるときの明るさは 100（最大）だった
 - 液晶の実体は ST7789V（SPI、spi-max-frequency 60MHz）で、ドライバは
   panel-mipi-dbi-spi（DRM の fbdev エミュレーション、card1-SPI-1）。fb0 への
   書き込みは遅延 I/O でまとめて SPI 転送される（変更されたページを含む

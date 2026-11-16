@@ -343,7 +343,14 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
                             if opts.sleep_after.is_some_and(|d| idle >= d) {
                                 bl.sleep();
                             } else {
-                                bl.watch();
+                                // APPLaunch はスリープに入るとき、バックライトを消すだけでなく
+                                // 画面を黒く塗る。消されていたら全画面を送り直す
+                                if bl.watch() {
+                                    cx.force_present = true;
+                                }
+                                // 一部だけ上書きされていないかも毎秒確かめる（違っていた行は
+                                // あとで take_verify で受け取り、その範囲だけ送り直す）
+                                display.request_verify();
                             }
                         }
                         cx.timers.set_after(TimerId::Backlight, Duration::from_secs(1));
@@ -392,9 +399,14 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
             stats.mark("first frame handed off");
         }
 
-        // ほかのプロセスに画面を上書きされていないか（計測用）
+        // ほかのプロセスに画面を上書きされていないか。上書きされていたら、
+        // その行の範囲だけ送り直す（自分が描いた内容は canvas にある）
         if let Some((n, bounds)) = display.take_verify() {
             stats.verify(n, bounds);
+            if n > 0 && !backlight.as_ref().is_some_and(|b| b.is_asleep()) {
+                display.present_forced_rows(&canvas, bounds);
+                stats.repaints += 1;
+            }
         }
         if let (Some(t), Some(every)) = (next_watch, opts.watch_fb) {
             if now_us() >= t {
