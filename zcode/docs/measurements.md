@@ -170,6 +170,22 @@ Raspberry Pi OS = Debian 13 aarch64、kernel 6.18.39+rpt-rpi-v8、microSD）。
 - DFA では Unicode の単語境界（`\b`）を使えない（ASCII の単語境界にする）
 - 全言語ダンプの圧縮後サイズは 333KB
 
+段階 2 の `zc-highlight`（`languages/python/language.toml`、文脈 27・スタックに載る文脈 26、
+`crates/zc-highlight/examples/hlbench.rs`、見本を 3000 行に繰り返して計測、2026-11-16）:
+
+| 項目 | 開発コンテナ（x86_64、release） | 実機 |
+|---|---|---|
+| Python の表（DFA と規則） | 72.8KB（埋め込み全体 81KB） | 同じ |
+| 埋め込みの読み込み（Registry の初回）/ 言語の初回の読み込み | 0.008ms / 0.063ms（検査を省いた `from_bytes_unchecked`、ページは温まっている） | 未計測（実機に届かなかった） |
+| 行頭の文脈の計算（update） | 0.0003ms/行（3000 行で 0.8ms） | 未計測 |
+| 区間の計算（spans） | 0.0003ms/行、7.8 トークン/行、40ns/トークン。見えている 13 行で 3.4µs | 未計測 |
+| 1 行の編集（文脈が変わらない）の再計算 | 1.6µs（次の行で打ち切り） | 未計測 |
+
+- 規則の書き方で表の大きさが大きく変わる: キーワードを正規表現の選択（`(?:if|elif|...)\b`）で
+  書くと Python だけで 1.15MB、`[words]`（識別子を 1 つの規則で取り、表で引く）にすると
+  数十 KB。DFA の 1 状態の幅は「文字の種類の数」を 2 の冪に切り上げたもので、64 を超えると
+  表が倍になる（`zcode-langc check` が文字の種類の数を出す。書き方は `languages/README.md`）
+
 → design.md §7（独自の規則をビルド時に DFA 化、Unicode 文字クラスを使わない）
 
 ## 7. 補完・構文チェック（jedi と ast）

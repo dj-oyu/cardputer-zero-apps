@@ -1,0 +1,75 @@
+# Shell (shell) — zc-highlight の見本の正解。ZCODE_UPDATE_GOLDEN=1 で作り直す
+   1| #!/usr/bin/env bash
+    : comment "#!/usr/bin/env bash"
+   2| # バックアップを取る見本スクリプト
+    : comment "# バックアップを取る見本スクリプト"
+   3| set -euo pipefail
+    : function "set"
+   4| 
+   5| BACKUP_DIR="${HOME}/backup"
+    : variable "BACKUP_DIR" · operator "=" · string "\"" · variable "${HOME}" · string "/backup\""
+   6| count=0
+    : variable "count" · operator "=" · number "0"
+   7| declare -r LIMIT=10
+    : keyword "declare" · variable "LIMIT" · operator "=" · number "10"
+   8| 
+   9| log() {
+    : function "log" · punctuation "()" · punctuation "{"
+  10|     printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" >&2
+    : function "printf" · string "'[%s] %s\\n'" · string "\"" · punctuation "$(" · punctuation ")" · string "\"" · string "\"" · variable "$*" · string "\"" · operator ">&" · number "2"
+  11| }
+    : punctuation "}"
+  12| 
+  13| function cleanup {
+    : keyword "function" · function "cleanup" · punctuation "{"
+  14|     rm -f /tmp/work.$$ # 一時ファイルを消す
+    : variable "$$" · comment "# 一時ファイルを消す"
+  15| }
+    : punctuation "}"
+  16| trap cleanup EXIT
+    : function "trap"
+  17| 
+  18| for f in *.txt "$@"; do
+    : control "for" · control "in" · string "\"" · variable "$@" · string "\"" · punctuation ";" · control "do"
+  19|     if [[ -f $f && $count -lt $LIMIT ]]; then
+    : control "if" · punctuation "[[" · variable "$f" · operator "&&" · variable "$count" · variable "$LIMIT" · punctuation "]];" · control "then"
+  20|         cp -- "$f" "$BACKUP_DIR/" && count=$((count + 1))
+    : string "\"" · variable "$f" · string "\"" · string "\"" · variable "$BACKUP_DIR" · string "/\"" · operator "&&" · variable "count" · operator "=" · punctuation "$((" · number "1" · punctuation "))"
+  21|         log "copied $f (#$count)"
+    : string "\"copied " · variable "$f" · string " (#" · variable "$count" · string ")\""
+  22|     elif [ ! -e "$f" ]; then
+    : control "elif" · punctuation "[" · operator "!" · string "\"" · variable "$f" · string "\"" · punctuation "];" · control "then"
+  23|         echo 'skip: $f is missing'
+    : function "echo" · string "'skip: $f is missing'"
+  24|         continue
+    : control "continue"
+  25|     else
+    : control "else"
+  26|         echo "tab\there: \"$f\" `basename $f`"
+    : function "echo" · string "\"tab\\there: " · escape "\\\"" · variable "$f" · escape "\\\"" · punctuation "`" · variable "$f" · punctuation "`" · string "\""
+  27|     fi
+    : control "fi"
+  28| done
+    : control "done"
+  29| 
+  30| case "$1" in
+    : control "case" · string "\"" · variable "$1" · string "\"" · control "in"
+  31|     start) echo $'ready\n' ;;
+    : punctuation ")" · function "echo" · string "$'ready" · escape "\\n" · string "'" · punctuation ";;"
+  32|     -h|--help) exit 0 ;;
+    : operator "|" · punctuation ")" · control "exit" · number "0" · punctuation ";;"
+  33|     *) exit 1 ;;
+    : punctuation ")" · control "exit" · number "1" · punctuation ";;"
+  34| esac
+    : control "esac"
+  35| 
+  36| cat <<EOF > "$BACKUP_DIR/report.txt"
+    : operator "<<EOF" · operator ">" · string "\"" · variable "$BACKUP_DIR" · string "/report.txt\""
+  37| total: $count of ${LIMIT}
+    : string "total: " · variable "$count" · string " of " · variable "${LIMIT}"
+  38| done at $(date)
+    : string "done at " · punctuation "$(" · punctuation ")"
+  39| EOF
+    : operator "EOF"
+  40| echo "finished" | grep -c fin && exit 0
+    : function "echo" · string "\"finished\"" · operator "|" · operator "&&" · control "exit" · number "0"

@@ -2,7 +2,7 @@
 
 use crate::layout::STATUS_PX;
 use crate::{RenderCx, Widget};
-use zc_core::{palette, Color, Damage, Priority, Rect};
+use zc_core::{palette, Color, Damage, Mods, Priority, Rect};
 use zc_font::TextStyle;
 
 /// ステータスバー右側の小さな札（ロック中のモディファイア、入力モード）。
@@ -17,6 +17,73 @@ impl Chip {
     /// 白地に青字（SHIFT / SYM / FN）。
     pub fn modifier(text: &str) -> Chip {
         Chip { text: text.into(), fg: palette::STATUS, bg: Color::WHITE }
+    }
+}
+
+/// 日本語入力のモード（ステータスバー右端の札。中身は段階 4 の `zc-skk`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImeMode {
+    /// 英数（コードを書く通常の状態）。
+    Ascii,
+    Kana,
+    Kata,
+}
+
+impl Chip {
+    /// 入力モードの札（薄い「A」/ 緑「かな」/ 黄「カナ」）。
+    pub fn ime(mode: ImeMode) -> Chip {
+        match mode {
+            ImeMode::Ascii => Chip { text: "A".into(), fg: Color::WHITE, bg: palette::STATUS.mix(Color::WHITE, 64) },
+            ImeMode::Kana => Chip { text: "かな".into(), fg: Color::hex(0x0b3d1e), bg: palette::ACCENT },
+            ImeMode::Kata => Chip { text: "カナ".into(), fg: Color::hex(0x4a3500), bg: palette::WARN },
+        }
+    }
+}
+
+/// エディタのステータスバーの中身（モック 1・2）。[`EditorStatus::apply`] で
+/// [`StatusBar`] に入れる。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditorStatus<'a> {
+    /// ファイル名。
+    pub file: &'a str,
+    /// 未保存（● を付ける）。
+    pub modified: bool,
+    /// カーソルの行と桁（0 始まり。表示は 1 始まり）。
+    pub line: u32,
+    pub col: u32,
+    /// 言語の表示名。
+    pub language: &'a str,
+    /// 言語の右に出すもの（"UTF-8" など）。
+    pub extra: &'a str,
+    /// 押している / ロック中のモディファイア（SHIFT / SYM / FN だけ札にする）。
+    pub mods: Mods,
+    /// 入力モード（`None` なら札を出さない）。
+    pub ime: Option<ImeMode>,
+}
+
+impl EditorStatus<'_> {
+    pub fn apply(&self, bar: &mut StatusBar) {
+        use core::fmt::Write;
+        let mut left = String::with_capacity(48);
+        let _ = write!(left, "{}{}  Ln {}, Col {}", self.file, if self.modified { " ●" } else { "" }, self.line + 1, self.col + 1);
+        bar.set_left(&left);
+        let mut right = String::with_capacity(24);
+        right.push_str(self.language);
+        if !self.extra.is_empty() {
+            right.push_str("  ");
+            right.push_str(self.extra);
+        }
+        bar.set_right(&right);
+        let mut chips = Vec::new();
+        for (m, name) in [(Mods::SHIFT, "SHIFT"), (Mods::SYM, "SYM"), (Mods::FN, "FN")] {
+            if self.mods.contains(m) {
+                chips.push(Chip::modifier(name));
+            }
+        }
+        if let Some(mode) = self.ime {
+            chips.push(Chip::ime(mode));
+        }
+        bar.set_chips(chips);
     }
 }
 
@@ -62,6 +129,15 @@ impl StatusBar {
             self.chips = chips;
             self.dirty = true;
         }
+    }
+    pub fn left(&self) -> &str {
+        &self.left
+    }
+    pub fn right(&self) -> &str {
+        &self.right
+    }
+    pub fn chips(&self) -> &[Chip] {
+        &self.chips
     }
     /// 背景色（実行中は橙、など）。
     pub fn set_bg(&mut self, bg: Color) {

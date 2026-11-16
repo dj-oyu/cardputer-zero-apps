@@ -527,3 +527,23 @@ check_pattern = 'line (\d+)'     # エラー行を拾う正規表現
 - 言語の追加は、仕組みができた後は Sonnet で十分（`languages/` にファイルを置き、
   見本のテストが通ることを確かめるだけ）
 - 担当が API を変えたくなったら、勝手に変えず統合側（メインのセッション）に戻す
+
+## 12. 段階 1 で確定したこと（上の各節より優先する）
+
+段階 1 の実装と実測（`stage1-notes.md` §3・§4、`measurements.md` §8）で決まったこと。
+上の節と食い違うときは、こちらに従う。
+
+| # | 節 | 確定したこと |
+|---|---|---|
+| 1 | §3 | 部品の形は `fn render(&mut self, cx: &mut RenderCx, area: Rect) -> Damage` と `fn invalidate(&mut self)`。`RenderCx` = `Canvas` + フォント（キャッシュつき）+ 配色 |
+| 2 | §3 | `zc-core` は、テキストの共通の型（`LineSource`・`TokenKind`・`Span`・`Theme`）とスレッドの受け渡し（`Worker`・`MainSender`・`TimerFd`・`VersionCounter`/`CancelToken`/`Versioned`）も持つ。横同士の crate は依存しない |
+| 3 | §4.2 | panic: メインと flush の panic は後始末（画面を戻す）して全体を止める。assist / batch / storage の依頼の中の panic は、その依頼だけを捨てて続ける |
+| 4 | §4.3 | timerfd は 2 本。キーリピート用は `zc-input` が持ち、アプリ用は 1 本で複数の締め切りを扱う（`Timers`） |
+| 5 | §5.4 | 字形を待つのは 1 字あたり最大 2ms、1 フレームの合計で最大 6ms（`zc_font::FRAME_WAIT_FACTOR`）。使い切ったら頼むだけにして、届いてから描き直す（日本語のファイルを開いた直後で 145ms → 19ms） |
+| 6 | §5.2 | テキスト 1 行（11 画素行）の変更で送られるのは約 12.9KB（3 ページ ≒ 19 行ぶん）として見積もる |
+| 7 | §6.2 | 上下の矢印もスクロールする操作として 20 回/秒。モディファイアが変わったらリピートを止める。リピート中はときどき `EVIOCGKEY` で押下を確かめる |
+| 8 | §6.2 | `KeyEvent { key, mods, text, repeat }`。`mods` に SYM / FN も参考情報として入る |
+| 9 | §6.2 | キーボードは sysfs の名前（`tca8418c`）で探し、ほかの evdev は開かない（全部開くと起動が 60〜85ms 遅れた） |
+| 10 | §8.1 | 実機の実行ファイルで TOML を読まない（fat LTO の aarch64 ビルドで `toml` が異常終了した、原因未特定）。言語の定義（`language.toml`）は `build.rs` でビルド時に変換する。実行時にユーザーの TOML（`~/.config/zcode/`）を読む機能は、この件を片づけるまで入れない |
+| 11 | §6.2 | キーボードは独占しない。画面のスリープはランチャーの設定 `dark_time` に従い zcode が受け持つ。Sym レイヤーの記号はドライバの付属ファイルの表（`measurements.md` §8、`AGENTS.md`）。実機では `dev/` の「zcode (dev)」から起動して試す |
+| 12 | §5.4 | エディタのコードの文字は **DejaVu Sans Mono（ヒンティングあり）10px、行の高さ 12px**（2026-11-16、ユーザーが実機の `--fonttest` 3/5 を見て決定）。日本語は Noto Sans Mono CJK にフォールバック |

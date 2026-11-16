@@ -1,7 +1,7 @@
 //! 段階 1 の画面で使う見本のコード（モックと同じ Python）と、その描き方。
 //! ハイライトは手で付けてある（`zc-highlight` は段階 2）。
 
-use zc_core::{palette, Color, Damage, Rect, TokenKind as T};
+use zc_core::{palette, Color, Damage, Rect, Span, TokenKind as T};
 use zc_font::TextStyle;
 use zc_ui::RenderCx;
 
@@ -48,6 +48,36 @@ pub const CODE: &[Line] = &[
     &[(T::Comment, "# 0O 1lI| {}[]() <>=!~ ｶﾅ カナ かな 漢字")],
     &[(T::Text, "x = {"), (T::String, "'a'"), (T::Text, ": [1, 2], "), (T::String, "'日本'"), (T::Text, ": None}")],
 ];
+
+/// 見本のコードの文字列（行は `\n` 区切り、末尾にも改行）。
+pub fn text() -> String {
+    let mut s = String::new();
+    for line in CODE {
+        for (_, t) in *line {
+            s.push_str(t);
+        }
+        s.push('\n');
+    }
+    s
+}
+
+/// 見本のコードの `line` 行目のトークン（手で付けた色）。エディタの render-test と
+/// 計測で、ハイライトの代わりに使う。行の中身が見本と違えば、色を付けない。
+pub fn spans(line: u32, text: &str, out: &mut Vec<Span>) {
+    out.clear();
+    let Some(toks) = CODE.get(line as usize) else { return };
+    if toks.iter().map(|(_, t)| t.len()).sum::<usize>() != text.len() {
+        return;
+    }
+    let mut at = 0u32;
+    for &(kind, t) in *toks {
+        let end = at + t.len() as u32;
+        if kind != T::Text {
+            out.push(Span { start: at, end, kind });
+        }
+        at = end;
+    }
+}
 
 /// 色つきの 1 行を描く。ベースラインは行の上下の中央。描き終わりの x を返す。
 pub fn draw_line(cx: &mut RenderCx<'_>, area: Rect, line: Line, ts: &TextStyle, bg: Color) -> i32 {

@@ -429,6 +429,88 @@ ui.<span class="fn">font</span>(<span class="n">12</span>)</span></div>
 表など凝った書式を直すときや、記号をまとめて確認したいときはこちら。</figcaption>
 </figure>
 
+<!-- 12. 単語補完 -->
+<figure>
+<div class="lcd-wrap"><div class="lcd">
+  <div class="tabs">
+    <div class="tab">utils.py</div>
+    <div class="tab on">main.py <span class="dot">●</span></div>
+  </div>
+  <div class="ed" style="left:0">
+    <div class="row"><span class="gut">1</span><span class="c">import</span> time</div>
+    <div class="row"><span class="gut">2</span><span class="c">from</span> utils <span class="c">import</span> <span class="fn">led</span>, <span class="fn">led_blink</span></div>
+    <div class="row"><span class="gut">3</span></div>
+    <div class="row"><span class="gut">4</span><span class="k">def</span> <span class="fn">main</span>():</div>
+    <div class="row"><span class="gut">5</span>    <span class="c">for</span> <span class="v">i</span> <span class="c">in</span> <span class="fn">range</span>(<span class="n">10</span>):</div>
+    <div class="row cur"><span class="gut">6</span>        le<span class="cursor"></span></div>
+    <div class="row"><span class="gut">7</span>        time.<span class="fn">sleep</span>(<span class="n">0.5</span>)</div>
+    <div class="row"><span class="gut">8</span>    <span class="fn">print</span>(<span class="s">"done"</span>)</div>
+  </div>
+  <div class="cand" style="left:52px; top:79px; font-family:'DejaVu Sans Mono',monospace">
+    <div class="ci on"><span class="ck">ab</span><b style="color:#18a3ff">le</b>d</div>
+    <div class="ci"><span class="ck">ab</span><b style="color:#18a3ff">le</b>d_blink</div>
+    <div class="ci"><span class="ck" style="color:var(--ctl)">kw</span><b style="color:#18a3ff">le</b>n</div>
+    <div class="cf">Tab 確定 &nbsp;↑↓ 選ぶ &nbsp;Esc 閉じる</div>
+  </div>
+  <div class="status"><span>main.py ● &nbsp;Ln 6, Col 11</span><span>Python &nbsp;UTF-8<span class="ime ascii">A</span></span></div>
+</div></div>
+<figcaption><b>12. 単語補完</b> — 単語を 2 文字打つと、カーソルの下に候補を最大 5 つ出す（開いているファイルの単語 <code>ab</code> と
+言語のキーワード・組み込み関数 <code>kw</code>。近い行に出てくる語が先）。<b>Tab</b> で選んでいる候補に置き換え、↑↓（Fn）で選ぶ、
+Esc か候補に無い文字を打つと閉じる。Enter は改行のまま（候補を確定しない）。Ctrl+Space で手動でも開ける。
+候補が 1 つも無いとき・文字列やコメントの中では出さない。</figcaption>
+</figure>
+
+<!-- 13. 保存時の構文チェック -->
+<figure>
+<div class="lcd-wrap"><div class="lcd">
+  <div class="tabs">
+    <div class="tab">utils.py</div>
+    <div class="tab on" style="color:#f48771">main.py</div>
+  </div>
+  <div class="ed" style="left:0">
+    <div class="row"><span class="gut">1</span><span class="c">import</span> time</div>
+    <div class="row"><span class="gut">2</span><span class="c">from</span> utils <span class="c">import</span> <span class="fn">led</span></div>
+    <div class="row"><span class="gut">3</span></div>
+    <div class="row"><span class="gut">4</span><span class="k">def</span> <span class="fn">main</span>():</div>
+    <div class="row"><span class="gut">5</span>    <span class="c">for</span> <span class="v">i</span> <span class="c">in</span> <span class="fn">range</span>(<span class="n">10</span>)</div>
+    <div class="row"><span class="gut">6</span>        <span class="fn">led</span>(<span class="v">i</span> % <span class="n">2</span>)</div>
+    <div class="row cur"><span class="gut">7</span>        time.<span class="fn">sleep</span>(<span class="n">0.5</span>)<span class="cursor"></span></div>
+    <div class="row"><span class="gut">8</span>    <span class="fn">print</span>(<span class="s">"done"</span>)</div>
+  </div>
+  <!-- 5 行目の波線（行の文字全体） -->
+  <div style="position:absolute; left:20px; top:67px; width:108px; height:2px;
+       background: repeating-linear-gradient(135deg, #f14c4c 0 1px, transparent 1px 2px);"></div>
+  <div class="status" style="background:#a1260d"><span>main.py &nbsp;Ln 7, Col 23 &nbsp;⊗ 1</span><span style="font-family:'Noto Sans CJK JP',sans-serif; font-size:7px">5 行: expected ':'</span></div>
+</div></div>
+<figcaption><b>13. 保存時の構文チェック</b> — 保存すると batch が <code>language.toml</code> の <code>check</code>（Python は <code>ast.parse</code>、約 0.4 秒）を
+使い捨てで走らせる。エラーの行に赤い波線、タブ名を赤、ステータスバーに件数 <code>⊗ 1</code> と最初のメッセージを出す
+（ステータスバーは数秒で通常の色に戻り、件数は残す）。カーソルがエラーの行に来たら、そのメッセージをもう一度出す。
+直して保存し直すと消える。チェックの結果より後に編集していたら、行の移動に合わせて波線もずらす。</figcaption>
+</figure>
+
+<!-- 14. アウトライン -->
+<figure>
+<div class="lcd-wrap"><div class="lcd">
+  <div class="tabs">
+    <div class="tab">utils.py</div>
+    <div class="tab on">main.py</div>
+  </div>
+  <div class="kb">
+    <div class="search on">ma<span class="cursor"></span></div>
+    <div class="sec">アウトライン — main.py</div>
+    <div class="r" style="opacity:.55"><span class="a" style="font-family:'DejaVu Sans Mono',monospace"><span class="cl">C</span> Blinker</span><span class="h">3</span></div>
+    <div class="r"><span class="a" style="font-family:'DejaVu Sans Mono',monospace">&nbsp; <span class="fn">ƒ</span> <span class="hit">ma</span>ke_pattern</span><span class="h">9</span></div>
+    <div class="r sel"><span class="a" style="font-family:'DejaVu Sans Mono',monospace"><span class="fn">ƒ</span> <span class="hit">ma</span>in</span><span class="h">18</span></div>
+    <div class="r"><span class="a" style="font-family:'DejaVu Sans Mono',monospace"><span class="fn">ƒ</span> run_for<span class="hit">ma</span>tted</span><span class="h">31</span></div>
+  </div>
+  <div class="status"><span>main.py &nbsp;Ln 1, Col 1</span><span>Python &nbsp;UTF-8<span class="ime ascii">A</span></span></div>
+</div></div>
+<figcaption><b>14. アウトライン</b> — <b>Ctrl+O</b> で開く（ショートカット一覧と同じ見た目・操作）。<code>def</code> / <code>class</code> など（Markdown は見出し）を
+字下げどおりの入れ子で並べ、右に行番号。開いた時点ではカーソルのいる関数を選んでおく。文字を打つと名前で絞り込み
+（一致した項目の親は薄く残して、どのクラスの中かが分かるようにする）、
+↑↓ で選んで Enter でその行へ飛ぶ。Esc で閉じる。</figcaption>
+</figure>
+
 </div>
 
 <h2>ショートカット一覧の全項目（案）</h2>
@@ -440,7 +522,7 @@ ui.<span class="fn">font</span>(<span class="n">12</span>)</span></div>
 <tr><td>次のタブ / 前のタブ</td><td>Ctrl+Tab / Ctrl+Shift+Tab</td></tr>
 <tr><td>ショートカット一覧</td><td>F1（Fn+1）</td></tr>
 <tr><td>zcode を終了</td><td>Ctrl+Q</td></tr>
-<tr><td rowspan="9">編集</td><td>元に戻す / やり直す</td><td>Ctrl+Z / Ctrl+Y</td></tr>
+<tr><td rowspan="10">編集</td><td>元に戻す / やり直す</td><td>Ctrl+Z / Ctrl+Y</td></tr>
 <tr><td>切り取り / コピー / 貼り付け</td><td>Ctrl+X / Ctrl+C / Ctrl+V</td></tr>
 <tr><td>すべて選択</td><td>Ctrl+A</td></tr>
 <tr><td>文字単位 / 行単位で選択</td><td>Shift+←→ / Shift+↑↓</td></tr>
@@ -449,13 +531,15 @@ ui.<span class="fn">font</span>(<span class="n">12</span>)</span></div>
 <tr><td>行コメント切替</td><td>Ctrl+/</td></tr>
 <tr><td>検索 / 次を検索</td><td>Ctrl+F / Enter</td></tr>
 <tr><td>行へ移動</td><td>Ctrl+G</td></tr>
+<tr><td>単語補完（2 文字で自動。Tab で確定）</td><td>Ctrl+Space</td></tr>
 <tr><td rowspan="4">移動（Fn）</td><td>カーソル移動</td><td>←↑↓→</td></tr>
 <tr><td>行頭 / 行末</td><td>Home / End</td></tr>
 <tr><td>1 画面上 / 下</td><td>PgUp / PgDn</td></tr>
 <tr><td>ファイル先頭 / 末尾</td><td>Ctrl+Home / Ctrl+End</td></tr>
-<tr><td rowspan="3">表示</td><td>ツリー開閉</td><td>Ctrl+B</td></tr>
+<tr><td rowspan="4">表示</td><td>ツリー開閉</td><td>Ctrl+B</td></tr>
 <tr><td>ツリーへ移る / エディタへ戻る</td><td>Ctrl+E / Esc</td></tr>
 <tr><td>ツリーで開く</td><td>Enter</td></tr>
+<tr><td>アウトライン（絞り込んで Enter で移動）</td><td>Ctrl+O</td></tr>
 <tr><td rowspan="3">実行</td><td>保存して実行</td><td>F5（Fn+5）</td></tr>
 <tr><td>実行を止める</td><td>Ctrl+C（ターミナル内）</td></tr>
 <tr><td>ターミナル開閉 / 全画面</td><td>Ctrl+` / Ctrl+Shift+`</td></tr>

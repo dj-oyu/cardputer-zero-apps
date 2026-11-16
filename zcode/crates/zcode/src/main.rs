@@ -1,4 +1,5 @@
-//! zcode の入口。段階 1 では、キー確認・フォント比較・計測の 3 つの画面だけが動く。
+//! zcode の入口。引数にモードが無ければエディタを開く（`zcode [ファイル...]`）。
+//! ほかに、キー確認・フォント比較・計測の画面がある。
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -7,20 +8,31 @@ use zc_core::time::now_us;
 use zc_font::FontConfig;
 use zc_input::Keymap;
 use zcode::app::{self, Options, Screen};
+use zc_core::CancelToken;
 use zcode::bench::{Bench, BenchKind};
+use zcode::doc::DocBackend;
+use zcode::edbench::{EdBenchKind, EditorBench};
+use zcode::editor::{EditorConfig, EditorScreen};
 use zcode::fonttest::FontTest;
 use zcode::keytest::KeyTest;
 use zcode::{keylog, render_screen};
 
 const HELP: &str = "\
-zcode — CardputerZero 用コードエディタ（段階 1: 土台。エディタ本体はまだ無い）
+zcode — CardputerZero 用コードエディタ
 
 使い方:
+  zcode [ファイル...] [--root <フォルダ>]    エディタ（ファイルが無ければツリーから開く）
   zcode --keytest [--guide] [--log <パス>]   キー確認モード
   zcode --fonttest [--bdf <パス>] [--auto <ms>] [--page <n>]   フォント比較
   zcode --bench <line|line-status|scroll|full> [--frames <n>]  描画の計測
                 （panic / hang は異常終了の後始末の試験）
+  zcode --bench <editor-type|editor-scroll> [--frames <n>]     エディタ画面の計測
   zcode --keymap-from-log <ログ>             キー確認のログからキー配列の行を作る
+
+エディタ:
+  終了は Ctrl+Q。ツリーは Ctrl+B で開閉、Ctrl+E で移る（↑↓ で選んで Enter）。
+  --root <フォルダ>        ツリーの根（既定は ~/code。無ければ今いるフォルダ）
+  --simple-buffer          文書を zc-buffer でなく、行の配列の小さな実装で持つ（開発用）
 
 キー確認モード:
   終了は Esc を続けて 5 回。無操作が続いても終わる（--idle <秒>、既定 120）。
@@ -49,6 +61,7 @@ enum Mode {
     KeyTest,
     FontTest,
     Bench(BenchKind),
+    EdBench(EdBenchKind),
 }
 
 struct Args {
@@ -62,6 +75,9 @@ struct Args {
     page: usize,
     frames: u32,
     idle: Duration,
+    files: Vec<PathBuf>,
+    root: Option<PathBuf>,
+    backend: DocBackend,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -76,6 +92,9 @@ fn parse_args() -> Result<Args, String> {
         page: 1,
         frames: 150,
         idle: Duration::from_secs(120),
+        files: Vec::new(),
+        root: None,
+        backend: DocBackend::Buffer,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -86,8 +105,13 @@ fn parse_args() -> Result<Args, String> {
             "--fonttest" => a.mode = Some(Mode::FontTest),
             "--bench" => {
                 let v = val("--bench")?;
-                a.mode = Some(Mode::Bench(BenchKind::parse(&v).ok_or_else(|| format!("--bench: 種類が分からない: {v}"))?));
+                a.mode = Some(match EdBenchKind::parse(&v) {
+                    Some(k) => Mode::EdBench(k),
+                    None => Mode::Bench(BenchKind::parse(&v).ok_or_else(|| format!("--bench: 種類が分からない: {v}"))?),
+                });
             }
+            "--root" => a.root = Some(val("--root")?.into()),
+            "--simple-buffer" => a.backend = DocBackend::Simple,
             "--guide" => a.guide = true,
             "--log" => a.log = val("--log")?.into(),
             "--bdf" => a.opts.fonts.bdf = Some(val("--bdf")?.into()),
@@ -117,7 +141,8 @@ fn parse_args() -> Result<Args, String> {
                 print!("{HELP}");
                 std::process::exit(0);
             }
-            other => return Err(format!("分からない引数: {other}")),
+            other if other.starts_with("--") => return Err(format!("分からない引数: {other}")),
+            file => a.files.push(file.into()),
         }
     }
     Ok(a)
@@ -130,13 +155,25 @@ fn real_main(t_start_us: u64) -> Result<(), String> {
         print!("{}", keylog::keymap_lines(&keylog::parse_guide(&log), &Keymap::builtin()));
         return Ok(());
     }
-    let Some(mode) = a.mode else {
-        return Err("モードの指定が要る（--keytest / --fonttest / --bench。--help を参照）".into());
-    };
     let fonts: &FontConfig = &a.opts.fonts;
     let rendering = a.render_test.is_some();
-    let mut screen: Box<dyn Screen> = match mode {
-        Mode::KeyTest => {
+    let mut screen: Box<dyn Screen> = match a.mode {
+        None => {
+            let root = a.root.clone().unwrap_or_else(EditorConfig::default_root);
+            let cfg = EditorConfig { backend: a.backend, root, files: a.files.clone() };
+            let mut ed = EditorScreen::new(cfg);
+            if rendering {
+                // 画像に描くだけのときは、その場で読む（ふつうは batch スレッドが読む）
+                for f in &a.files {
+                    let doc = a.backend.load(f, &CancelToken::never()).map_err(|e| format!("{}: {e}", f.display()))?;
+                    let title = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    ed.open_doc(Some(f.clone()), &title, doc, None);
+                }
+            }
+            Box::new(ed)
+        }
+        Some(Mode::EdBench(kind)) => Box::new(EditorBench::new(kind, a.frames)),
+        Some(Mode::KeyTest) => {
             let log = (!rendering).then_some(a.log.as_path());
             let mut kt = KeyTest::new(Keymap::builtin(), log, a.guide, a.idle);
             if rendering {
@@ -144,13 +181,13 @@ fn real_main(t_start_us: u64) -> Result<(), String> {
             }
             Box::new(kt)
         }
-        Mode::FontTest => {
+        Some(Mode::FontTest) => {
             let has_bitmap = fonts.bdf.as_ref().is_some_and(|p| p.exists());
             let mut ft = FontTest::new(a.auto, a.idle, has_bitmap);
             ft.set_page(a.page - 1);
             Box::new(ft)
         }
-        Mode::Bench(kind) => Box::new(Bench::new(kind, a.frames)),
+        Some(Mode::Bench(kind)) => Box::new(Bench::new(kind, a.frames)),
     };
     if let Some(out) = &a.render_test {
         let canvas = render_screen(screen.as_mut(), fonts).map_err(|e| e.to_string())?;

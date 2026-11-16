@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use zc_core::rt::{main_channel, poll_fds, MainReceiver, MainSender, TimerFd, Worker, WorkerConfig};
 use zc_core::time::now_us;
-use zc_core::{Canvas, Damage, KeyEvent, Theme};
+use zc_core::{Canvas, Damage, DocId, KeyEvent, Theme, Version, Versioned};
 use zc_display::{Backlight, Display, FlushRecord, PresentInfo};
 use zc_font::{FontConfig, Fonts, RasterMode};
 use zc_input::{Keyboard, Keymap, RawRecord, RepeatConfig};
@@ -33,10 +33,33 @@ use zc_ui::RenderCx;
 
 /// ワーカーからメインへ届く結果。段階 2 以降、ここに項目を足していく
 /// （版番号つきの結果は `Versioned<T>` で包み、受け取った側で古ければ捨てる）。
-#[derive(Debug)]
 pub enum AppEvent {
     /// flush スレッドが 1 回 fsync した。
     Flushed(FlushRecord),
+    /// batch がファイルを読み終えた（[`crate::editor::EditorScreen::open_path`]）。
+    /// 単語補完の索引も batch で作っておく。
+    Opened { doc: DocId, result: Result<(Box<dyn crate::doc::TextDoc + Send>, zc_intel::WordIndex), String> },
+    /// batch が保存時の構文チェックを終えた（§10.2）。
+    Checked { doc: DocId, result: Result<Vec<zc_intel::Diagnostic>, String> },
+    /// 保存が終わった（[`crate::save::Saver`]）。`version` は書き出した中身の版。
+    Saved { doc: DocId, version: Version, result: Result<crate::save::SaveOk, String> },
+    /// 書き込み層（`zc-store`）からの、保存以外の返事（控え・SKK 個人辞書）。
+    Store(zc_store::StoreResponse),
+    /// batch がハイライトの残り（行頭の文脈）を計算し終えた。
+    HighlightRest { doc: DocId, rest: Versioned<zc_highlight::RestStates> },
+}
+
+impl std::fmt::Debug for AppEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppEvent::Flushed(r) => f.debug_tuple("Flushed").field(r).finish(),
+            AppEvent::Opened { doc, result } => write!(f, "Opened({doc:?}, {:?})", result.as_ref().map(|_| "..")),
+            AppEvent::Saved { doc, version, result } => write!(f, "Saved({doc:?}, {version:?}, {result:?})"),
+            AppEvent::Checked { doc, result } => write!(f, "Checked({doc:?}, {result:?})"),
+            AppEvent::Store(r) => f.debug_tuple("Store").field(r).finish(),
+            AppEvent::HighlightRest { doc, rest } => write!(f, "HighlightRest({doc:?}, {:?}, from {})", rest.version, rest.value.from_line),
+        }
+    }
 }
 
 /// アプリ側のタイマーの種類。1 本の timerfd で全部を扱う（[`Timers`]）。
@@ -108,12 +131,18 @@ pub struct Workers {
     pub storage: Arc<Worker>,
 }
 
+impl Default for Workers {
+    fn default() -> Self {
+        Workers::new()
+    }
+}
+
 impl Workers {
-    fn new() -> Workers {
+    pub fn new() -> Workers {
         Workers {
             assist: Arc::new(Worker::new(WorkerConfig::ASSIST)),
             batch: Arc::new(Worker::new(WorkerConfig::BATCH)),
-            // 段階 1 では保存しないので、storage も最初の依頼まで作らない
+            // 保存するまで要らないので、storage も最初の依頼まで作らない
             storage: Arc::new(Worker::new(WorkerConfig { lazy: true, ..WorkerConfig::STORAGE })),
         }
     }

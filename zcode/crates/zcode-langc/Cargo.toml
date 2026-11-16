@@ -1,0 +1,15 @@
+[package]
+name = "zcode-langc"
+description = "zcode の言語定義の道具 (PC 用): .sublime-syntax の取り込み・規則の検査・見本の表示"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# 実機の実行ファイルには入らない (zcode はこの crate に依存しない)
+
+[dependencies]
+zc-core.workspace = true
+zc-highlight = { workspace = true, features = ["compile"] }
+toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
+yaml-rust = "0.4"

@@ -8,3 +8,6 @@ publish.workspace = true
 
 [dependencies]
 zc-core.workspace = true
+# 行の区切りは LF だけにする（default-features を切る。CR・U+2028 などで行が
+# 分かれると、他の crate の「行」とずれる）。pure Rust。
+ropey = { version = "1.6", default-features = false }

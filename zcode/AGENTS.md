@@ -1,7 +1,7 @@
 # zcode
 
-VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書く。段階 1（土台）まで
-実装済みで、エディタ本体は段階 2 から（`docs/design.md` §11）。
+VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書く。段階 2（エディタ）まで
+実装済み（`docs/design.md` §11）。実機での段階 2 の確認はまだ。
 
 ## 文書
 
@@ -42,6 +42,8 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - 描画は fb0 へ直接（Python の zero_ui は使わず、Rust で同等のものを持つ）。
   配色は VS Code の Dark+、等幅フォントは実機の DejaVu Sans Mono
   （日本語は Noto Sans Mono CJK にフォールバック）
+- エディタの文字は DejaVu Sans Mono 10px・行の高さ 12px（ユーザーが実機で決定。`zc-ui` の
+  `CODE_PX` / `CODE_LINE_H`）
 - 作業フォルダの既定は `~/code`。終了は Ctrl+Q（Esc は終了に使わない）
 - 日本語入力: **SKK を zcode に組み込む**。uim-skk は GTK / Qt / uim-fep 経由でしか
   効かず fb0 アプリに届かないため。辞書は実機の `/usr/share/skk/SKK-JISYO.L` と
@@ -114,12 +116,41 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   ランチャーと同じ表で確定済み（実行時はドライバの付属ファイルで上書き。
   `zc_input::Keymap::load_driver_map`）。キーを 1 つずつ押してもらう手順は要らなくなった
 
+## 段階 2 で分かったこと（ハイライトと書き込み層、2026-11-16）
+
+- 言語の足し方・`language.toml` の形・正規表現の制限は `languages/README.md`。規則の確認は
+  `cargo run -p zcode-langc -- check|show`、`.sublime-syntax` の取り込みは `... -- import`
+- **キーワードは `[words]` に書く**（正規表現の選択で書くと DFA が数百 KB になる）。
+  文脈の最後の `include` は DFA を共有する。1 言語 100KB を超えるとビルドが警告し、
+  `cargo test` が落ちる
+- 見本の正解は `tests/golden/highlight/<言語>.txt`。言語のフォルダを足すと自動でテストされる
+- 書き込みは `zc-store`（原子的な保存、CRC 付きの独自形式と `.bak`、2 段の控え、SKK 個人辞書の
+  書き戻し）。storage ワーカーには `zc_store::submit` で依頼する
+
+## 段階 2 の統合で決めたこと（2026-11-16）
+
+- 保存は `zc-store` 経由（`save.rs` の `StoreSaver`）。内容が前回と同じでディスクも
+  変わっていなければ書かない（「変更なし」）。開いた後にほかのプログラムが変えた
+  ファイルを上書きしたら、ステータスバーで知らせる
+- 保存できたら、`language.toml` の `check` を batch で使い捨てで走らせる（`intel.rs`）。
+  エラーは赤い波線・赤いタブ名・ステータスバーの件数 `⊗ n` と右のメッセージ（モック 13）。
+  波線は編集に合わせて行をずらす
+- 単語補完（モック 12）: 単語を 2 文字打つと自動で出す。Tab で確定（↑↓ で選ぶ、Esc で
+  閉じる）。Enter は改行のまま。文字列・コメントの中、単語の途中では自動で出さない
+  （Ctrl+Space なら出す）。確定は `TextDoc::replace_range` で 1 回の取り消しで戻せる
+- アウトライン（モック 14）: Ctrl+O。`language.toml` の `[outline]` から作る。絞り込みで
+  一致した項目の親は薄く残す（選べない）
+- 小窓（補完）を閉じる・動かすときは、下にあった行だけ描き直す
+  （`EditorView::invalidate_rows`）。全部を描き直すと SPI の転送が全画面ぶんになる
+- エディタの試験は `SimpleDoc` と本物の `zc_buffer::Buffer` の両方で回す（`both!`）。
+  一時フォルダは試験ごとに別にする（同じ名前だと並列に走ったときに消し合う）
+- Shell / C の `check`・`run`、Rust の `run` の書き方は実機で未確認（`bash -n` / `gcc` の
+  出力の形、実機に gcc・rustc があるか）
+
 ## 次にやること
 
-- モディファイアの届き方と読み取りの遅延は確認済み（`docs/measurements.md` §8）。
-  打鍵 → fsync を呼ぶまで p50 1.4ms
-- フォント比較画面をユーザーに見てもらい、文字の大きさと行の高さを決める
-  （`crates/zc-ui/src/layout.rs` の `CODE_PX` / `CODE_LINE_H`）
-- 実機で試すときはランチャーの「zcode (dev)」から起動する（`dev/README.md`）。
-  SSH から直接起動すると APPLaunch と画面・キーボードを取り合う
-- `docs/stage1-notes.md` §3 の提案を design.md に取り込むか決めてから、段階 2 へ
+- 段階 2 を実機の「zcode (dev)」で確かめる（`dev/README.md`）: Python を開いて編集・保存、
+  補完・構文チェック・アウトライン、打鍵の遅延（目標内か）、実行ファイルが約 3.1MB に
+  増えた分の起動時間。SSH から直接起動すると APPLaunch と画面・キーボードを取り合う
+- ハイライトの実機の計測（`zc-highlight` の `hlbench`。`docs/measurements.md` §6）
+- 段階 3（ターミナル・F5 実行）
