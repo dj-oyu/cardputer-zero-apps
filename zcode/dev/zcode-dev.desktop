@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=zcode (dev)
+Comment=zcode development build (runs ~/.local/bin/zcode-dev)
+Exec=/home/jimmy/.local/bin/zcode-dev
+Terminal=false
