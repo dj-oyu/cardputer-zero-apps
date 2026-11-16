@@ -1,0 +1,93 @@
+# Rust (rust) — zc-highlight の見本の正解。ZCODE_UPDATE_GOLDEN=1 で作り直す
+   1| //! 見本: ライフタイム・文字・生文字列・マクロ・属性
+    : comment "//! 見本: ライフタイム・文字・生文字列・マクロ・属性"
+   2| use std::collections::HashMap;
+    : control "use" · punctuation "::" · punctuation "::" · type "HashMap" · punctuation ";"
+   3| 
+   4| /* ブロックコメント /* 入れ子 */ もここまで */
+    : comment "/* ブロックコメント /* 入れ子 */ もここまで */"
+   5| #[derive(Debug, Clone)]
+    : attribute "#[derive(Debug, Clone)]"
+   6| pub struct Config<'a> {
+    : keyword "pub" · keyword "struct" · type "Config" · operator "<" · keyword "'a" · operator ">" · punctuation "{"
+   7|     name: &'a str,
+    : punctuation ":" · operator "&" · keyword "'a" · type "str" · punctuation ","
+   8|     limit: u32,
+    : punctuation ":" · type "u32" · punctuation ","
+   9| }
+    : punctuation "}"
+  10| 
+  11| pub(crate) enum Mode {
+    : keyword "pub" · punctuation "(" · constant "crate" · punctuation ")" · keyword "enum" · type "Mode" · punctuation "{"
+  12|     Fast,
+    : type "Fast" · punctuation ","
+  13|     Slow(u8),
+    : type "Slow" · punctuation "(" · type "u8" · punctuation "),"
+  14| }
+    : punctuation "}"
+  15| 
+  16| trait Shape {
+    : keyword "trait" · type "Shape" · punctuation "{"
+  17|     fn area(&self) -> f64;
+    : keyword "fn" · function "area" · punctuation "(" · operator "&" · constant "self" · punctuation ")" · operator "->" · type "f64" · punctuation ";"
+  18| }
+    : punctuation "}"
+  19| 
+  20| impl<'a> Config<'a> {
+    : keyword "impl" · operator "<" · keyword "'a" · operator ">" · type "Config" · operator "<" · keyword "'a" · operator ">" · punctuation "{"
+  21|     pub const MAX_LEN: usize = 0xFF_u8 as usize;
+    : keyword "pub" · keyword "const" · constant "MAX_LEN" · punctuation ":" · type "usize" · operator "=" · number "0xFF_u8" · control "as" · type "usize" · punctuation ";"
+  22| 
+  23|     pub async fn load(path: &'static str) -> Option<Self> {
+    : keyword "pub" · keyword "async" · keyword "fn" · function "load" · punctuation "(" · punctuation ":" · operator "&" · keyword "'static" · type "str" · punctuation ")" · operator "->" · type "Option" · operator "<" · type "Self" · operator ">" · punctuation "{"
+  24|         let mut map: HashMap<String, Vec<i32>> = HashMap::new();
+    : keyword "let" · keyword "mut" · punctuation ":" · type "HashMap" · operator "<" · type "String" · punctuation "," · type "Vec" · operator "<" · type "i32" · operator ">>" · operator "=" · type "HashMap" · punctuation "::" · function "new" · punctuation "();"
+  25|         let c = 'x';
+    : keyword "let" · operator "=" · string "'x'" · punctuation ";"
+  26|         let nl = '\n';
+    : keyword "let" · operator "=" · string "'\\n'" · punctuation ";"
+  27|         let jp = 'あ';
+    : keyword "let" · operator "=" · string "'あ'" · punctuation ";"
+  28|         let raw = r#"raw "quoted" \n text"#;
+    : keyword "let" · operator "=" · string "r#\"raw \"quoted\" \\n text\"#" · punctuation ";"
+  29|         let bytes = b"bytes\x00";
+    : keyword "let" · operator "=" · string "b\"bytes" · escape "\\x00" · string "\"" · punctuation ";"
+  30|         let msg = format!("{name}: {:>5} {{literal}}\t{}", 1.5e-3, 42u64);
+    : keyword "let" · operator "=" · attribute "format!" · punctuation "(" · string "\"" · constant "{name}" · string ": " · constant "{:>5}" · escape "{{" · string "literal" · escape "}}\\t" · constant "{}" · string "\"" · punctuation "," · number "1.5e-3" · punctuation "," · number "42u64" · punctuation ");"
+  31|         'outer: for i in 0..10 {
+    : keyword "'outer" · punctuation ":" · control "for" · control "in" · number "0" · punctuation ".." · number "10" · punctuation "{"
+  32|             if i % 2 == 0 && c != 'y' {
+    : control "if" · operator "%" · number "2" · operator "==" · number "0" · operator "&&" · operator "!=" · string "'y'" · punctuation "{"
+  33|                 continue 'outer;
+    : control "continue" · keyword "'outer" · punctuation ";"
+  34|             }
+    : punctuation "}"
+  35|             println!("{} {}", i, msg);
+    : attribute "println!" · punctuation "(" · string "\"" · constant "{}" · constant "{}" · string "\"" · punctuation "," · punctuation "," · punctuation ");"
+  36|         }
+    : punctuation "}"
+  37|         unsafe { map.insert(path.to_string(), vec![1, 2, 3]); }
+    : keyword "unsafe" · punctuation "{" · punctuation "." · function "insert" · punctuation "(" · punctuation "." · function "to_string" · punctuation "()," · attribute "vec!" · punctuation "[" · number "1" · punctuation "," · number "2" · punctuation "," · number "3" · punctuation "]);" · punctuation "}"
+  38|         match map.get("k") {
+    : control "match" · punctuation "." · function "get" · punctuation "(" · string "\"k\"" · punctuation ")" · punctuation "{"
+  39|             Some(v) if v.len() > 1 => Some(Self { name: "a", limit: 3 }),
+    : type "Some" · punctuation "(" · punctuation ")" · control "if" · punctuation "." · function "len" · punctuation "()" · operator ">" · number "1" · operator "=>" · type "Some" · punctuation "(" · type "Self" · punctuation "{" · punctuation ":" · string "\"a\"" · punctuation "," · punctuation ":" · number "3" · punctuation "}),"
+  40|             _ => None,
+    : operator "=>" · type "None" · punctuation ","
+  41|         }
+    : punctuation "}"
+  42|     }
+    : punctuation "}"
+  43| }
+    : punctuation "}"
+  44| 
+  45| mod util {
+    : keyword "mod" · type "util" · punctuation "{"
+  46|     pub fn max<T: PartialOrd>(a: T, b: T) -> T {
+    : keyword "pub" · keyword "fn" · function "max" · operator "<" · type "T" · punctuation ":" · type "PartialOrd" · operator ">" · punctuation "(" · punctuation ":" · type "T" · punctuation "," · punctuation ":" · type "T" · punctuation ")" · operator "->" · type "T" · punctuation "{"
+  47|         if a > b { a } else { b }
+    : control "if" · operator ">" · punctuation "{" · punctuation "}" · control "else" · punctuation "{" · punctuation "}"
+  48|     }
+    : punctuation "}"
+  49| }
+    : punctuation "}"
