@@ -11,6 +11,7 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 | `docs/measurements.md` | 設計の根拠になる実測値（測り方・条件・出典つき）。数字を変えるときはここを先に直す |
 | `docs/stage1-notes.md` | 段階 1 の作業メモ: API の決定と理由、design.md への提案、実機の計測、未解決の点、**キー確認の進め方** |
 | `docs/ui-mock.html` | 画面のモック（320×170 実寸を拡大表示）。画面 1〜11 とショートカットの全項目 |
+| `docs/setup-remote-build.md` | **人向け**の導入手順: Cloudflare（プラン・Zero Trust・サービストークン・Access・deploy・秘密の値）、Tailscale と PC（ACL・ファイアウォール）、実機ごとの設定、トークンを失くしたとき |
 | `docs/remote-build.html` | 外でビルド・試験・型検査する仕組みの設計（Cloudflare Containers / PC、認証、送る形・返す形、実機側の別プロセス `zc-remote`）。却下した案の理由つき。未実装。ユーザーの決定（2026-11-16）: Cloudflare が前提、`zc-remote` の TLS の暗号は ring（「pure Rust だけ」の例外。zcode 本体には入れない）、最後に成功した実行ファイルをプロジェクトごとに 1 つ SD（`~/.cache/zcode/bin/`）に残す（「再計算できるキャッシュは SD に書かない」の例外。オフラインでは作り直せないため） |
 | `docs/stage3-design.md` | 段階 3 の残りの設計: 外部ビルド（受付 `zc-buildd`・実機側 `zc-remote`・Cloudflare の Worker / DO / コンテナ・約束）、zcode へのつなぎ込み、診断の持ち方、JS / TS の F5、人がやる準備、**課題の表（持ち物・順番・担当）**。雛形は入っているが中身は未実装。`remote-build.html` と食い違うところはこちらが優先 |
 | `bench/` | 実測に使ったベンチマーク（`bench/README.md`）。測り直すときはこれを使う |

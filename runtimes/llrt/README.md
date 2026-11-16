@@ -14,6 +14,7 @@ Windows（WSL コンテナー `wslc` と開発コンテナのイメージ `cz-de
 ```powershell
 cd runtimes\llrt
 .\build.ps1                       # v0.10.0-beta の no-sdk → out\llrt-0.10.0-beta-linux-a53-no-sdk
+                                  #   と型定義 out\llrt-types-0.10.0-beta.tar（どちらも隣に .sha256）
 .\build.ps1 v0.11.0-beta          # 新しい版
 .\build.ps1 v0.10.0-beta std      # AWS SDK 入り（no-sdk / std / full-sdk）
 ```
@@ -32,6 +33,20 @@ cd runtimes\llrt
 LLRT は `build-std` で Rust の標準ライブラリもビルドし直すので、std も A53 向けになる。
 差し替えが効かなかったとき（上流の書き方が変わったとき）と、出来上がりに A53 に無い命令が
 多く残っているときは、`build.sh` がエラーで止まる。
+
+## 型定義の tar
+
+LLRT のリポジトリの `types/`（パッケージ名 `llrt-types`）の `*.d.ts` を、同じタグのソースから
+1 つの tar にまとめる（`build.sh` の終わり）。zcode の TS / JS の型検査が `--lib es2022,dom` の
+代わりに使う（`zcode/languages/README.md`）。名前の順・時刻（0）・持ち主（0）・権限をそろえるので、
+中身が同じなら SHA-256 も同じになる（v0.10.0-beta で 2 回作って一致を確かめた）。
+
+## 実機に入れる
+
+`zcode/tools/install-runtimes.sh`（sudo なし。`~/.local/share/zcode/runtimes/` に版ごとに置き、
+`~/.local/bin/llrt` と `~/.local/share/zcode/types/llrt` を張り替える）。版と SHA-256 は
+`zcode/tools/runtimes.lock` に書く。**作り直したら lock の SHA-256 も書き換える**（ビルドは再現可能
+とは限らない）。
 
 ## 中で使うもの
 

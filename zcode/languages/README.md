@@ -44,6 +44,7 @@ first_line = '^#!.*\bpython'    # 拡張子で決まらないとき、1 行目�
 line_comment = "#"              # Ctrl+/ のコメント切り替え（省略可）
 indent = "    "                 # 字下げ 1 段（省略すると空白 4 つ）
 run = "python3 {file}"          # F5 で実行するコマンド（省略可）
+remote = "rust"                 # ビルド係での扱い: rust / c / node（省略可。下の「ビルド係と実行環境」）
 check = "python3 -I -S -c '...' {file}"  # 保存時の構文チェック（省略可。design.md §10.2）
 check_pattern = 'line (\d+)'    # チェックの出力からエラーを拾う正規表現（省略可）
 keywords = ["print", "len"]     # 単語補完に足す語（[words] の語は自動で入る。省略可）
@@ -72,8 +73,14 @@ match = '#.*'
 token = "comment"
 ```
 
-- `run` / `check` は `{file}` をファイルのパスに置き換える。シェルは通さない
-  （引用符 `'` `"` で区切りをまとめられる。`{file}` は引数ごとに置き換える）
+- `check` は `{file}` をファイルのパスに置き換える。**シェルは通さない**
+  （引用符 `'` `"` で区切りをまとめられる。`{file}` は引数ごとに置き換える）。`$HOME` などを
+  展開したいときは `bash -c '… "$0"' {file}` で包む
+- `run` は、F5 の端末の bash が `eval` する（作業フォルダはファイルのフォルダ、`{file}` は
+  引用済みのファイル名に置き換わる）。`exec` を直に書くと終了コードを返す zcode の包みごと
+  置き換わるので、`exec` を使うときは `bash -c '…' {file}` で包む
+- 長いコマンドは TOML の `"""…"""` で折って書ける。行末の `\` は「改行と次の行の字下げを消す」
+  なので、値は 1 行のまま（`\` の前に空白を 1 つ残す。端末の見出しにも 1 行で出る）
 - `check_pattern` の括弧の組は **1 = 行（1 始まり）、2 = 桁（省略可）、3 = メッセージ（省略可）**。
   これは zc-intel が読む（`line (\d+)` のように 1 つだけでもよい）
 
@@ -129,6 +136,39 @@ DFA の表の大きさは「状態の数 × 文字の種類の数（2 の冪に�
   `[-+*/%@&|^~<>!=]+` 1 つにまとめる（文字の種類が 64 を超えると表の幅が 2 倍になる）
 - 前置き × 引用符のような組み合わせは、前置きだけ見て push し、引用符は次の文脈で分ける
 - 大きな文脈を取り込むときは、文脈の **最後に** `include` を置く（DFA を共有する）
+
+## ビルド係と実行環境（`remote`・`run`・`check`。docs/stage3-design.md §10）
+
+`remote` は、その言語をビルド係（`zc-remote` の先。Cloudflare か PC）で扱う種類。あれば
+保存時にビルド係の check を頼み、「試験を実行」が使える。ビルド係に頼めないとき（対象では
+ない・オフライン・`zc-remote` が無い）は、実機の `check` に回る。
+
+| 言語 | `remote` | `run`（F5） | `check`（実機） |
+|---|---|---|---|
+| Rust | `rust` | `zc-remote run {file}`（ビルド係で aarch64 向けに作って、その場で実行） | 無し（実機に rustc を置かない） |
+| C | `c` | `zc-remote run {file}` | `gcc -fsyntax-only`（実機に gcc があれば） |
+| JavaScript | `node` | npm の依存があれば `zc-remote run`、無ければ `llrt` | `tsc --allowJs`（構文だけ） |
+| TypeScript | `node` | npm の依存があれば `zc-remote run`、無ければ `tsc` で型検査して JS を出し `llrt` で実行 | `tsc --noEmit` |
+| Python・Shell | — | `python3` / `bash` | `ast.parse` / `bash -n` |
+
+- 「npm の依存があるか」は `zc-remote applies <file>`（終了コード 0 = ビルド係の対象。通信しない）
+  で決める。`zc-remote` が入っていなければ対象ではない扱いになり、実機で動かす
+- TS の F5 は、JS を RAM（`$XDG_RUNTIME_DIR/zcode/js/`）に出す（SD に書かない）。型エラーなら
+  出さず（`--noEmitOnError`）、実行しない。`.mts` → `.mjs`、`.cts` → `.cjs`。型を剥がすだけの
+  esbuild は使わない
+- JS / TS の check と TS の F5 は、グローバルの型に DOM ではなく **LLRT の型定義**
+  （`~/.local/share/zcode/types/llrt/index.d.ts`）を使い、`--lib es2022` にする（`--lib es2022,dom`
+  は実機で 3.8 秒・91MB だった）。型定義が入っていなければ、もとの `--lib es2022,dom` に戻す
+- LLRT の型定義は、組み込みのモジュールを **`"fs"` `"os"` の名前で** 宣言している（v0.10.0-beta。
+  `node:` 付きで宣言しているのは `node:dgram`・`node:module`・`node:stream/web` だけ）。
+  `import … from "node:fs"` と書くと TS2591 で型検査が通らないので、`"fs"` と書く
+  （LLRT はどちらでも動く）。`structuredClone` も型定義に無い（開発コンテナの x64 の tsc 7.0.2 と
+  LLRT で確かめた、2026-11-17）
+- `llrt`・`tsc`・LLRT の型定義・`zc-remote` は `zcode/tools/install-runtimes.sh` で
+  `~/.local/bin` などに入れる（版と SHA-256 は `zcode/tools/runtimes.lock`。sudo は要らない）。
+  `language.toml` は版によらない名前だけを使う
+- `tsc` が入っていないと、JS / TS の check は bash が「not found」で終わり、診断は出ない
+  （`bash -c` で包んだので、zcode からは起動の失敗に見えない）
 
 ## トークンの種類（`token = "..."`）
 

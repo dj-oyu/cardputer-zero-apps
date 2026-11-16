@@ -27,8 +27,23 @@ extensions = ["js", "mjs", "cjs"]
 first_line = '^#!.*\b(?:node|llrt|deno|bun)\b'
 line_comment = "//"
 indent = "  "
-# run は未設定（F5 実行の設計は後で）
-check = "tsc --noEmit --pretty false --strict --target es2022 --module esnext --moduleResolution bundler --lib es2022,dom --skipLibCheck --allowJs {file}"
+# ビルド係での扱い（docs/stage3-design.md §10.1）。npm の依存がある package.json の下だけが対象
+# （`zc-remote applies` で決まる）。それ以外は実機の tsc と LLRT
+remote = "node"
+# F5（§10.2）: npm の依存があればビルド係で 1 ファイルにして実行（zc-remote run）。無ければ実機の
+# LLRT（A53 版。zcode/tools/install-runtimes.sh で ~/.local/bin/llrt に入れる）で実行する。
+# run はシェルで評価される（{file} は引用済み）。exec が zcode の包みを置き換えないように bash -c で包む。
+# 行末の \ は TOML の「改行と次の行の字下げを消す」で、値は 1 行になる
+run = """bash -c 'if zc-remote applies "$0" 2>/dev/null; then exec zc-remote run "$0"; fi; \
+exec llrt "$0"' {file}"""
+# 実機の check: TypeScript 7 の tsc で構文を見る（--allowJs。JS の型は見ない）。グローバルは DOM ではなく
+# LLRT の型定義（~/.local/share/zcode/types/llrt。install-runtimes.sh の llrt-types）。型定義が
+# 入っていなければ、もとの --lib es2022,dom に戻す。check はシェルを通さないので bash -c で包む
+# （$HOME を展開するため）。tsc が無いと bash が「not found」で終わり、診断は出ない
+check = """bash -c 't="$HOME/.local/share/zcode/types/llrt/index.d.ts"; l=es2022; \
+[ -f "$t" ] || { t=; l=es2022,dom; }; \
+exec tsc --noEmit --pretty false --strict --target es2022 --module esnext --moduleResolution bundler \
+--lib "$l" --skipLibCheck --allowJs ${t:+"$t"} "$0"' {file}"""
 # tsc の出力: `ファイル(行,桁): error TS1005: メッセージ`。メッセージには TS の番号を残す
 check_pattern = '^.*?\((\d+),(\d+)\): (?:error|warning) (TS\d+: .*)$'
 keywords = [
