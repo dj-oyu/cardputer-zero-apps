@@ -116,6 +116,17 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   ランチャーと同じ表で確定済み（実行時はドライバの付属ファイルで上書き。
   `zc_input::Keymap::load_driver_map`）。キーを 1 つずつ押してもらう手順は要らなくなった
 
+## 段階 2 で分かったこと（ハイライトと書き込み層、2026-11-16）
+
+- 言語の足し方・`language.toml` の形・正規表現の制限は `languages/README.md`。規則の確認は
+  `cargo run -p zcode-langc -- check|show`、`.sublime-syntax` の取り込みは `... -- import`
+- **キーワードは `[words]` に書く**（正規表現の選択で書くと DFA が数百 KB になる）。
+  文脈の最後の `include` は DFA を共有する。1 言語 100KB を超えるとビルドが警告し、
+  `cargo test` が落ちる
+- 見本の正解は `tests/golden/highlight/<言語>.txt`。言語のフォルダを足すと自動でテストされる
+- 書き込みは `zc-store`（原子的な保存、CRC 付きの独自形式と `.bak`、2 段の控え、SKK 個人辞書の
+  書き戻し）。storage ワーカーには `zc_store::submit` で依頼する
+
 ## 次にやること
 
 - モディファイアの届き方と読み取りの遅延は確認済み（`docs/measurements.md` §8）。
