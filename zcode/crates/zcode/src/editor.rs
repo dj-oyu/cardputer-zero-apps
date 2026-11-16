@@ -593,13 +593,19 @@ impl EditorScreen {
                 let (a, h) = doc.selection();
                 if a.line != h.line {
                     doc.indent_lines(&tab.lang.indent, false)
-                } else if tab.lang.indent.starts_with('\t') {
-                    doc.insert("\t")
                 } else {
-                    // 次の字下げ位置まで空白を入れる
-                    let w = tab.lang.indent.chars().count().max(1) as u32;
-                    let n = w - a.min(h).col % w;
-                    doc.insert(&" ".repeat(n as usize))
+                    // Tab は直前の文字入力と別の取り消し単位にする
+                    let s = if tab.lang.indent.starts_with('\t') {
+                        "\t".to_string()
+                    } else {
+                        // 次の字下げ位置まで空白を入れる
+                        let w = tab.lang.indent.chars().count().max(1) as u32;
+                        " ".repeat((w - a.min(h).col % w) as usize)
+                    };
+                    doc.break_undo_group();
+                    let c = doc.insert(&s);
+                    doc.break_undo_group();
+                    c
                 }
             }
             Command::Outdent => doc.indent_lines(&tab.lang.indent, true),

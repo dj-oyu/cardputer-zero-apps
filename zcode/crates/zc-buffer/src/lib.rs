@@ -891,7 +891,12 @@ impl Buffer {
     ///   文字数、`indent` がタブなら `tab_width` まで）を取る
     pub fn indent_lines(&mut self, indent: &str, outdent: bool) -> Option<LineChange> {
         if !outdent && self.selection.is_empty() {
-            return self.insert(indent);
+            // Tab は独立した操作: 直前の文字入力と同じ undo のまとまりに入れない
+            // （入れると、undo で直前に打った文字まで消える）。後ろも切る
+            self.break_undo_group();
+            let ch = self.insert(indent);
+            self.break_undo_group();
+            return ch;
         }
         let (a, b) = self.selected_lines();
         let mut edits = Vec::new();

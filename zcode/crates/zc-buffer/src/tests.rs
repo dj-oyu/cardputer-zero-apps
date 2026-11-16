@@ -759,3 +759,20 @@ fn bulk_edit_2000_lines() {
     b.undo();
     assert_eq!(b.to_text(), text);
 }
+
+#[test]
+fn tab_without_selection_is_its_own_undo_group() {
+    let mut b = Buffer::from_text("");
+    b.insert("y");
+    b.indent_lines("    ", false);
+    assert_eq!(b.to_text(), "y    ");
+    b.undo();
+    assert_eq!(b.to_text(), "y");
+    b.undo();
+    assert_eq!(b.to_text(), "");
+    b.redo();
+    b.redo();
+    b.insert("z"); // Tab のあとの入力も別のまとまり
+    b.undo();
+    assert_eq!(b.to_text(), "y    ");
+}

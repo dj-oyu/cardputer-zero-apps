@@ -1,6 +1,7 @@
 //! エディタ画面（`EditorScreen`）の動き: 打鍵 → 操作 → 文書、ツリー、保存、
 //! ステータスバーの遅延、描き変える範囲。実機もイベントループも要らない
-//! （ワーカーと、結果を受ける口だけ本物を使う）。文書は `SimpleDoc`。
+//! （ワーカーと、結果を受ける口だけ本物を使う）。動きの試験は、文書を `SimpleDoc` と
+//! 本物の `zc_buffer::Buffer` の両方で回す（`both!`）。
 
 use std::fs;
 use std::path::PathBuf;
@@ -64,19 +65,58 @@ fn ctrl(c: char) -> KeyEvent {
     KeyEvent::new(Key::Char(c), Mods::CTRL)
 }
 
+/// テストごとに別のフォルダ（同じ tag の simple / buffer 版が並列に走っても衝突しない）。
 fn tmp_dir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("zcode-editor-{tag}-{}", std::process::id()));
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let d = std::env::temp_dir().join(format!("zcode-editor-{tag}-{}-{n}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).unwrap();
     d
 }
 
 /// 文書を 1 つ開いたエディタ。
-fn editor_with(text: &str) -> EditorScreen {
-    let cfg = EditorConfig { backend: DocBackend::Simple, root: PathBuf::from("/nonexistent"), files: vec![PathBuf::from("a.py")] };
+fn editor_with(backend: DocBackend, text: &str) -> EditorScreen {
+    let cfg = EditorConfig { backend, root: PathBuf::from("/nonexistent"), files: vec![PathBuf::from("a.py")] };
     let mut ed = EditorScreen::new(cfg);
-    ed.open_doc(Some(PathBuf::from("/nonexistent/a.py")), "a.py", Box::new(SimpleDoc::from_text(text)), None);
+    let doc: Box<dyn zcode::doc::TextDoc + Send> = match backend {
+        DocBackend::Simple => Box::new(SimpleDoc::from_text(text)),
+        DocBackend::Buffer => Box::new(zc_buffer::Buffer::from_text(text)),
+    };
+    ed.open_doc(Some(PathBuf::from("/nonexistent/a.py")), "a.py", doc, None);
     ed
+}
+
+/// 末尾に改行のあるファイルを開いたときの文書の中身。本物のバッファは末尾の改行を
+/// 「空の最終行」として保つ（VS Code と同じ）。`SimpleDoc` は読むときに落とし、保存で足す。
+fn loaded(backend: DocBackend, s: &str) -> String {
+    match backend {
+        DocBackend::Buffer => format!("{s}\n"),
+        DocBackend::Simple => s.to_string(),
+    }
+}
+
+/// 新しい文書を保存したときのファイルの中身。本物のバッファは書いたとおりに保存する
+/// （末尾の改行を自動では足さない。VS Code の既定と同じ）。`SimpleDoc` は必ず足す。
+fn saved_new(backend: DocBackend, s: &str) -> String {
+    match backend {
+        DocBackend::Buffer => s.to_string(),
+        DocBackend::Simple => format!("{s}\n"),
+    }
+}
+
+/// 試験を `SimpleDoc` と本物の `zc_buffer::Buffer` の両方で回す。
+macro_rules! both {
+    ($name:ident, $simple:ident, $buffer:ident) => {
+        #[test]
+        fn $simple() {
+            $name(DocBackend::Simple)
+        }
+        #[test]
+        fn $buffer() {
+            $name(DocBackend::Buffer)
+        }
+    };
 }
 
 fn text(ed: &EditorScreen) -> String {
@@ -113,10 +153,10 @@ fn ranges(d: &Damage) -> Vec<(u16, u16, Priority)> {
     v
 }
 
-#[test]
-fn typing_newline_indent_and_undo() {
+both!(typing_newline_indent_and_undo, typing_newline_indent_and_undo_simple, typing_newline_indent_and_undo_buffer);
+fn typing_newline_indent_and_undo(backend: DocBackend) {
     let mut lp = Loop::new();
-    let mut ed = editor_with("");
+    let mut ed = editor_with(backend, "");
     lp.type_str(&mut ed, "def f():\nx = 1");
     // `:` で終わる行のあとは 1 段深くなる
     assert_eq!(text(&ed), "def f():\n    x = 1");
@@ -151,10 +191,10 @@ fn typing_newline_indent_and_undo() {
     assert_eq!(a, h);
 }
 
-#[test]
-fn quit_and_close_ask_when_modified() {
+both!(quit_and_close_ask_when_modified, quit_and_close_ask_when_modified_simple, quit_and_close_ask_when_modified_buffer);
+fn quit_and_close_ask_when_modified(backend: DocBackend) {
     let mut lp = Loop::new();
-    let mut ed = editor_with("x");
+    let mut ed = editor_with(backend, "x");
     lp.keys(&mut ed, &[ctrl('q')]);
     assert!(lp.quit, "未保存が無ければすぐ終わる");
     let mut lp = Loop::new();
@@ -173,10 +213,10 @@ fn quit_and_close_ask_when_modified() {
     assert!(lp.quit);
 }
 
-#[test]
-fn tabs_new_file_and_switching() {
+both!(tabs_new_file_and_switching, tabs_new_file_and_switching_simple, tabs_new_file_and_switching_buffer);
+fn tabs_new_file_and_switching(backend: DocBackend) {
     let mut lp = Loop::new();
-    let mut ed = editor_with("first");
+    let mut ed = editor_with(backend, "first");
     lp.keys(&mut ed, &[ctrl('n')]);
     assert_eq!(ed.tab_count(), 2);
     lp.type_str(&mut ed, "second");
@@ -188,11 +228,11 @@ fn tabs_new_file_and_switching() {
     assert_eq!(ed.active_path(), None);
 }
 
-#[test]
-fn goto_line_and_find_prompts() {
+both!(goto_line_and_find_prompts, goto_line_and_find_prompts_simple, goto_line_and_find_prompts_buffer);
+fn goto_line_and_find_prompts(backend: DocBackend) {
     let mut lp = Loop::new();
     let body: String = (1..=50).map(|i| format!("line {i} foo\n")).collect();
-    let mut ed = editor_with(&body);
+    let mut ed = editor_with(backend, &body);
     lp.keys(&mut ed, &[ctrl('g')]);
     lp.type_str(&mut ed, "3x7\n"); // 数字だけ入る
     assert_eq!(cursor(&ed), Pos::new(36, 0));
@@ -214,14 +254,14 @@ fn goto_line_and_find_prompts() {
     assert!(ed.message().unwrap().contains("見つからない"));
 }
 
-#[test]
-fn open_from_tree_edit_and_save() {
+both!(open_from_tree_edit_and_save, open_from_tree_edit_and_save_simple, open_from_tree_edit_and_save_buffer);
+fn open_from_tree_edit_and_save(backend: DocBackend) {
     let dir = tmp_dir("save");
     fs::create_dir_all(dir.join("blink")).unwrap();
     fs::write(dir.join("blink/main.py"), "import time\n").unwrap();
     fs::write(dir.join("notes.txt"), "memo\n").unwrap();
     let mut lp = Loop::new();
-    let mut ed = EditorScreen::new(EditorConfig { backend: DocBackend::Simple, root: dir.clone(), files: vec![] });
+    let mut ed = EditorScreen::new(EditorConfig { backend, root: dir.clone(), files: vec![] });
     lp.with(|cx| ed.start(cx));
     // ファイルを渡さずに起動: ツリーに入力がある。blink を開いて main.py を選ぶ
     assert_eq!(ed.tab_count(), 0);
@@ -231,7 +271,7 @@ fn open_from_tree_edit_and_save() {
     // 読み込みは batch。終わるまでは空で、打鍵も入らない
     lp.type_str(&mut ed, "zzz");
     lp.pump(&mut ed);
-    assert_eq!(text(&ed), "import time");
+    assert_eq!(text(&ed), loaded(backend, "import time"));
     // 編集して保存（storage スレッドが書く）
     lp.keys(&mut ed, &[key(Key::End)]);
     lp.type_str(&mut ed, "\nprint(1)");
@@ -256,7 +296,7 @@ fn open_from_tree_edit_and_save() {
     lp.keys(&mut ed, &[ctrl('s')]);
     lp.type_str(&mut ed, "blink/new.py\n");
     lp.pump(&mut ed);
-    assert_eq!(fs::read_to_string(dir.join("blink/new.py")).unwrap(), "x = 1\n");
+    assert_eq!(fs::read_to_string(dir.join("blink/new.py")).unwrap(), saved_new(backend, "x = 1"));
     assert_eq!(ed.active_path(), Some(dir.join("blink/new.py").as_path()));
     assert!(ed.tree_mut().nodes().iter().any(|n| n.name == "new.py"));
     // 保存できない場所
@@ -281,12 +321,12 @@ fn open_from_tree_edit_and_save() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn keystroke_damage_is_cursor_line_and_status_is_deferred() {
+both!(keystroke_damage_is_cursor_line_and_status_is_deferred, keystroke_damage_is_cursor_line_and_status_is_deferred_simple, keystroke_damage_is_cursor_line_and_status_is_deferred_buffer);
+fn keystroke_damage_is_cursor_line_and_status_is_deferred(backend: DocBackend) {
     let Some(mut g) = Gfx::new() else { return };
     let mut lp = Loop::new();
     let body: String = (1..=40).map(|i| format!("value_{i} = {i}\n")).collect();
-    let mut ed = editor_with(&body);
+    let mut ed = editor_with(backend, &body);
     let d = g.render(&mut ed);
     assert_eq!(d.bounds(), RowRange::new(0, 170));
     assert!(g.render(&mut ed).is_empty());
@@ -314,11 +354,11 @@ fn keystroke_damage_is_cursor_line_and_status_is_deferred() {
     assert!(g.render(&mut ed).is_empty());
 }
 
-#[test]
-fn cursor_blink_stops_when_idle() {
+both!(cursor_blink_stops_when_idle, cursor_blink_stops_when_idle_simple, cursor_blink_stops_when_idle_buffer);
+fn cursor_blink_stops_when_idle(backend: DocBackend) {
     let Some(mut g) = Gfx::new() else { return };
     let mut lp = Loop::new();
-    let mut ed = editor_with("abc\ndef\n");
+    let mut ed = editor_with(backend, "abc\ndef\n");
     lp.keys(&mut ed, &[key(Key::Right)]);
     g.render(&mut ed);
     assert!(lp.timers.deadline(TimerId::CursorBlink).is_some());
@@ -346,14 +386,14 @@ fn cursor_blink_stops_when_idle() {
     assert!(lp.timers.deadline(TimerId::CursorBlink).is_some());
 }
 
-#[test]
-fn tree_toggle_and_focus() {
+both!(tree_toggle_and_focus, tree_toggle_and_focus_simple, tree_toggle_and_focus_buffer);
+fn tree_toggle_and_focus(backend: DocBackend) {
     let Some(mut g) = Gfx::new() else { return };
     let dir = tmp_dir("tree");
     fs::write(dir.join("a.py"), "a = 1\n").unwrap();
     fs::write(dir.join("b.py"), "b = 2\n").unwrap();
     let mut lp = Loop::new();
-    let mut ed = EditorScreen::new(EditorConfig { backend: DocBackend::Simple, root: dir.clone(), files: vec![dir.join("a.py")] });
+    let mut ed = EditorScreen::new(EditorConfig { backend, root: dir.clone(), files: vec![dir.join("a.py")] });
     lp.with(|cx| ed.start(cx));
     lp.pump(&mut ed);
     g.render(&mut ed);
@@ -368,10 +408,10 @@ fn tree_toggle_and_focus() {
     lp.type_str(&mut ed, "zz");
     lp.keys(&mut ed, &[key(Key::Down), key(Key::Enter)]);
     lp.pump(&mut ed);
-    assert_eq!((ed.tab_count(), text(&ed)), (2, "b = 2".to_string()));
+    assert_eq!((ed.tab_count(), text(&ed)), (2, loaded(backend, "b = 2")));
     // 開いたらエディタに入力が戻る
     lp.type_str(&mut ed, "#");
-    assert_eq!(text(&ed), "#b = 2");
+    assert_eq!(text(&ed), loaded(backend, "#b = 2"));
     // ツリーを閉じると全幅に戻る
     lp.keys(&mut ed, &[ctrl('b')]);
     g.render(&mut ed);
