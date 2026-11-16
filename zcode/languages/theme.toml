@@ -1,0 +1,26 @@
+# トークンの種類 → 色（VS Code の Dark+）。build.rs が実行ファイルの表に変換する。
+# 種類の名前は zc_core::TokenKind（language.toml の token = "..." と同じ）。
+# 値は "#rrggbb"（文字色だけ）か { fg, bg, bold, italic, underline }。
+# 書かなかった種類は zc_core::Theme::dark_plus() のまま。
+
+name = "Dark+"
+
+[tokens]
+text = "#d4d4d4"
+comment = "#6a9955"
+string = "#ce9178"
+escape = "#d7ba7d"
+number = "#b5cea8"
+keyword = "#569cd6"
+control = "#c586c0"
+function = "#dcdcaa"
+type = "#4ec9b0"
+variable = "#9cdcfe"
+constant = "#569cd6"
+operator = "#d4d4d4"
+punctuation = "#d4d4d4"
+attribute = "#dcdcaa"
+heading = { fg = "#569cd6", bold = true }
+key = "#9cdcfe"
+link = { fg = "#3794ff", underline = true }
+invalid = "#f48771"

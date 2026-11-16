@@ -1,0 +1,95 @@
+# Python (python) — zc-highlight の見本の正解。ZCODE_UPDATE_GOLDEN=1 で作り直す
+   1| #!/usr/bin/env python3
+    : comment "#!/usr/bin/env python3"
+   2| """ハイライトの見本（tests/golden/highlight/python.txt と比べる）。
+    : string "\"\"\"ハイライトの見本（tests/golden/highlight/python.txt と比べる）。"
+   3| 
+   4| 複数行の docstring: {placeholder} と %s と \n。
+    : string "複数行の docstring: " · constant "{placeholder}" · string " と " · constant "%s" · string " と " · escape "\\n" · string "。"
+   5| """
+    : string "\"\"\""
+   6| import os, sys
+    : control "import" · punctuation ","
+   7| from dataclasses import dataclass, field
+    : control "from" · control "import" · punctuation ","
+   8| 
+   9| 
+  10| @dataclass(frozen=True)
+    : attribute "@dataclass" · punctuation "(" · operator "=" · constant "True" · punctuation ")"
+  11| class Point(object):
+    : keyword "class" · type "Point" · punctuation "(" · type "object" · punctuation "):"
+  12|     x: float = 0.0
+    : punctuation ":" · type "float" · operator "=" · number "0.0"
+  13|     y: float = 0.0  # 座標（日本語のコメント）
+    : punctuation ":" · type "float" · operator "=" · number "0.0" · comment "# 座標（日本語のコメント）"
+  14| 
+  15|     def dist(self, other: "Point" = None, *args, scale=1_000, **kw) -> float:
+    : keyword "def" · function "dist" · punctuation "(" · constant "self" · punctuation "," · variable "other" · punctuation ":" · string "\"Point\"" · operator "=" · constant "None" · punctuation "," · operator "*" · variable "args" · punctuation "," · variable "scale" · operator "=" · number "1_000" · punctuation "," · operator "**" · variable "kw" · punctuation ")" · operator "->" · type "float" · punctuation ":"
+  16|         if other is None:
+    : control "if" · keyword "is" · constant "None" · punctuation ":"
+  17|             return 0
+    : control "return" · number "0"
+  18|         return ((self.x - other.x) ** 2 + (self.y - other.y) ** 2) ** 0.5
+    : control "return" · punctuation "((" · constant "self" · punctuation "." · operator "-" · punctuation "." · punctuation ")" · operator "**" · number "2" · operator "+" · punctuation "(" · constant "self" · punctuation "." · operator "-" · punctuation "." · punctuation ")" · operator "**" · number "2" · punctuation ")" · operator "**" · number "0.5"
+  19| 
+  20| 
+  21| async def fetch(url: str, retries: int = 3,
+    : control "async" · keyword "def" · function "fetch" · punctuation "(" · variable "url" · punctuation ":" · type "str" · punctuation "," · variable "retries" · punctuation ":" · type "int" · operator "=" · number "3" · punctuation ","
+  22|                 timeout=(1.5, 2e-3)) -> bytes:
+    : variable "timeout" · operator "=" · punctuation "(" · number "1.5" · punctuation "," · number "2e-3" · punctuation "))" · operator "->" · type "bytes" · punctuation ":"
+  23|     for i in range(retries):
+    : control "for" · keyword "in" · type "range" · punctuation "(" · punctuation "):"
+  24|         try:
+    : control "try" · punctuation ":"
+  25|             await something(url)
+    : control "await" · function "something" · punctuation "(" · punctuation ")"
+  26|         except (ValueError, OSError) as e:
+    : control "except" · punctuation "(" · type "ValueError" · punctuation "," · type "OSError" · punctuation ")" · control "as" · punctuation ":"
+  27|             print(f"retry {i!r:>3} {e} {{literal}}", file=sys.stderr)
+    : function "print" · punctuation "(" · string "f\"retry " · constant "{" · constant "!r:>3}" · constant "{" · constant "}" · escape "{{" · string "literal" · escape "}}" · string "\"" · punctuation "," · operator "=" · punctuation "." · punctuation ")"
+  28|             continue
+    : control "continue"
+  29|         finally:
+    : control "finally" · punctuation ":"
+  30|             pass
+    : control "pass"
+  31|     raise TimeoutError('gave up: %d tries' % retries)
+    : control "raise" · type "TimeoutError" · punctuation "(" · string "'gave up: " · constant "%d" · string " tries'" · operator "%" · punctuation ")"
+  32| 
+  33| 
+  34| def main(argv):
+    : keyword "def" · function "main" · punctuation "(" · variable "argv" · punctuation "):"
+  35|     pts = [Point(i, i * 2) for i in range(10)]
+    : operator "=" · punctuation "[" · function "Point" · punctuation "(" · punctuation "," · operator "*" · number "2" · punctuation ")" · control "for" · keyword "in" · type "range" · punctuation "(" · number "10" · punctuation ")]"
+  36|     total = sum(p.dist(pts[0]) for p in pts)
+    : operator "=" · function "sum" · punctuation "(" · punctuation "." · function "dist" · punctuation "(" · punctuation "[" · number "0" · punctuation "])" · control "for" · keyword "in" · punctuation ")"
+  37|     path = r"C:\Users\name\file.txt"
+    : operator "=" · string "r\"C:\\Users\\name\\file.txt\""
+  38|     data = b'\x00\xff' + rb"\d+"
+    : operator "=" · string "b'" · escape "\\x00\\xff" · string "'" · operator "+" · string "rb\"\\d+\""
+  39|     名前 = "日本語の文字列 \u3042"
+    : operator "=" · string "\"日本語の文字列 " · escape "\\u3042" · string "\""
+  40|     flags = 0x1F | 0b1010 | 0o17
+    : operator "=" · number "0x1F" · operator "|" · number "0b1010" · operator "|" · number "0o17"
+  41|     s = '''multi
+    : operator "=" · string "'''multi"
+  42| line "quoted" {x}
+    : string "line \"quoted\" " · constant "{x}"
+  43| end'''
+    : string "end'''"
+  44|     fs = f"""total={total:.3f} {len(argv)}
+    : operator "=" · string "f\"\"\"total=" · constant "{" · constant ":.3f}" · constant "{" · function "len" · punctuation "(" · punctuation ")" · constant "}"
+  45|     {pts[0].x}"""
+    : constant "{" · punctuation "[" · number "0" · punctuation "]." · constant "}" · string "\"\"\""
+  46|     matrix = a @ b
+    : operator "=" · operator "@"
+  47|     lam = lambda v: not v and True or False
+    : operator "=" · keyword "lambda" · punctuation ":" · keyword "not" · keyword "and" · constant "True" · keyword "or" · constant "False"
+  48|     return 0 if total > 1 else 1
+    : control "return" · number "0" · control "if" · operator ">" · number "1" · control "else" · number "1"
+  49| 
+  50| 
+  51| if __name__ == "__main__":
+    : control "if" · variable "__name__" · operator "==" · string "\"__main__\"" · punctuation ":"
+  52|     sys.exit(main(sys.argv))
+    : punctuation "." · function "exit" · punctuation "(" · function "main" · punctuation "(" · punctuation "." · punctuation "))"
