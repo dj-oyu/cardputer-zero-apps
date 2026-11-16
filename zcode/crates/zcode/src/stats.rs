@@ -97,8 +97,20 @@ pub struct Stats {
     pub threads: u32,
     /// 起動の区切り（名前, 開始からの µs）。
     pub startup: Vec<(&'static str, u64)>,
+    /// 起動の区切りごとのページフォールト（メジャー = 記憶装置から読んだ, マイナー）。
+    pub startup_faults: Vec<(u64, u64)>,
     /// フレームの通し番号 → (起床時刻, 渡し終えた時刻)。flush の記録と突き合わせる。
     recent: VecDeque<(u64, u64, u64)>,
+}
+
+/// これまでのページフォールトの数（メジャー, マイナー）。
+fn page_faults() -> (u64, u64) {
+    // SAFETY: getrusage は渡した構造体に書くだけ。
+    let mut ru: libc::rusage = unsafe { core::mem::zeroed() };
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) } != 0 {
+        return (0, 0);
+    }
+    (ru.ru_majflt as u64, ru.ru_minflt as u64)
 }
 
 impl Stats {
@@ -109,6 +121,7 @@ impl Stats {
     /// 起動の区切りを記録する。
     pub fn mark(&mut self, name: &'static str) {
         self.startup.push((name, now_us().saturating_sub(self.t_start_us)));
+        self.startup_faults.push(page_faults());
     }
 
     /// 1 フレームぶん。`wake`: 起床、`t0`: 描画開始、`t1`: 描画終了、`handoff`: 渡し終えた時刻。
@@ -183,6 +196,8 @@ impl Stats {
         );
         let marks: Vec<String> = self.startup.iter().map(|(n, t)| format!("{n} {:.1}", *t as f64 / 1000.0)).collect();
         let _ = writeln!(o, "  startup marks (ms): {}", marks.join(" / "));
+        let faults: Vec<String> = self.startup.iter().zip(&self.startup_faults).map(|((n, _), (maj, min))| format!("{n} {maj}/{min}")).collect();
+        let _ = writeln!(o, "  startup faults (major/minor): {}", faults.join(" / "));
         let _ = writeln!(o, "  frames={} flushes={} keys={} key_batches={} syn_dropped={}", self.frames, self.flush_count, self.keys, self.key_batches, self.syn_dropped);
         let _ = writeln!(o, "  rows/frame       : n={} p50={} max={}", self.rows.len(), self.rows.quantile(0.5), self.rows.quantile(1.0));
         let _ = writeln!(o, "  input handling   : {}", self.input.summary());
