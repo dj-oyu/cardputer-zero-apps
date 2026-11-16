@@ -1,0 +1,14 @@
+Package: bt-tether-lcd
+Version: 0.1
+Section: utils
+Priority: optional
+Architecture: arm64
+Maintainer: Uchida <uchida@local>
+Depends: python3, python3-dbus, python3-gi, python3-pil, python3-numpy
+Description: Bluetooth PAN tethering panel for CardputerZero APPLaunch
+ Connects the CardputerZero to an iPhone's Personal Hotspot over
+ Bluetooth PAN (NAP), talking to BlueZ directly over D-Bus
+ (NetworkManager is polkit-gated on this system). Shows pairing
+ and connection state on the built-in LCD (fb0), confirms pairing
+ passkeys with the device keys, and connects/disconnects with
+ Enter. Exiting the app leaves the PAN connection up.

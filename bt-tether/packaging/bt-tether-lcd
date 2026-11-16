@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/bin/python3 /usr/share/APPLaunch/lib/bt-tether/bt_tether_lcd.py

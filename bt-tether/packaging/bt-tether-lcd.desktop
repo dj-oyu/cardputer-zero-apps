@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=BT Tether
+Comment=Bluetooth PAN tethering to iPhone Personal Hotspot
+Exec=/usr/share/APPLaunch/bin/bt-tether-lcd
+Icon=share/images/bt-tether.png
+Terminal=false
+Categories=Utility;
+StartupNotify=false

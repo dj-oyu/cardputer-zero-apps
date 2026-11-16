@@ -3,3 +3,4 @@ __pycache__/
 # 生成アセット (tools/ のスクリプトで作る)
 qrreader/qrreader_test_qr.png
 qrreader/packaging/qrreader.png
+bt-tether/packaging/bt-tether.png
