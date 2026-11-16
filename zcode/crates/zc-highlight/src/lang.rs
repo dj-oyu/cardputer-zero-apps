@@ -59,7 +59,7 @@ pub(crate) struct LangRt {
 /// 確かめてあるので、検査を省いた読み込みを使う（全ページを読む検査を避ける）。
 fn load_dfa(region: &'static [u8], off: u32, len: u32, checked: bool) -> Option<Dfa> {
     let b = region.get(off as usize..(off as usize).checked_add(len as usize)?)?;
-    if (b.as_ptr() as usize) % 4 != 0 {
+    if !(b.as_ptr() as usize).is_multiple_of(4) {
         return None;
     }
     let r = if checked {
@@ -325,7 +325,7 @@ fn find(dfa: &Dfa, text: &[u8], at: usize, limit: usize) -> Option<(usize, usize
         }
         i += 1;
     }
-    sid = if i >= n + 1 { dfa.next_eoi_state(sid) } else { dfa.next_state(sid, byte_at(i)) };
+    sid = if i > n { dfa.next_eoi_state(sid) } else { dfa.next_state(sid, byte_at(i)) };
     if dfa.is_match_state(sid) {
         last = Some((dfa.match_pattern(sid, 0).as_usize(), i));
     }

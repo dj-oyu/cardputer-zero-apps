@@ -360,7 +360,7 @@ impl Highlighter {
         let new_hi = (change.new.end as usize).max(lo);
         if lo <= self.states.len() {
             let rm_end = old_hi.min(self.states.len());
-            self.states.splice(lo..rm_end, std::iter::repeat(UNKNOWN).take(new_hi - lo));
+            self.states.splice(lo..rm_end, std::iter::repeat_n(UNKNOWN, new_hi - lo));
         }
         let shift = |x: usize, inside: usize| -> usize {
             if x <= lo {
@@ -489,7 +489,7 @@ impl Highlighter {
             rt.stack_of(state.0, &mut stack);
             let mut st = state.0;
             for line in from_line..n {
-                if (line - from_line) % 256 == 0 {
+                if (line - from_line).is_multiple_of(256) {
                     cancel.check()?;
                 }
                 states.push(LineState(st));

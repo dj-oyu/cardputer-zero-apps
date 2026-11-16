@@ -91,7 +91,7 @@ pub mod layout {
         v.extend_from_slice(&x.to_le_bytes());
     }
     pub fn pad_to(v: &mut Vec<u8>, align: usize) {
-        while v.len() % align != 0 {
+        while !v.len().is_multiple_of(align) {
             v.push(0);
         }
     }
