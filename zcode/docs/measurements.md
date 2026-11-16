@@ -209,7 +209,8 @@ Raspberry Pi OS = Debian 13 aarch64、kernel 6.18.39+rpt-rpi-v8、microSD）。
 - Sym+R は KEY_KP7（71）で届き、表どおり `-`。Fn+5 は KEY_F5、Fn ロック中の
   F / Z / X / C は ↑ / ← / ↓ / →（KEY_UP 103 / LEFT 105 / DOWN 108 / RIGHT 106）
 - Ctrl+S、Alt+B、Ctrl+Shift+K は、モディファイアの押下 → キー → 離上の順で届く
-- `SYN_DROPPED` は 0 回（速打ち 10 打鍵を含む 105 イベント）
+- `SYN_DROPPED` は 0 回（速打ち 11 打鍵を含む 105 イベント。速打ちは打鍵の間隔 0.13〜0.3 秒で、
+  11 回とも押下と離上がそろって届いた）
 
 ### 8.2 遅延（n = 105 イベント）
 
