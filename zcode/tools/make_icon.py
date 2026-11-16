@@ -8,10 +8,9 @@
 
 見た目: Y2K 風のツヤのある、Mac 風ターミナルのウィンドウ。黒いガラスの本体（走査線は
 窓全体に通す）に、スモークガラスのタイトルバーを半透明で重ね、赤・黄・緑の丸い
-ボタンを置く。燐光の緑の `</>` の背後だけを魚眼で膨らませ（走査線がレンズ状にたわむ）、
+ボタンを置く（照りはタイトルバーの中だけ）。燐光の緑の `</>` の背後だけを魚眼で膨らませ（走査線がレンズ状にたわむ）、
 `</>` 自体はまっすぐ描く。下に
-`zcode▌`（ブロックカーソル）。最後に窓全体へ 1 枚のガラスのツヤをかける（タイトルバー
-や札が最前面に浮かないように）。4 倍の大きさで描いてから縮小して縁をなめらかにする。
+`zcode▌`（ブロックカーソル）。4 倍の大きさで描いてから縮小して縁をなめらかにする。
 """
 
 import os
@@ -91,8 +90,11 @@ def glow_text(img, xy, text, font, top, bottom, outline, glow=None, stroke=0):
         img.alpha_composite(g.filter(ImageFilter.GaussianBlur(3 * S)))
     if stroke:
         ImageDraw.Draw(img).text((x, y), text, font=font, fill=outline, stroke_width=stroke, stroke_fill=outline)
+    # 中身のマスクも stroke_width を付けて描く（縁は 0、中身は 255）。Pillow は
+    # stroke の有無で文字の置き位置がずれるので、縁取りなしで描くと中身が片側に
+    # 寄り、縁取りの太さが左右で変わって見える
     mask = Image.new("L", img.size, 0)
-    ImageDraw.Draw(mask).text((x, y), text, font=font, fill=255)
+    ImageDraw.Draw(mask).text((x, y), text, font=font, fill=255, stroke_width=stroke, stroke_fill=0)
     bbox = mask.getbbox()
     if bbox:
         paste_grad(img, (0, bbox[1], img.size[0], bbox[3]), top, bottom, mask)
@@ -141,10 +143,11 @@ def bulge(img, center, radius, strength=0.4):
     dx, dy = xx - cx, yy - cy
     r = np.sqrt(dx * dx + dy * dy) / radius
     inside = r < 1.0
-    # 出力の半径 r に、元の半径 r' = r^(1+k) を対応させる（中心ほど拡大される）。
-    # 縁 (r=1) では r' = 1 なので、まわりとつながる
+    # 出力の半径 r に、元の半径 r' = r (1 - k (1 - r^2)) を対応させる。中心の拡大率は
+    # 1/(1-k) で頭打ち、縁 (r=1) で等倍に戻り、その間はなめらかに変わる
+    # （r^(1+k) のような式は中心で拡大率が発散し、膨らみが急になる）
     k = strength
-    scale = np.where(inside, np.power(np.maximum(r, 1e-6), k), 1.0)
+    scale = np.where(inside, 1.0 - k * (1.0 - r * r), 1.0)
     sx = cx + dx * scale
     sy = cy + dy * scale
     # 双一次補間
@@ -161,6 +164,44 @@ def bulge(img, center, radius, strength=0.4):
     region[inside] = out[inside]
     a[y0:y1, x0:x1] = region
     return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), "RGBA")
+
+
+def code_glyph(img, center, half_w, half_h, width, outline):
+    """`</>` を図形として描く。<・/・> を同じ太さの先の丸い線で描き、縁取りはそれより
+    太い暗い線を先に描いて、どこでも同じ太さにする（フォントの斜線は縮小すると縁の
+    濃さが場所で変わり、棒が波打って見えた）。光（グロー）は縁取りより下に描く。"""
+    cx, cy = center
+    gap = half_w * 0.18                      # 記号どうしのすき間
+    cw = half_w * 0.36                       # < と > の幅
+    lt = [(cx - gap - cw * 0.0 - half_w * 0.32, cy - half_h * 0.62),
+          (cx - half_w, cy),
+          (cx - gap - half_w * 0.32, cy + half_h * 0.62)]
+    gt = [(cx + gap + half_w * 0.32, cy - half_h * 0.62),
+          (cx + half_w, cy),
+          (cx + gap + half_w * 0.32, cy + half_h * 0.62)]
+    sl = [(cx - half_w * 0.20, cy + half_h), (cx + half_w * 0.20, cy - half_h)]
+
+    def strokes(draw, w, fill):
+        for pts in (lt, gt):
+            draw.line(pts, fill=fill, width=w, joint="curve")
+            for x, y in (pts[0], pts[2], pts[1]):
+                draw.ellipse((x - w / 2, y - w / 2, x + w / 2, y + w / 2), fill=fill)
+        draw.line(sl, fill=fill, width=w)
+        for x, y in sl:
+            draw.ellipse((x - w / 2, y - w / 2, x + w / 2, y + w / 2), fill=fill)
+
+    # 光
+    g = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    strokes(ImageDraw.Draw(g), width + 2 * outline + 6 * S, GREEN_GLOW + (170,))
+    img.alpha_composite(g.filter(ImageFilter.GaussianBlur(3 * S)))
+    # 縁取り（一定の太さ）
+    strokes(ImageDraw.Draw(img), width + 2 * outline, GREEN_DARK + (255,))
+    # 中身（縦グラデーション）
+    m = Image.new("L", img.size, 0)
+    strokes(ImageDraw.Draw(m), width, 255)
+    bbox = m.getbbox()
+    if bbox:
+        paste_grad(img, (0, bbox[1], img.size[0], bbox[3]), GREEN_TOP, GREEN_BOTTOM, m)
 
 
 def make(dev: bool) -> Image.Image:
@@ -204,13 +245,10 @@ def make(dev: bool) -> Image.Image:
     # レンズ: 背景（走査線と緑のにじみ）だけを魚眼で膨らませる。</> 自体は歪ませない
     # （文字ごと歪ませると、中心を通る斜線が中央で太くたわんで見えた）
     d = ImageDraw.Draw(img)
-    big = ImageFont.truetype(FONT, 32 * S)
-    t = "</>"
-    tw = d.textlength(t, font=big)
     ty = screen[1] + 3 * S
     lens_c = (W // 2, int(ty + 22 * S))
     lens_r = 34 * S
-    img = bulge(img, lens_c, lens_r, strength=0.55)
+    img = bulge(img, lens_c, lens_r, strength=0.25)
     # レンズの縁を少し暗くして、ふくらみの奥行きを出す
     vig = Image.new("L", img.size, 0)
     ImageDraw.Draw(vig).ellipse((lens_c[0] - lens_r, lens_c[1] - lens_r, lens_c[0] + lens_r, lens_c[1] + lens_r),
@@ -219,9 +257,8 @@ def make(dev: bool) -> Image.Image:
     shade = Image.new("RGBA", img.size, (0, 0, 0, 0))
     shade.putalpha(ImageChops.multiply(vig, smask))
     img.alpha_composite(shade)
-    # </> はまっすぐ描く（少し大きめ、光と縁取り付き）
-    glow_text(img, ((W - tw) / 2, ty), t, big, GREEN_TOP, GREEN_BOTTOM, GREEN_DARK,
-              glow=GREEN_GLOW, stroke=2 * S)
+    # </> は図形でまっすぐ描く（太さと縁取りが一定）
+    code_glyph(img, lens_c, half_w=29 * S, half_h=14 * S, width=int(4.5 * S), outline=int(1.75 * S))
     # レンズの照り（左上の細い円弧の光）
     lens = Image.new("RGBA", img.size, (0, 0, 0, 0))
     ImageDraw.Draw(lens).arc((lens_c[0] - lens_r + 4 * S, lens_c[1] - lens_r + 4 * S,
@@ -278,8 +315,16 @@ def make(dev: bool) -> Image.Image:
         glow_text(img, (b[0] + (b[2] - b[0] - tw) / 2, b[1] + 0.5 * S), "DEV", tag,
                   WHITE, (255, 230, 240), (90, 10, 40), stroke=S)
 
-    # 最後に、窓全体のツヤ（タイトルバーも札も、同じ 1 枚のガラスの下に入る）
-    gloss(img, inner, r_in, strength=135)
+    # 最後に、タイトルバーの照り（バーの中だけ。上ほど明るく、バーの中ほどで消える）
+    shine = Image.new("L", img.size, 0)
+    sd2 = ImageDraw.Draw(shine)
+    for i in range(bar_h):
+        sd2.line((bar[0], bar[1] + i, bar[2], bar[1] + i), fill=int(150 * max(0.0, 1 - i / (bar_h * 0.6)) ** 1.3))
+    shine = ImageChops.multiply(shine, rounded_mask(img.size, (bar[0] + S, bar[1] + S, bar[2] - S, bar[3]),
+                                                    r_in - S, corners=(True, True, False, False)))
+    white = Image.new("RGBA", img.size, WHITE + (0,))
+    white.putalpha(shine)
+    img.alpha_composite(white)
     ImageDraw.Draw(img).rounded_rectangle(inner, radius=r_in, outline=(255, 255, 255, 70), width=S)
     sparkle(img, screen[2] - 9 * S, screen[1] + 9 * S, 5 * S)
 
