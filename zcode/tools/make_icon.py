@@ -8,7 +8,8 @@
 
 見た目: Y2K 風のツヤのある、Mac 風ターミナルのウィンドウ。黒いガラスの本体（走査線は
 窓全体に通す）に、スモークガラスのタイトルバーを半透明で重ね、赤・黄・緑の丸い
-ボタンを置く。燐光の緑の `</>` は、まわりの走査線ごと魚眼で少し膨らませる。下に
+ボタンを置く。燐光の緑の `</>` の背後だけを魚眼で膨らませ（走査線がレンズ状にたわむ）、
+`</>` 自体はまっすぐ描く。下に
 `zcode▌`（ブロックカーソル）。最後に窓全体へ 1 枚のガラスのツヤをかける（タイトルバー
 や札が最前面に浮かないように）。4 倍の大きさで描いてから縮小して縁をなめらかにする。
 """
@@ -200,22 +201,32 @@ def make(dev: bool) -> Image.Image:
     haze.putalpha(ImageChops.multiply(haze.getchannel("A"), smask))
     img.alpha_composite(haze)
 
-    # 中央の </>（光ごと描いてから、まわりを魚眼で膨らませる。走査線も一緒にたわむ）
+    # レンズ: 背景（走査線と緑のにじみ）だけを魚眼で膨らませる。</> 自体は歪ませない
+    # （文字ごと歪ませると、中心を通る斜線が中央で太くたわんで見えた）
     d = ImageDraw.Draw(img)
-    big = ImageFont.truetype(FONT, 30 * S)
+    big = ImageFont.truetype(FONT, 32 * S)
     t = "</>"
     tw = d.textlength(t, font=big)
-    ty = screen[1] + 5 * S
+    ty = screen[1] + 3 * S
+    lens_c = (W // 2, int(ty + 22 * S))
+    lens_r = 34 * S
+    img = bulge(img, lens_c, lens_r, strength=0.55)
+    # レンズの縁を少し暗くして、ふくらみの奥行きを出す
+    vig = Image.new("L", img.size, 0)
+    ImageDraw.Draw(vig).ellipse((lens_c[0] - lens_r, lens_c[1] - lens_r, lens_c[0] + lens_r, lens_c[1] + lens_r),
+                                outline=90, width=6 * S)
+    vig = vig.filter(ImageFilter.GaussianBlur(4 * S))
+    shade = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    shade.putalpha(ImageChops.multiply(vig, smask))
+    img.alpha_composite(shade)
+    # </> はまっすぐ描く（少し大きめ、光と縁取り付き）
     glow_text(img, ((W - tw) / 2, ty), t, big, GREEN_TOP, GREEN_BOTTOM, GREEN_DARK,
               glow=GREEN_GLOW, stroke=2 * S)
-    lens_c = (W // 2, int(ty + 21 * S))
-    lens_r = 31 * S
-    img = bulge(img, lens_c, lens_r, strength=0.42)
-    # レンズの照り（ごく薄い円弧の光）
+    # レンズの照り（左上の細い円弧の光）
     lens = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    ImageDraw.Draw(lens).arc((lens_c[0] - lens_r + 6 * S, lens_c[1] - lens_r + 4 * S,
-                              lens_c[0] + lens_r - 6 * S, lens_c[1] + lens_r - 8 * S),
-                             start=200, end=320, fill=WHITE + (70,), width=2 * S)
+    ImageDraw.Draw(lens).arc((lens_c[0] - lens_r + 4 * S, lens_c[1] - lens_r + 4 * S,
+                              lens_c[0] + lens_r - 4 * S, lens_c[1] + lens_r - 4 * S),
+                             start=195, end=290, fill=WHITE + (80,), width=2 * S)
     lens = lens.filter(ImageFilter.GaussianBlur(S))
     lens.putalpha(ImageChops.multiply(lens.getchannel("A"), smask))
     img.alpha_composite(lens)
