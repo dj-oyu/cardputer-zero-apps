@@ -15,7 +15,10 @@ OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 def main() -> int:
     qr = segno.make("https://example.com/v2-selftest", error="m")
-    qr.save(OUT, scale=10, border=4)
+    # border=2 は selftest の前提 (ファインダ中心 = 貼付位置 + (2 + 3.5)
+    # モジュール、較正レジームも 330px の画像で決めた)。4 にすると
+    # 較正系の項目が NG になる
+    qr.save(OUT, scale=10, border=2)
     print(f"wrote {OUT}")
     return 0
 
