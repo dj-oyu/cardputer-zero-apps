@@ -78,6 +78,8 @@ pub struct Stats {
     pub syn_dropped: u32,
     /// バックライト: 起動時の値 / 点ける明るさ / 点け直した回数。
     pub backlight: Option<(u32, u32, u32)>,
+    /// 画面が消えていたので、起こすだけにして捨てた打鍵のまとまりの数。
+    pub wakes_swallowed: u32,
     /// fb0 の読み戻し: 調べた回数 / 上書きされていた回数 / 違っていた行数の最大。
     pub verify_checks: u32,
     pub verify_mismatch: u32,
@@ -198,7 +200,11 @@ impl Stats {
         );
         let _ = writeln!(o, "  memory           : rss={} kB peak={} kB threads={}", self.rss_kb, self.rss_peak_kb, self.threads);
         if let Some((initial, level, restores)) = self.backlight {
-            let _ = writeln!(o, "  backlight        : initial={initial} level={level} restores={restores}");
+            let _ = writeln!(
+                o,
+                "  backlight        : initial={initial} level={level} restores={restores} wakes_swallowed={}",
+                self.wakes_swallowed
+            );
         }
         o
     }

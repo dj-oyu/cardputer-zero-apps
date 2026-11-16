@@ -190,6 +190,12 @@ impl Keyboard {
     pub fn last_key_time_us(&self) -> u64 {
         self.last_key_time_us
     }
+    /// キーリピートを止める（押されているキーの連続入力を出さない）。
+    /// 画面を起こすためだけの打鍵を捨てるときに使う。
+    pub fn cancel_repeat(&mut self) {
+        self.tr.cancel_repeat();
+        self.arm();
+    }
     /// `SYN_DROPPED` を受けた回数。
     pub fn syn_dropped_count(&self) -> u32 {
         self.syn_dropped_count

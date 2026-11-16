@@ -26,6 +26,9 @@ use zc_core::{Canvas, Damage, KeyEvent, Theme};
 use zc_display::{Backlight, Display, FlushRecord, PresentInfo};
 use zc_font::{FontConfig, Fonts, RasterMode};
 use zc_input::{Keyboard, Keymap, RawRecord, RepeatConfig};
+
+/// evdev の EV_KEY。
+const EV_KEY: u16 = 1;
 use zc_ui::RenderCx;
 
 /// ワーカーからメインへ届く結果。段階 2 以降、ここに項目を足していく
@@ -258,6 +261,8 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
     let mut keys: Vec<KeyEvent> = Vec::new();
     let mut raw: Vec<RawRecord> = Vec::new();
     let mut flush_log: Vec<FlushRecord> = Vec::new();
+    // 画面を起こすために捨てた打鍵のキーコード（離上のイベントも捨てるため）
+    let mut swallowed: Vec<u16> = Vec::new();
     let mut next_watch = opts.watch_fb.map(|d| now_us() + d.as_micros() as u64);
     let mut cx_quit = false;
     let mut force_present = false;
@@ -289,6 +294,29 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
             if ready[1] {
                 kb.on_timer(&mut keys);
             }
+            // 画面が消えている間の打鍵は、画面を起こすだけにしてアプリには渡さない
+            // （ふつうの機器の「スリープからの復帰」と同じ）。そのキーのリピートも止め、
+            // 後から届く離上のイベントも捨てる
+            drop_swallowed_releases(&mut raw, &mut swallowed);
+            let has_press = !keys.is_empty() || raw.iter().any(|r| r.ev.kind == EV_KEY && r.ev.value != 0);
+            if has_press {
+                if let Some(bl) = backlight.as_mut() {
+                    if bl.ensure_on() {
+                        for r in raw.iter().filter(|r| r.ev.kind == EV_KEY && r.ev.value == 1) {
+                            swallowed.push(r.ev.code);
+                        }
+                        for code in kb.translator().down_codes() {
+                            if !swallowed.contains(&code) {
+                                swallowed.push(code);
+                            }
+                        }
+                        keys.clear();
+                        raw.clear();
+                        kb.cancel_repeat();
+                        stats.wakes_swallowed += 1;
+                    }
+                }
+            }
             let mut cx = LoopCx { timers: &mut timers, workers: &workers, results: &results_tx, now_us: wake_us, quit: false, force_present: false };
             if ready[3] {
                 for ev in results_rx.drain() {
@@ -312,9 +340,6 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
                 }
             }
             if !keys.is_empty() || !raw.is_empty() {
-                if let Some(bl) = backlight.as_mut() {
-                    bl.ensure_on();
-                }
                 stats.key_batches += 1;
                 stats.keys += keys.len() as u32;
                 screen.on_keys(&keys, &raw, &kb, &mut cx);
@@ -382,9 +407,47 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
     Ok(stats)
 }
 
+/// 画面を起こすために捨てた打鍵（`swallowed`）の、離上のイベントを `raw` から除く。
+/// 除いたキーコードは `swallowed` からも消す。
+fn drop_swallowed_releases(raw: &mut Vec<RawRecord>, swallowed: &mut Vec<u16>) {
+    if swallowed.is_empty() {
+        return;
+    }
+    raw.retain(|r| {
+        let release = r.ev.kind == EV_KEY && r.ev.value == 0;
+        if release && swallowed.contains(&r.ev.code) {
+            swallowed.retain(|&c| c != r.ev.code);
+            false
+        } else {
+            true
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zc_core::Mods;
+    use zc_input::RawEvent;
+
+    fn rec(kind: u16, code: u16, value: i32) -> RawRecord {
+        RawRecord { ev: RawEvent { time_us: 0, kind, code, value }, t_read_us: 0, scan: None, mods: Mods::NONE, key: None }
+    }
+
+    #[test]
+    fn swallowed_release_is_dropped_once() {
+        // 30 (a) で画面を起こした。そのあと 30 の離上と、別のキー 31 の押下・離上が届く
+        let mut swallowed = vec![30];
+        let mut raw = vec![rec(EV_KEY, 30, 0), rec(0, 0, 0), rec(EV_KEY, 31, 1), rec(EV_KEY, 31, 0)];
+        drop_swallowed_releases(&mut raw, &mut swallowed);
+        let left: Vec<(u16, i32)> = raw.iter().map(|r| (r.ev.code, r.ev.value)).collect();
+        assert_eq!(left, vec![(0, 0), (31, 1), (31, 0)]);
+        assert!(swallowed.is_empty());
+        // 2 回目の 30 の離上（ふつうの打鍵）は残す
+        let mut raw = vec![rec(EV_KEY, 30, 1), rec(EV_KEY, 30, 0)];
+        drop_swallowed_releases(&mut raw, &mut swallowed);
+        assert_eq!(raw.len(), 2);
+    }
 
     #[test]
     fn timers_due_in_order_and_replace() {
