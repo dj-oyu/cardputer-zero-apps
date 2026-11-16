@@ -71,18 +71,28 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
   キーは tca8418c（`/dev/input/event3`）。Python アプリの描画・入力は
   `common/zero_ui.py` を使う。fb0 は video、event3 は input グループで
   `jimmy` から読み書きできる
-- **APPLaunch は、キー入力がしばらく無いとバックライトを 0 にして画面を眠らせ、
-  キー入力で起こす。** キーボードを独占（`EVIOCGRAB`）するアプリは、打鍵が
-  APPLaunch に届かないので、放っておくと画面が消えたまま戻らなくなる
-  （2026-11-16、zcode のキー確認中に実機で起きた）。独占するアプリは、実行中は
-  自分でバックライト（`/sys/class/backlight/backlight/brightness`、0〜100、
-  video グループで書ける）を点けておく。zcode は `zc_display::backlight` で、
-  起動時・打鍵ごと・1 秒ごとに 0 なら点け直している
-- **APPLaunch はスリープに入るとき、画面（fb0）も黒く塗る。** バックライトを
-  点け直すだけでは、自分が描き直さない行が黒いまま残る。fb0 を差分だけで更新する
-  アプリは、ほかのプロセスに上書きされた行を検出して送り直すこと（zcode は毎秒
-  fb0 を読み戻して比べ、違った行の範囲だけ送り直す。消されていたら全画面）。
-  APPLaunch がバックライトを点けるときの明るさは 100（最大）だった
+- **APPLaunch（ランチャー）とアプリの作法**（公式 CardputerZero/launcher のソースと
+  `docs/launcher-project-guide-ja/` で確認、2026-11-16）:
+  - APPLaunch はアプリを起動すると、自分の LVGL タイマーを全部止めて子の終了を待つ。
+    スクリーンセーバー（無操作で画面を黒く塗り、バックライトを下げる）も時計の
+    再描画も止まる。**アプリの実行中に画面を眠らせるのはアプリの役目**
+  - キーボードは `keyboard_pause()` で APPLaunch 側の処理を止めるだけで、
+    **`EVIOCGRAB` しない（アプリと共有）**。アプリも独占しないこと
+  - APPLaunch はアプリの実行中も Esc だけは見ていて、**Esc を約 3 秒押し続けると
+    アプリのプロセスグループに SIGTERM、続けて SIGKILL** を送る（本体共通の強制終了）。
+    アプリは Esc の長押しを操作に使わない。SIGTERM を受けたら手早く後始末して終わる
+  - ランチャーの設定は `~/.config/cardputerzero/config.json`（JSON。入れ子は点区切りの
+    キー、値は文字列か数値）。`dark_time` は無操作で眠らせるまでの秒数（設定画面で
+    0 / 10 / 30 / 60 / 300、無ければ 30、0 は眠らせない）、`brightness` はバックライトの
+    明るさ（無ければ触らない＝100）。アプリが画面を眠らせるときはこれに従う
+    （zcode の `launcher_config.rs`）。古い手引きにある `/var/lib/applaunch/settings` は
+    実機に無い
+  - SSH から直接起動したアプリの横では APPLaunch が動き続けるので、スクリーン
+    セーバーが画面を黒く塗り、時計（右上、行 2〜18）を描き続ける。正式に起動した
+    ときとは条件が違う。デバッグでは `systemctl --user stop APPLaunch.service` で
+    止める方法が手引きにある（止める・戻すはユーザーに確認してから）
+- バックライトは `/sys/class/backlight/backlight/brightness`（0〜100、video グループで
+  書ける）
 - 液晶の実体は ST7789V（SPI、spi-max-frequency 60MHz）で、ドライバは
   panel-mipi-dbi-spi（DRM の fbdev エミュレーション、card1-SPI-1）。fb0 への
   書き込みは遅延 I/O でまとめて SPI 転送される（変更されたページを含む

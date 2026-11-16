@@ -11,6 +11,7 @@ pub mod crash;
 pub mod fonttest;
 pub mod keylog;
 pub mod keytest;
+pub mod launcher_config;
 pub mod sample;
 pub mod stats;
 

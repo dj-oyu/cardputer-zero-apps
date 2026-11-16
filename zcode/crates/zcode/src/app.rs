@@ -54,8 +54,9 @@ pub enum TimerId {
     CursorBlink,
     /// 控えの保存（§8.4）。
     Backup,
-    /// バックライトの見張り（1 秒ごと。イベントループが受け持ち、画面には渡さない）。
-    Backlight,
+    /// 無操作での画面スリープ（最後の打鍵から `dark_time` 後に 1 回だけ鳴る。
+    /// イベントループが受け持ち、画面には渡さない）。
+    Sleep,
 }
 
 /// タイマーの集まり。種類ごとに 1 つの締め切りを持ち、いちばん早いものを
@@ -171,8 +172,11 @@ pub struct Options {
     pub fonts: FontConfig,
     /// 字形をその場で作る（assist スレッドを使わない）。
     pub inline_raster: bool,
-    /// キーボードを独占しない（開発用）。
-    pub no_grab: bool,
+    /// キーボードを独占する（開発用。APPLaunch の横で SSH から動かすとき）。
+    /// APPLaunch から起動されたときは独占しない: APPLaunch は自分のキー処理を止めて
+    /// キーボードを共有し、Esc の約 3 秒長押しでアプリを強制終了させる。独占すると
+    /// それが効かなくなる。
+    pub grab: bool,
     /// fb0 の中身を定期的に読み戻して、ほかのプロセスに上書きされていないか調べる間隔。
     pub watch_fb: Option<Duration>,
     /// 終了時に統計を標準エラーに出す。
@@ -181,8 +185,9 @@ pub struct Options {
     pub backlight: Option<u32>,
     /// バックライトに触らない（開発用）。
     pub no_backlight: bool,
-    /// 無操作がこの時間続いたら画面を消す（`None` なら消さない）。
-    pub sleep_after: Option<Duration>,
+    /// 無操作がこの時間続いたら画面を消す。`None` ならランチャーの設定
+    /// `dark_time` に従う（[`crate::launcher_config`]）。`Some(None)` なら消さない。
+    pub sleep_after: Option<Option<Duration>>,
 }
 
 impl Default for Options {
@@ -192,12 +197,12 @@ impl Default for Options {
             kbd: None,
             fonts: FontConfig::default(),
             inline_raster: false,
-            no_grab: false,
+            grab: false,
             watch_fb: None,
             print_stats: false,
             backlight: None,
             no_backlight: false,
-            sleep_after: Some(Duration::from_secs(60)),
+            sleep_after: None,
         }
     }
 }
@@ -239,12 +244,13 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
         });
     }
     stats.mark("fb0 opened");
-    // 独占すると APPLaunch に打鍵が届かず、APPLaunch の時間切れで画面が消えたまま
-    // 戻らなくなる。実行中はバックライトをこちらで受け持つ（zc_display::backlight）
+    // 画面のスリープ（zc_display::backlight）。時間と明るさはランチャーの設定に従う
+    let launcher = crate::launcher_config::load();
+    let sleep_after = opts.sleep_after.unwrap_or(launcher.dark_time);
     let mut backlight = if opts.no_backlight {
         None
     } else {
-        match Backlight::open_default(opts.backlight) {
+        match Backlight::open_default(opts.backlight.or(launcher.brightness)) {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("zcode: バックライトを開けない: {e}");
@@ -253,10 +259,13 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
         }
     };
     if let Some(bl) = backlight.as_mut() {
+        // ランチャーが眠らせた直後に起動された場合に備えて、点けてから始める
         bl.ensure_on();
-        timers.set_after(TimerId::Backlight, Duration::from_secs(1));
+        if let Some(d) = sleep_after {
+            timers.set_after(TimerId::Sleep, d);
+        }
     }
-    if !opts.no_grab {
+    if opts.grab {
         kb.grab()?;
         kb.resync()?;
     }
@@ -266,8 +275,6 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
     let mut flush_log: Vec<FlushRecord> = Vec::new();
     // 画面を起こすために捨てた打鍵のキーコード（離上のイベントも捨てるため）
     let mut swallowed: Vec<u16> = Vec::new();
-    // 最後に打鍵があった時刻（自前のスリープの判定用）
-    let mut last_input_us = now_us();
     let mut next_watch = opts.watch_fb.map(|d| now_us() + d.as_micros() as u64);
     let mut cx_quit = false;
     let mut force_present = false;
@@ -305,7 +312,10 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
             drop_swallowed_releases(&mut raw, &mut swallowed);
             let has_press = !keys.is_empty() || raw.iter().any(|r| r.ev.kind == EV_KEY && r.ev.value != 0);
             if has_press {
-                last_input_us = wake_us;
+                // 眠らせる時刻を先へ延ばす（timerfd は次の poll の前に仕掛け直される）
+                if let (Some(d), true) = (sleep_after, backlight.is_some()) {
+                    timers.set(TimerId::Sleep, wake_us + d.as_micros() as u64);
+                }
                 if let Some(bl) = backlight.as_mut() {
                     if bl.ensure_on() {
                         for r in raw.iter().filter(|r| r.ev.kind == EV_KEY && r.ev.value == 1) {
@@ -337,23 +347,10 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
             if ready[2] {
                 cx.timers.fd.drain();
                 for id in cx.timers.take_due(wake_us) {
-                    if id == TimerId::Backlight {
+                    if id == TimerId::Sleep {
                         if let Some(bl) = backlight.as_mut() {
-                            let idle = Duration::from_micros(wake_us.saturating_sub(last_input_us));
-                            if opts.sleep_after.is_some_and(|d| idle >= d) {
-                                bl.sleep();
-                            } else {
-                                // APPLaunch はスリープに入るとき、バックライトを消すだけでなく
-                                // 画面を黒く塗る。消されていたら全画面を送り直す
-                                if bl.watch() {
-                                    cx.force_present = true;
-                                }
-                                // 一部だけ上書きされていないかも毎秒確かめる（違っていた行は
-                                // あとで take_verify で受け取り、その範囲だけ送り直す）
-                                display.request_verify();
-                            }
+                            bl.sleep();
                         }
-                        cx.timers.set_after(TimerId::Backlight, Duration::from_secs(1));
                         continue;
                     }
                     screen.on_timer(id, &mut cx);
@@ -399,14 +396,9 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
             stats.mark("first frame handed off");
         }
 
-        // ほかのプロセスに画面を上書きされていないか。上書きされていたら、
-        // その行の範囲だけ送り直す（自分が描いた内容は canvas にある）
+        // ほかのプロセスに画面を上書きされていないか（計測用。--watch-fb のときだけ）
         if let Some((n, bounds)) = display.take_verify() {
             stats.verify(n, bounds);
-            if n > 0 && !backlight.as_ref().is_some_and(|b| b.is_asleep()) {
-                display.present_forced_rows(&canvas, bounds);
-                stats.repaints += 1;
-            }
         }
         if let (Some(t), Some(every)) = (next_watch, opts.watch_fb) {
             if now_us() >= t {
@@ -420,11 +412,11 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
     }
 
     screen.stop();
-    // 眠っていたら点けて終わる（このあと APPLaunch に打鍵が届くようになる）
+    // 眠っていたら点けて終わる（このあとは APPLaunch が画面を受け持つ）
     if let Some(bl) = backlight.as_mut() {
         bl.ensure_on();
     }
-    // 後始末: 独占を放す → 送り残しを送り切る → 元の画面に戻す（Display の Drop）
+    // 後始末: 独占していれば放す → 送り残しを送り切る → 元の画面に戻す（Display の Drop）
     kb.ungrab();
     display.wait_idle(Duration::from_millis(500));
     display.take_flush_log(&mut flush_log);
@@ -433,6 +425,7 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
     stats.syn_dropped = kb.syn_dropped_count();
     stats.backlight = backlight.as_ref().map(|b| (b.initial(), b.level(), b.restores));
     stats.sleeps = backlight.as_ref().map_or(0, |b| b.sleeps);
+    stats.sleep_after_s = sleep_after.map(|d| d.as_secs());
     stats.read_proc(); // スレッドを止める前の値
     drop(display);
     drop(kb);

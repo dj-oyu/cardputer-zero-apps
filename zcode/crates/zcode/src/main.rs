@@ -35,11 +35,13 @@ zcode — CardputerZero 用コードエディタ（段階 1: 土台。エディ�
   --fb <パス>              既定 /dev/fb0
   --kbd <パス>             既定はデバイス名 tca8418c で探す
   --inline-raster          字形を assist スレッドでなく、その場で作る
-  --no-grab                キーボードを独占しない
-  --backlight <値>         実行中に点けるバックライトの明るさ（既定は自動）
+  --grab                   キーボードを独占する（開発用。APPLaunch の横で SSH から
+                           動かすとき。APPLaunch から起動したときは付けない）
+  --backlight <値>         起こすときの明るさ（既定はランチャーの設定 brightness）
   --no-backlight           バックライトに触らない
-  --sleep-after <秒>       無操作でこの秒数たったら画面を消す（既定 60、0 で消さない）。
-                           消えている間の打鍵は画面を起こすだけで、アプリには渡さない
+  --sleep-after <秒>       無操作でこの秒数たったら画面を消す（0 で消さない）。既定は
+                           ランチャーの設定 dark_time（無ければ 30 秒）。消えている間の
+                           打鍵は画面を起こすだけで、アプリには渡さない
   --version / --help
 ";
 
@@ -100,12 +102,12 @@ fn parse_args() -> Result<Args, String> {
             "--fb" => a.opts.fb = val("--fb")?.into(),
             "--kbd" => a.opts.kbd = Some(val("--kbd")?.into()),
             "--inline-raster" => a.opts.inline_raster = true,
-            "--no-grab" => a.opts.no_grab = true,
+            "--grab" => a.opts.grab = true,
             "--backlight" => a.opts.backlight = Some(num("--backlight", val("--backlight")?)? as u32),
             "--no-backlight" => a.opts.no_backlight = true,
             "--sleep-after" => {
                 let s = num("--sleep-after", val("--sleep-after")?)?;
-                a.opts.sleep_after = (s > 0).then(|| Duration::from_secs(s));
+                a.opts.sleep_after = Some((s > 0).then(|| Duration::from_secs(s)));
             }
             "--version" => {
                 println!("zcode {}", env!("CARGO_PKG_VERSION"));

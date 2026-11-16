@@ -1,29 +1,20 @@
-//! 液晶のバックライト（`/sys/class/backlight/*`）。
+//! 液晶のバックライト（`/sys/class/backlight/*`）と、zcode 自身の画面スリープ。
 //!
-//! APPLaunch は、キー入力がしばらく無いとバックライトを 0 にして画面を眠らせ、
-//! キー入力で起こす。zcode はキーボードを独占（`EVIOCGRAB`）するので、実行中の
-//! 打鍵は APPLaunch に届かない。放っておくと、APPLaunch の時間切れで画面が消え、
-//! 何を押しても戻らなくなる（2026-11-16、実機 2 号機で起きた）。
+//! APPLaunch はアプリの実行中は自分のタイマーを止める（スクリーンセーバーも
+//! 動かない）。そのため、アプリの実行中に無操作で画面を眠らせるのはアプリの役目。
+//! zcode は、ランチャーの設定 `dark_time` の時間だけ打鍵が無ければ
+//! [`Backlight::sleep`] で消し、次の打鍵で [`Backlight::ensure_on`] で起こす
+//! （起こした打鍵はアプリに渡さない。イベントループが捨てる）。
 //!
-//! そこで zcode の実行中は、zcode がバックライトを受け持つ:
+//! バックライトを見張り続けることはしない。読み書きするのは、起動時・眠らせる
+//! とき・起こすとき・終了時だけ。
 //!
-//! - 起動時に 0 なら点ける
-//! - 使っている間は、打鍵のたびと 1 秒ごとに読み、0 にされていたら点け直す
-//! - 無操作が続いたら、zcode が自分で消す（[`Backlight::sleep`]。電池のため）。
-//!   眠っている間は点け直さない。次の打鍵で起こし、その打鍵はアプリに渡さない
-//!   （イベントループが捨てる）
-//! - 終了時は、眠っていても点けて終わる。独占を放せば打鍵は APPLaunch に届くので、
-//!   その先は APPLaunch が自分の状態に合わせて扱う
-//!
-//! 点ける明るさは、起動時の値（0 でなければ）→ 実行中に見た 0 でない値 →
-//! 最大値の 60% の順に決める。`--backlight <値>` で指定もできる。
+//! 点ける明るさは、指定（`--backlight`。ランチャーの設定 `brightness` もここに
+//! 入る）→ 起動時の値（0 でなければ）→ 眠らせる直前の値 → 最大値 の順に決める。
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-
-/// 既定の明るさ（最大値に対する割合、%）。APPLaunch の保存値の場所が分からないため。
-pub const DEFAULT_PERCENT: u32 = 60;
 
 /// バックライト 1 つ。
 #[derive(Debug)]
@@ -100,15 +91,6 @@ impl Backlight {
         }
     }
 
-    /// 1 秒ごとの見張り。使っている間だけ、消されていたら点け直す。
-    /// 眠っている間は何もしない。
-    pub fn watch(&mut self) -> bool {
-        if self.asleep {
-            return false;
-        }
-        self.ensure_on()
-    }
-
     /// 消えていたら点ける（眠っていたら起こす）。点けたら `true`。
     /// 読めない・書けないときは何もしない（画面の更新を止めない）。
     pub fn ensure_on(&mut self) -> bool {
@@ -134,7 +116,8 @@ pub fn pick_level(requested: Option<u32>, initial: u32, max: u32) -> u32 {
     match requested {
         Some(v) => v.clamp(1, max),
         None if initial > 0 => initial.min(max),
-        None => (max * DEFAULT_PERCENT / 100).max(1),
+        // 何も分からなければ最大（カーネルとランチャーの既定と同じ）
+        None => max,
     }
 }
 
@@ -149,7 +132,7 @@ mod tests {
 
     #[test]
     fn level_choice() {
-        assert_eq!(pick_level(None, 0, 100), 60); // 眠っていた → 既定
+        assert_eq!(pick_level(None, 0, 100), 100); // 眠っていた → 最大
         assert_eq!(pick_level(None, 35, 100), 35); // 点いていた → その値
         assert_eq!(pick_level(Some(80), 0, 100), 80);
         assert_eq!(pick_level(Some(0), 0, 100), 1); // 0 は「消す」なので 1 にする
@@ -166,7 +149,7 @@ mod tests {
         let mut bl = Backlight::open(&dir, None).unwrap();
         assert_eq!(bl.initial(), 0);
         assert!(bl.ensure_on());
-        assert_eq!(fs::read_to_string(dir.join("brightness")).unwrap().trim(), "60");
+        assert_eq!(fs::read_to_string(dir.join("brightness")).unwrap().trim(), "100");
         assert!(!bl.ensure_on()); // 点いているので何もしない
         fs::write(dir.join("brightness"), "25\n").unwrap(); // 誰かが明るさを変えた
         assert!(!bl.ensure_on());
@@ -174,11 +157,9 @@ mod tests {
         assert!(bl.ensure_on());
         assert_eq!(fs::read_to_string(dir.join("brightness")).unwrap().trim(), "25");
         assert_eq!(bl.restores, 2);
-        // 自分で眠る → 見張りでは点けない → 打鍵で起こす（消す前の明るさに戻す）
+        // 自分で眠る → 打鍵で起こす（消す前の明るさに戻す）
         assert!(bl.sleep());
         assert!(bl.is_asleep());
-        assert_eq!(fs::read_to_string(dir.join("brightness")).unwrap().trim(), "0");
-        assert!(!bl.watch());
         assert_eq!(fs::read_to_string(dir.join("brightness")).unwrap().trim(), "0");
         assert!(bl.ensure_on());
         assert!(!bl.is_asleep());
