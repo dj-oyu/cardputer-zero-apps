@@ -1,0 +1,419 @@
+//! 通しの試験（課題 D5。docs/stage3-design.md §14 の「`zc-remote` の全体」）。
+//!
+//! 開発コンテナの中で、本物の受付 `zc-buildd` を `127.0.0.1` に立て（PC の経路 = TLS なし）、
+//! 本物の `zc-remote` で依頼する。受付は本物の cargo と aarch64 のクロス gcc でビルドし、
+//! できた実行ファイルが tmpfs の置き場に届く（展開・SHA-256 の確かめ・`rename` まで）。
+//!
+//! - 道具（cargo・aarch64 のクロス gcc と strip・`zstd`）が無ければ、その試験は飛ばす
+//!   （標準エラーに理由を出す）。`ZC_E2E_REQUIRE=1` なら、飛ばさずに失敗にする
+//! - 届いた実行ファイルは aarch64 用なので、x86_64 の上では動かない。`qemu-aarch64` が
+//!   あれば、それで動かして出力まで確かめる。無ければ ELF の頭と置き場だけを確かめる
+//! - `zc-buildd` の実行ファイルは、`zc-remote` と同じフォルダ（cargo の出力先）から探す。
+//!   無ければ `cargo build -p zc-buildd` で作る
+
+mod d5;
+
+use d5::*;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use zc_remote_ipc as ipc;
+
+/// ビルドを含む試験 1 つの上限（初回は cargo が標準ライブラリの索引を読むので長め）。
+const WAIT: Duration = Duration::from_secs(300);
+
+fn have(tool: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(tool).is_file()))
+}
+
+/// 道具が無ければ `true`（その試験は飛ばす）。
+fn skip_without(tools: &[&str]) -> bool {
+    let missing: Vec<&&str> = tools.iter().filter(|t| !have(t)).collect();
+    if missing.is_empty() {
+        return false;
+    }
+    if std::env::var_os("ZC_E2E_REQUIRE").is_some_and(|v| v == "1") {
+        panic!("道具が無い: {missing:?}（ZC_E2E_REQUIRE=1）");
+    }
+    eprintln!("e2e: 道具が無いので飛ばす: {missing:?}");
+    true
+}
+
+const BUILD_TOOLS: &[&str] = &["cargo", "aarch64-linux-gnu-gcc", "aarch64-linux-gnu-strip", "zstd"];
+
+/// `zc-buildd` の実行ファイル。
+fn buildd_exe() -> PathBuf {
+    let exe = Path::new(ZC_REMOTE).with_file_name("zc-buildd");
+    if !exe.is_file() {
+        // `cargo test -p zc-remote` だけを回したとき。
+        let st = Command::new(env!("CARGO")).args(["build", "--locked", "-p", "zc-buildd"]).current_dir(env!("CARGO_MANIFEST_DIR")).status().expect("cargo を起動できない");
+        assert!(st.success() && exe.is_file(), "zc-buildd を作れない（{}）", exe.display());
+    }
+    exe
+}
+
+/// 本物の受付（子プロセス）。捨てると止める。
+struct Buildd {
+    child: Child,
+    port: u16,
+}
+
+impl Buildd {
+    fn start(sb: &Sandbox) -> Buildd {
+        let data = sb.root.join("buildd");
+        let mut child = Command::new(buildd_exe())
+            .args(["--listen", "127.0.0.1:0", "--data"])
+            .arg(&data)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("zc-buildd を起動できない");
+        // 「zc-buildd: 127.0.0.1:NNNNN で待っている…」からポートを読む。
+        let mut err = BufReader::new(child.stderr.take().unwrap());
+        let mut line = String::new();
+        err.read_line(&mut line).unwrap();
+        let port = line.split_whitespace().nth(1).and_then(|a| a.rsplit(':').next()).and_then(|p| p.parse().ok()).unwrap_or_else(|| panic!("zc-buildd のポートが分からない: {line:?}"));
+        // 残りのログは捨てる（パイプを詰まらせない）。
+        std::thread::spawn(move || {
+            let mut sink = Vec::new();
+            let _ = err.read_to_end(&mut sink);
+        });
+        Buildd { child, port }
+    }
+}
+
+impl Drop for Buildd {
+    fn drop(&mut self) {
+        // SAFETY: 自分が起動した子に送るだけ（SIGTERM で道具もプロセスグループごと止まる）。
+        unsafe { libc::kill(self.child.id() as i32, libc::SIGTERM) };
+        let _ = self.child.wait();
+    }
+}
+
+fn pc(port: u16) -> Vec<(&'static str, String)> {
+    vec![("ZC_REMOTE_PC", format!("127.0.0.1:{port}")), ("ZC_REMOTE_BACKEND", "pc".into())]
+}
+
+/// aarch64 の ELF の実行ファイルか（頭だけ見る）。
+fn assert_aarch64_exe(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let b = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    assert!(b.len() > 1000 && &b[..4] == b"\x7fELF", "ELF でない: {}", path.display());
+    assert_eq!((b[4], b[5]), (2, 1), "64 ビット・リトルエンディアン");
+    assert_eq!(u16::from_le_bytes([b[18], b[19]]), 183, "e_machine = aarch64");
+    assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o700);
+}
+
+/// `qemu-aarch64` があれば、それで動かして標準出力を返す。
+fn run_under_qemu(path: &Path, args: &[&str]) -> Option<String> {
+    let qemu = ["qemu-aarch64", "qemu-aarch64-static"].into_iter().find(|q| have(q))?;
+    let out = run({ let mut c = Command::new(qemu); c.args(["-L", "/usr/aarch64-linux-gnu"]).arg(path).args(args); c }, Duration::from_secs(60));
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    Some(text(&out.stdout))
+}
+
+/// 置き場に、途中のファイル（`.part-…`・`.zin-…`）が残っていないこと。
+fn assert_no_partials(sb: &Sandbox) {
+    let names: Vec<String> = std::fs::read_dir(sb.run_bin()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert!(names.iter().all(|n| !n.starts_with(".part-") && !n.starts_with(".zin-")), "{names:?}");
+}
+
+const HELLO_TOML: &str = "[package]\nname = \"hello\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+const HELLO_LOCK: &str = "# This file is automatically @generated by Cargo.
+# It is not intended for manual editing.
+version = 4
+
+[[package]]
+name = \"hello\"
+version = \"0.1.0\"
+";
+const HELLO_RS: &str = "fn main() {\n    let who = std::env::args().nth(1).unwrap_or_else(|| \"zc-remote\".to_owned());\n    println!(\"hello from {who}\");\n}\n";
+
+/// Rust の hello: `zc-remote build` → aarch64 の実行ファイルが置き場に届く。`zc-remote run` は
+/// それに入れ替わる。
+#[test]
+fn rust_hello_is_built_remotely_and_placed() {
+    if skip_without(BUILD_TOOLS) {
+        return;
+    }
+    let sb = Sandbox::new("rs");
+    let buildd = Buildd::start(&sb);
+    let env = pc(buildd.port);
+    sb.write("code/hello/Cargo.toml", HELLO_TOML);
+    let main = sb.write("code/hello/src/main.rs", HELLO_RS);
+    let root = sb.home().join("code/hello");
+
+    // F5 と同じ呼び方: 作業フォルダはファイルのフォルダ、引数はファイル名。serve は CLI が起動する
+    let out = run({ let mut c = sb.cmd(&env); c.current_dir(main.parent().unwrap()).args(["build", "main.rs", "--stats"]); c }, WAIT);
+    let err = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    // 標準出力は置いた実行ファイルのパスだけ。ログ（cargo の出力）は標準エラー
+    let placed = PathBuf::from(text(&out.stdout).trim());
+    assert!(placed.starts_with(sb.run_bin()), "{}", placed.display());
+    assert!(placed.file_name().unwrap().to_string_lossy().starts_with("hello-"), "{}", placed.display());
+    assert_aarch64_exe(&placed);
+    assert!(err.contains("Compiling hello") && err.contains("Finished"), "{err}");
+    assert!(err.contains("PC"), "--stats にビルド係が出る: {err}");
+    assert_no_partials(&sb);
+    if let Some(out) = run_under_qemu(&placed, &["qemu"]) {
+        assert_eq!(out, "hello from qemu\n");
+    }
+    // 受付が作った Cargo.lock が書き戻されている
+    let lock = std::fs::read_to_string(root.join("Cargo.lock")).expect("Cargo.lock が書き戻される");
+    assert!(lock.contains("name = \"hello\""), "{lock}");
+    assert!(err.contains("Cargo.lock を書き戻した"), "{err}");
+
+    // run: もう一度ビルドして（lock が増えたので木は変わった）、置かれた実行ファイルに入れ替わる。
+    // x86_64 では起動できないので 126（binfmt で qemu が効く環境なら、そのまま動いて 0）
+    let out = run({ let mut c = sb.cmd(&env); c.current_dir(main.parent().unwrap()).args(["run", "main.rs", "--", "F5"]); c }, WAIT);
+    let err = text(&out.stderr);
+    match out.status.code() {
+        Some(0) => assert_eq!(text(&out.stdout), "hello from F5\n"),
+        Some(126) => assert!(err.contains("実行できない"), "{err}"),
+        other => panic!("run の終了コード {other:?}: {err}"),
+    }
+
+    // 同じ木をもう一度: 受付に結果が残っているので、作り直さずに同じものが届く
+    let out = run({ let mut c = sb.cmd(&env); c.current_dir(&root).args(["build", "src/main.rs"]); c }, WAIT);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let again = PathBuf::from(text(&out.stdout).trim());
+    assert_aarch64_exe(&again);
+    assert_no_partials(&sb);
+
+    // status: つながっているビルド係が出る
+    let out = run({ let mut c = sb.cmd(&env); c.arg("status"); c }, WAIT);
+    assert_eq!(out.status.code(), Some(0), "{}{}", text(&out.stdout), text(&out.stderr));
+    assert!(text(&out.stdout).contains("ビルド係: PC（つながっている）"), "{}", text(&out.stdout));
+}
+
+/// C の 1 ファイル: クロスの gcc でビルドされて届く。
+#[test]
+fn c_file_is_built_remotely_and_placed() {
+    if skip_without(&["aarch64-linux-gnu-gcc", "aarch64-linux-gnu-strip", "zstd"]) {
+        return;
+    }
+    let sb = Sandbox::new("c");
+    let buildd = Buildd::start(&sb);
+    let env = pc(buildd.port);
+    let file = sb.write("code/c/hello.c", "#include <stdio.h>\n#include \"greet.h\"\n\nint main(void) {\n    printf(\"%s from C\\n\", GREETING);\n    return 0;\n}\n");
+    sb.write("code/c/greet.h", "#define GREETING \"hello\"\n");
+    let out = run({ let mut c = sb.cmd(&env); c.current_dir(file.parent().unwrap()).args(["build", "hello.c"]); c }, WAIT);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let placed = PathBuf::from(text(&out.stdout).trim());
+    assert!(placed.starts_with(sb.run_bin()), "{}", placed.display());
+    assert_aarch64_exe(&placed);
+    assert_no_partials(&sb);
+    if let Some(out) = run_under_qemu(&placed, &[]) {
+        assert_eq!(out, "hello from C\n");
+    }
+    // C のプロジェクトに lock は書かない
+    assert!(!file.with_file_name("Cargo.lock").exists());
+
+    // コンパイルエラー: 終了コード 1。gcc の出力が標準エラーに出る
+    std::fs::write(&file, "int main(void) {\n    return undeclared;\n}\n").unwrap();
+    let out = run({ let mut c = sb.cmd(&env); c.current_dir(file.parent().unwrap()).args(["run", "hello.c"]); c }, WAIT);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("undeclared"), "{}", text(&out.stderr));
+}
+
+const BROKEN_RS: &str = "fn main() {\n    let name = \"あ\";\n    let _s = \"日本語\"; let x: i32 = \"str\";\n    println!(\"{name} {x}\");\n}\n";
+
+/// 型エラーのある crate の check: 診断が UNIX ソケット（`zc_remote_ipc`）で届く。
+/// 行は 0 始まり、桁は行の中の UTF-8 のバイト位置。F5（CLI の `run`）の診断は、zcode の
+/// 相手にも届く。
+#[test]
+fn check_diagnostics_arrive_over_the_ipc_socket() {
+    if skip_without(&["cargo"]) {
+        return;
+    }
+    let sb = Sandbox::new("chk");
+    let buildd = Buildd::start(&sb);
+    let env = pc(buildd.port);
+    sb.write("code/broken/Cargo.toml", &HELLO_TOML.replace("hello", "broken"));
+    let main = sb.write("code/broken/src/main.rs", BROKEN_RS);
+    let root = sb.home().join("code/broken");
+    // 期待する位置: 3 行目（0 始まりで 2）の "str" の頭。日本語の分だけ、文字数よりバイト位置が大きい
+    let line = BROKEN_RS.lines().nth(2).unwrap();
+    let col = line.find("\"str\"").unwrap() as u32;
+    assert_eq!(col, 39);
+    assert!(col as usize > line[..col as usize].chars().count());
+
+    // zcode の専用スレッドの役: serve を（切り離さずに）起動して、check を頼む
+    let _serve = sb.serve(&env, &[]);
+    let mut editor = sb.client(ipc::ClientKind::Editor);
+    editor.submit(1, ipc::JobKind::Check, ipc::RemoteLang::Rust, ipc::SubmitFlags::NONE, &main);
+    let got = editor.until_done(WAIT);
+    let (status, _, backend, message) = done_of(&got);
+    assert_eq!((status, backend), (ipc::DoneStatus::Failed, ipc::Backend::Pc), "{message} {got:#?}");
+    // 走査が済んだ知らせ（メインはここで保存済みの版を控える）が最初
+    assert!(matches!(&got[0], ipc::Response::Phase { req: ipc::ReqId(1), phase: ipc::Phase::Scanned, root: r, .. } if *r == root), "{got:#?}");
+    // ログは頼んでいないので届かない
+    assert!(got.iter().all(|r| !matches!(r, ipc::Response::Log { .. })), "{got:#?}");
+    let find_e0308 = |got: &[ipc::Response], want_req: ipc::ReqId| {
+        let mut found = None;
+        for r in got {
+            if let ipc::Response::Diagnostics { req, root: r, complete, files, .. } = r {
+                assert_eq!((*req, r, *complete), (want_req, &root, true));
+                for f in files {
+                    for d in &f.diags {
+                        if d.code.as_deref() == Some("E0308") {
+                            found = Some((f.path.clone(), d.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        found.unwrap_or_else(|| panic!("E0308 の診断が無い: {got:#?}"))
+    };
+    let (path, d) = find_e0308(&got, ipc::ReqId(1));
+    assert_eq!(path, "src/main.rs");
+    assert_eq!((d.line, d.col, d.severity), (2, Some(col), zc_core::Severity::Error), "{d:?}");
+    assert_eq!(d.end, Some((2, col + 5)), "範囲は \"str\" の 5 バイト");
+    assert!(d.message.contains("mismatched types"), "{d:?}");
+    assert!(matches!(got.iter().rev().find(|r| matches!(r, ipc::Response::Diagnostics { .. })), Some(ipc::Response::Diagnostics { last: true, .. })));
+
+    // F5: ターミナルで `zc-remote run`。ビルドは失敗（終了コード 1）、ログは端末（標準エラー）へ。
+    // 同じ診断が、頼んでいない zcode の相手にも req = 0 で届く（波線になる）
+    let out = run({ let mut c = sb.cmd(&env); c.current_dir(main.parent().unwrap()).args(["run", "main.rs"]); c }, WAIT);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("E0308"), "{}", text(&out.stderr));
+    let seen = editor.until_done(WAIT);
+    assert!(seen.iter().all(|r| !matches!(r, ipc::Response::Log { .. } | ipc::Response::Artifact { .. })), "{seen:#?}");
+    let (path, d) = find_e0308(&seen, ipc::ReqId::NONE);
+    assert_eq!((path.as_str(), d.line, d.col), ("src/main.rs", 2, Some(col)));
+    assert!(matches!(seen.last(), Some(ipc::Response::Done { req: ipc::ReqId::NONE, status: ipc::DoneStatus::Failed, .. })), "{seen:#?}");
+
+    // CLI の check: 1 始まりの「パス:行:桁」で標準出力に
+    let out = run({ let mut c = sb.cmd(&env); c.current_dir(&root).args(["check", "src/main.rs"]); c }, WAIT);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains(&format!("src/main.rs:3:{}: error[E0308]: mismatched types", col + 1)), "{}", text(&out.stdout));
+
+    // その check の知らせも、zcode の相手に届いている
+    let seen = editor.until_done(WAIT);
+    assert!(matches!(seen.last(), Some(ipc::Response::Done { req: ipc::ReqId::NONE, status: ipc::DoneStatus::Failed, .. })), "{seen:#?}");
+
+    // 直せば通る（波線を消す「完全で空」の診断が届く）
+    std::fs::write(&main, BROKEN_RS.replace("\"str\"", "42")).unwrap();
+    editor.submit(2, ipc::JobKind::Check, ipc::RemoteLang::Rust, ipc::SubmitFlags::NONE, &main);
+    let got = editor.until_done(WAIT);
+    assert_eq!(done_of(&got).0, ipc::DoneStatus::Ok, "{got:#?}");
+    assert!(got.iter().any(|r| matches!(r, ipc::Response::Diagnostics { complete: true, last: true, files, .. } if files.iter().all(|f| f.diags.is_empty()))), "{got:#?}");
+}
+
+/// 受付との間に挟む中継。台本どおりに接続を切る（何も言わずに両側を閉じる）。
+///
+/// - 1 本目: 受付の `started` を通した直後に切る（ジョブは受付で走り続ける）
+/// - 2 本目: 受付の `artifact` のあと、8KB 通したところで切る（成果物の途中）
+/// - 3 本目から: 切らない
+fn cutting_proxy(upstream: u16) -> (u16, Arc<AtomicUsize>) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let conns = Arc::new(AtomicUsize::new(0));
+    let n = conns.clone();
+    std::thread::spawn(move || {
+        for client in l.incoming().flatten() {
+            let idx = n.fetch_add(1, Ordering::SeqCst);
+            let Ok(server) = TcpStream::connect(("127.0.0.1", upstream)) else { continue };
+            let (mut c_in, mut s_out) = (client.try_clone().unwrap(), server.try_clone().unwrap());
+            // 実機 → 受付は、そのまま
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 16 << 10];
+                while let Ok(k) = c_in.read(&mut buf) {
+                    if k == 0 || s_out.write_all(&buf[..k]).is_err() {
+                        break;
+                    }
+                }
+                let _ = s_out.shutdown(Shutdown::Both);
+            });
+            // 受付 → 実機は、中を見ながら（受付のテキストフレームはマスクなし）
+            std::thread::spawn(move || {
+                let (mut server, mut client) = (server, client);
+                let mut buf = [0u8; 4 << 10];
+                let mut seen: Vec<u8> = Vec::new();
+                let mut after_artifact: Option<usize> = None;
+                let contains = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
+                while let Ok(k) = server.read(&mut buf) {
+                    if k == 0 || client.write_all(&buf[..k]).is_err() {
+                        break;
+                    }
+                    seen.extend_from_slice(&buf[..k]);
+                    let cut = match idx {
+                        0 => contains(&seen, b"\"type\":\"started\""),
+                        1 => {
+                            if after_artifact.is_none() && contains(&seen, b"\"type\":\"artifact\"") {
+                                after_artifact = Some(0);
+                            } else if let Some(n) = &mut after_artifact {
+                                *n += k;
+                            }
+                            after_artifact.is_some_and(|n| n >= 8 << 10)
+                        }
+                        _ => false,
+                    };
+                    if cut {
+                        break;
+                    }
+                    if after_artifact.is_none() && seen.len() > 64 << 10 {
+                        // 探す窓だけ残す
+                        let keep = seen.split_off(seen.len() - 64);
+                        seen = keep;
+                    }
+                }
+                let _ = server.shutdown(Shutdown::Both);
+                let _ = client.shutdown(Shutdown::Both);
+            });
+        }
+    });
+    (port, conns)
+}
+
+/// ジョブの途中で接続が切れても、つなぎ直して `attach` し、続き（ログ・成果物）を受け取って
+/// 同じ結果になる。成果物の途中で切れたら、受け取り済みの位置から続きをもらう。
+#[test]
+fn a_dropped_connection_is_resumed_with_attach() {
+    if skip_without(BUILD_TOOLS) {
+        return;
+    }
+    let sb = Sandbox::new("cut");
+    let buildd = Buildd::start(&sb);
+    let (proxy, conns) = cutting_proxy(buildd.port);
+    sb.write("code/hello/Cargo.toml", HELLO_TOML);
+    // lock を先に置いておく（受付が書き戻すと木が変わり、下の「同じ木をもう一度」にならない）
+    sb.write("code/hello/Cargo.lock", HELLO_LOCK);
+    // 成果物が 8KB より十分大きくなるように、圧縮の効かない表を入れる
+    let table: String = (0..6000u32).map(|i| format!("{:#010x},", i.wrapping_mul(2654435761).rotate_left(i % 31) ^ 0x9e37_79b9)).collect();
+    let src = format!("static TABLE: [u32; 6000] = [{table}];\n\nfn main() {{\n    let i = std::env::args().count() * 1234 % 6000;\n    println!(\"resumed {{}} {{}}\", TABLE.len(), TABLE[i] != TABLE[(i + 1) % 6000]);\n}}\n");
+    let main = sb.write("code/hello/src/main.rs", &src);
+
+    let serve = sb.serve(&pc(proxy), &[]);
+    let out = run({ let mut c = sb.cmd(&pc(proxy)); c.current_dir(main.parent().unwrap()).args(["build", "main.rs"]); c }, WAIT);
+    let err = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(conns.load(Ordering::SeqCst), 3, "2 回切れて、2 回つなぎ直した: {err}");
+    let placed = PathBuf::from(text(&out.stdout).trim());
+    assert_aarch64_exe(&placed);
+    assert_no_partials(&sb);
+    // ログは切れ目で欠けも重なりもしない（Compiling も Finished も 1 回ずつ）
+    assert_eq!((err.matches("Compiling hello").count(), err.matches("Finished").count()), (1, 1), "{err}");
+    if let Some(out) = run_under_qemu(&placed, &[]) {
+        assert_eq!(out, "resumed 6000 true\n");
+    }
+
+    // 切れなかった場合と同じ結果: 中継を通さずにもう一度頼む（受付に残っている結果が届く）と、
+    // 同じ中身の実行ファイルが置かれる
+    let first = std::fs::read(&placed).unwrap();
+    let out = run({ let mut c = sb.cmd(&[]); c.arg("stop"); c }, WAIT);
+    assert_eq!(out.status.code(), Some(0));
+    let (_, log) = serve.wait(WAIT);
+    assert_eq!(log.matches("つながった").count(), 3, "{log}");
+    std::fs::remove_dir_all(sb.run_bin()).unwrap();
+    let out = run({ let mut c = sb.cmd(&pc(buildd.port)); c.current_dir(main.parent().unwrap()).args(["build", "main.rs"]); c }, WAIT);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let direct = PathBuf::from(text(&out.stdout).trim());
+    assert_eq!(direct.file_name(), placed.file_name());
+    assert!(std::fs::read(&direct).unwrap() == first, "つなぎ直して受け取ったものと、切れずに受け取ったものが同じ");
+}
