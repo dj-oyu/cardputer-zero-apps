@@ -159,6 +159,11 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
   そこから拾う
 - 依存は C ライブラリを要求しない pure Rust の crate を優先する
   （クロスビルドで C の依存を足すと aarch64 用の開発パッケージが要る）
+- **worktree を並べて開発コンテナで回すと、ビルドのキャッシュが混ざる。** どの worktree も
+  コンテナの中では同じ `/work` に見え、`/cargo-target` は全部で共有なので、cargo は別の
+  worktree で作った crate を「新しい」と見て使い回す（2026-11-17、別の worktree の古い
+  `zc-ui` が使われて、あるはずの型が無いと言われた）。並行して作業した後や、あり得ない
+  コンパイルエラーが出たら `touch crates/*/src/lib.rs` してから作り直す
 
 ## 他所で作られた実行ファイルを実機で使うとき（2026-11-16 調査）
 

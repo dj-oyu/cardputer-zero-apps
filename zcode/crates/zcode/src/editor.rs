@@ -21,13 +21,15 @@ use crate::intel;
 use crate::save::{SaveOk, SaveRequest, Saver, StoreSaver};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use zc_core::time::now_us;
 use zc_core::{palette, CancelToken, Color, Command, Damage, DocId, Key, KeyEvent, LineChange, Mods, Motion, Pos, Rect, Span, Version};
 use zc_font::TextStyle;
 use zc_highlight::{Highlighter, LanguageId, LanguageInfo, Registry};
 use zc_intel::{Completion, CompletionKind, Diagnostic, Severity, WordIndex};
 use zc_input::{Keyboard, RawRecord};
 use zc_ui::layout::{Regions, SIDE_W, UI_PX};
-use zc_ui::{CompletionPopup, EditorStatus, EditorView, FileTree, ImeMode, PickerList, PopupItem, RenderCx, SpanSource, StatusBar, Tab, TabBar, Widget};
+use zc_term::{ReadBudget, Term, TermCommand, TermEvent};
+use zc_ui::{CompletionPopup, EditorStatus, EditorView, FileTree, ImeMode, PickerList, PopupItem, RenderCx, SpanSource, StatusBar, Tab, TabBar, TerminalPanel, Widget, TERM_PANEL_H};
 
 /// ステータスバーを遅らせる時間（§5.2）。
 const STATUS_DELAY: Duration = Duration::from_millis(50);
@@ -39,6 +41,18 @@ const BLINKS_AFTER_KEY: u32 = 20;
 const HL_BUDGET: u32 = 2000;
 /// エラーを知らせるときのステータスバーの色（モック 4）。
 const STATUS_ERROR: Color = Color::hex(0xa1260d);
+/// 実行が終了コード 0 で終わったときのステータスバーの色（モック 4 の「緑系」）。
+const STATUS_OK: Color = Color::hex(0x16825d);
+/// 実行中の経過時間の表示を更新する間隔。
+const RUN_TICK: Duration = Duration::from_secs(1);
+
+/// F5 の実行で、新しい端末の bash に渡す台本。実行するコマンドは環境変数 `ZCODE_RUN` で
+/// 渡す（引用符の付け直しを避ける）。プロンプト風の 1 行（フォルダとコマンド）を出してから実行し、終了コードを
+/// 画面に出して、独自の OSC（`zc_term::TermEvent::CommandExit`）で zcode にも知らせ、
+/// そのまま対話のシェルになる（モック 3・4: 続けてコマンドも打てる）。`trap : INT` は、
+/// Ctrl+C で実行中のプログラムだけを止め、外側の bash を道連れにしないため（`trap '' INT`
+/// だと無視が子に引き継がれて止められない）。
+const RUN_SCRIPT: &str = r#"printf '\033[94m%s\033[0m$ %s\n' "$(pwd | sed "s|^$HOME|~|")" "$ZCODE_RUN"; trap : INT; eval "$ZCODE_RUN"; ec=$?; trap - INT; printf '\033[90m[終了コード %d]\033[0m\n' "$ec"; printf '\033]777;zcode-exit;%d\007' "$ec"; unset ZCODE_RUN; exec bash -i"#;
 
 /// エディタ画面の指定。
 #[derive(Clone, Debug)]
@@ -196,6 +210,33 @@ impl DocTab {
 enum Focus {
     Editor,
     Tree,
+    /// ターミナルのパネル（打鍵は、決まったショートカットを除いて端末へ送る）。
+    Terminal,
+}
+
+/// 端末（パネルに出しているもの）。
+struct TermState {
+    term: Term,
+    /// 見出しに出す名前（実行したコマンド、またはシェル）。
+    title: String,
+    /// F5 の実行中ならその中身。
+    running: Option<RunInfo>,
+}
+
+/// F5 で実行しているもの。
+struct RunInfo {
+    file: String,
+    started_us: u64,
+}
+
+/// 文字列をシェルの単語 1 つにする。特別な文字が無ければそのまま、あれば `'...'` で囲む。
+fn shell_quote(s: &str) -> String {
+    let plain = !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-+/@%:,=".contains(c));
+    if plain {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
 }
 
 /// ステータスバーの上に出す 1 行の入力（段階 4 の入力欄ができるまでの簡易版）。
@@ -266,6 +307,17 @@ pub struct EditorScreen {
     /// アウトライン（開いているあいだは本文の全体を覆う）。
     outline: Option<OutlineState>,
     picker: PickerList,
+    /// 統合ターミナル（段階 3）。
+    term: Option<TermState>,
+    panel: TerminalPanel,
+    panel_open: bool,
+    panel_full: bool,
+    /// 端末の大きさ（パネルの寸法から決めたもの。最初の描画までは見積もり）。
+    term_grid: (u16, u16),
+    /// 保存が終わったら実行する文書（F5 で未保存だったとき）。
+    pending_run: Option<DocId>,
+    /// 実行の結果（ステータスバーの文と色。次の打鍵まで出す。モック 4）。
+    run_status: Option<(String, Color)>,
     /// タブバーに出した内容（変わったときだけ作り直す）: 文書・未保存・エラー。
     tabs_shown: Vec<(DocId, bool, bool)>,
     tabs_dirty: bool,
@@ -305,6 +357,13 @@ impl EditorScreen {
             popup_stale: false,
             outline: None,
             picker: PickerList::new("アウトライン"),
+            term: None,
+            panel: TerminalPanel::new(),
+            panel_open: false,
+            panel_full: false,
+            term_grid: (56, 6),
+            pending_run: None,
+            run_status: None,
             tabs_shown: Vec::new(),
             tabs_dirty: true,
             blinks_left: 0,
@@ -377,6 +436,32 @@ impl EditorScreen {
     pub fn outline_rows(&self) -> Option<(Vec<(String, bool)>, usize)> {
         self.outline.as_ref().map(|o| (o.rows.iter().map(|r| (r.row.name.clone(), r.line.is_none())).collect(), o.sel))
     }
+    /// ターミナルの画面の文字（行ごと、右の空白は落とす。テスト用）。端末が無ければ `None`。
+    pub fn terminal_text(&self) -> Option<Vec<String>> {
+        let t = self.term.as_ref()?;
+        let (_, rows) = t.term.size();
+        let text = |cells: &[zc_term::Cell]| {
+            let mut s = String::new();
+            let mut skip = false;
+            for c in cells {
+                // 全角の右半分の空白は飛ばす
+                if !std::mem::take(&mut skip) {
+                    s.push(c.ch);
+                }
+                skip = c.wide;
+            }
+            s.trim_end().to_string()
+        };
+        Some((0..rows).map(|r| text(t.term.row(r))).collect())
+    }
+    /// パネルが開いているか・全画面か・入力がターミナルにあるか（テスト用）。
+    pub fn terminal_state(&self) -> (bool, bool, bool) {
+        (self.panel_open, self.panel_full, self.focus == Focus::Terminal)
+    }
+    /// 実行中か、と最後の実行の結果の文（テスト用）。
+    pub fn run_state(&self) -> (bool, Option<&str>) {
+        (self.term.as_ref().is_some_and(|t| t.running.is_some()), self.run_status.as_ref().map(|s| s.0.as_str()))
+    }
     /// 選択中の文書の診断（テスト用）。
     pub fn diagnostics(&self) -> &[Diagnostic] {
         self.tabs.get(self.active).map_or(&[], |t| &t.diags)
@@ -388,6 +473,7 @@ impl EditorScreen {
         }
         self.focus = focus;
         self.tree.set_focused(focus == Focus::Tree);
+        self.panel.set_focused(focus == Focus::Terminal);
         if let Some(t) = self.tabs.get_mut(self.active) {
             t.view.set_focused(focus == Focus::Editor);
             t.doc.break_undo_group();
@@ -529,6 +615,13 @@ impl EditorScreen {
         if self.message.take().is_some() {
             self.status_due = true;
         }
+        if self.focus == Focus::Terminal {
+            self.terminal_key(ev, cx);
+            return;
+        }
+        if self.run_status.take().is_some() {
+            self.status_due = true;
+        }
         if self.prompt.is_some() {
             self.prompt_key(ev, cx);
             return;
@@ -571,6 +664,175 @@ impl EditorScreen {
             Command::Complete => self.update_completion(true),
             _ => self.completion = None,
         }
+    }
+
+    // --- ターミナル（段階 3。モック 3・4） ---
+
+    /// ターミナルに入力があるときの打鍵。ターミナルの開閉・全画面・実行・終了だけは
+    /// zcode が受け、ほかは全部端末へ送る（Ctrl+C は端末の中で実行を止める）。
+    fn terminal_key(&mut self, ev: &KeyEvent, cx: &mut LoopCx<'_>) {
+        if let Some(c @ (Command::ToggleTerminal | Command::ToggleTerminalFullscreen | Command::Quit | Command::Run)) = commands::lookup(ev) {
+            self.exec(c, cx);
+            return;
+        }
+        let Some(t) = self.term.as_mut() else {
+            self.set_focus(Focus::Editor);
+            return;
+        };
+        // Shift+PgUp / PgDn でスクロールバックを見る
+        if ev.mods.shift() && matches!(ev.key, Key::PageUp | Key::PageDown) {
+            let (_, rows) = t.term.size();
+            let page = rows.saturating_sub(1).max(1) as i32;
+            t.term.scroll_view(if ev.key == Key::PageUp { page } else { -page });
+            return;
+        }
+        if let Err(e) = t.term.send_key(ev) {
+            self.say(format!("ターミナルに送れない: {e}"), true);
+        }
+    }
+
+    /// パネルを開いて端末に入力を向ける。端末が無ければシェルを起動する。
+    fn open_terminal(&mut self) {
+        if self.term.is_none() {
+            let cmd = TermCommand { program: None, args: Vec::new(), cwd: Some(self.cfg.root.clone()), env: Vec::new() };
+            match Term::spawn(&cmd, self.term_grid.0, self.term_grid.1) {
+                Ok(term) => {
+                    let title = std::env::var("SHELL").ok().and_then(|s| s.rsplit('/').next().map(str::to_string)).unwrap_or_else(|| "bash".into());
+                    self.term = Some(TermState { term, title, running: None });
+                }
+                Err(e) => {
+                    self.say(format!("シェルを起動できない: {e}"), true);
+                    return;
+                }
+            }
+        }
+        self.set_panel(true, self.panel_full);
+        self.set_focus(Focus::Terminal);
+    }
+
+    /// パネルの開閉・全画面を変える（エディタとツリーの大きさが変わる）。
+    fn set_panel(&mut self, open: bool, full: bool) {
+        if (self.panel_open, self.panel_full) == (open, full) {
+            return;
+        }
+        self.panel_open = open;
+        self.panel_full = full;
+        self.panel.invalidate();
+        self.tree.invalidate();
+        self.tabbar.invalidate();
+        self.empty_drawn = None;
+        self.completion = None;
+        self.popup.forget();
+        if let Some(t) = self.tabs.get_mut(self.active) {
+            t.view.invalidate();
+        }
+        if !open && self.focus == Focus::Terminal {
+            self.set_focus(Focus::Editor);
+        }
+        self.status_due = true;
+    }
+
+    /// Ctrl+`: 閉じていれば開いて端末へ、端末にいれば閉じてエディタへ、エディタにいれば端末へ。
+    fn toggle_terminal(&mut self) {
+        if !self.panel_open {
+            self.open_terminal();
+        } else if self.focus == Focus::Terminal {
+            self.set_panel(false, false);
+        } else {
+            self.set_focus(Focus::Terminal);
+        }
+    }
+
+    /// F5: 保存してから、言語の `run` を新しい端末で実行する。
+    fn run_active(&mut self, cx: &mut LoopCx<'_>) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        if tab.loading {
+            return;
+        }
+        if tab.lang.info().and_then(|i| i.run).is_none() {
+            let msg = format!("{} は F5 で実行できない（language.toml に run が無い）", tab.lang.name);
+            self.say(msg, false);
+            return;
+        }
+        if tab.path.is_none() || tab.doc.is_modified() {
+            // 保存が終わってから実行する（storage スレッドが書き終える前に読ませない）
+            self.pending_run = Some(tab.id);
+            self.save_active(cx);
+            return;
+        }
+        self.start_run(cx);
+    }
+
+    /// 選択中の文書を、いまのディスクの中身で実行する。
+    fn start_run(&mut self, cx: &mut LoopCx<'_>) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let (Some(path), Some(run)) = (tab.path.clone(), tab.lang.info().and_then(|i| i.run)) else { return };
+        let file = tab.title.clone();
+        // 作業フォルダはファイルのあるフォルダなので、ファイル名だけで渡す（見出しも短くなる）
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string_lossy().into_owned());
+        let cmd = run.replace("{file}", &shell_quote(&name));
+        let cwd = path.parent().map(Path::to_path_buf).unwrap_or_else(|| self.cfg.root.clone());
+        let tc = TermCommand {
+            program: Some("bash".into()),
+            args: vec!["-c".into(), RUN_SCRIPT.into()],
+            cwd: Some(cwd),
+            env: vec![("ZCODE_RUN".into(), cmd.clone())],
+        };
+        // 前の端末（前の実行やシェル）は閉じる（子プロセスのグループに SIGHUP）
+        self.term = None;
+        match Term::spawn(&tc, self.term_grid.0, self.term_grid.1) {
+            Ok(term) => {
+                self.term = Some(TermState { term, title: cmd, running: Some(RunInfo { file, started_us: cx.now_us }) });
+                self.run_status = None;
+                self.panel.invalidate();
+                self.set_panel(true, self.panel_full);
+                self.set_focus(Focus::Terminal);
+                cx.timers.set_after(TimerId::Tick, RUN_TICK);
+            }
+            Err(e) => self.say(format!("実行できない: {e}"), true),
+        }
+    }
+
+    /// 端末の出力を読む。まだ読み残しがあれば `true`。
+    fn pump_terminal(&mut self) -> bool {
+        let Some(t) = self.term.as_mut() else { return false };
+        let r = match t.term.read(ReadBudget::default()) {
+            Ok(r) => r,
+            Err(e) => {
+                self.say(format!("ターミナルを読めない: {e}"), true);
+                self.term = None;
+                return false;
+            }
+        };
+        t.term.take_dirty_rows();
+        for ev in t.term.take_events() {
+            if let TermEvent::CommandExit(code) = ev {
+                if let Some(run) = t.running.take() {
+                    self.run_status = Some(if code == 0 {
+                        (format!("✓ 終了コード 0  {}", run.file), STATUS_OK)
+                    } else {
+                        (format!("✕ 終了コード {code}  {}", run.file), STATUS_ERROR)
+                    });
+                    self.status_due = true;
+                }
+            }
+        }
+        if r.closed {
+            // シェルが終わった（exit など）。パネルは閉じる
+            self.term = None;
+            self.set_panel(false, false);
+            self.say("ターミナルを閉じた", false);
+            return false;
+        }
+        r.more
+    }
+
+    /// パネルの見出し（モック 3・4）。
+    fn panel_header(&self) -> (String, &'static str) {
+        let Some(t) = self.term.as_ref() else { return (String::new(), "Ctrl+` 戻る") };
+        let title = if self.panel_full { format!("全画面  {}", t.title) } else { t.title.clone() };
+        let hint = if t.running.is_some() { "Ctrl+C 停止" } else { "Ctrl+` 戻る" };
+        (title, hint)
     }
 
     // --- 単語補完（モック 12） ---
@@ -671,6 +933,7 @@ impl EditorScreen {
 
     fn close_outline(&mut self) {
         self.outline = None;
+        self.panel.invalidate();
         self.tree.invalidate();
         self.tabbar.invalidate();
         self.empty_drawn = None;
@@ -742,9 +1005,11 @@ impl EditorScreen {
         let confirm = self.confirm.take();
         match cmd {
             Command::Quit => {
-                if confirm != Some(Confirm::Quit) && self.tabs.iter().any(|t| t.doc.is_modified()) {
+                let running = self.term.as_ref().is_some_and(|t| t.running.is_some());
+                if confirm != Some(Confirm::Quit) && (running || self.tabs.iter().any(|t| t.doc.is_modified())) {
                     self.confirm = Some(Confirm::Quit);
-                    self.say("未保存のファイルがある。もう一度 Ctrl+Q で終了", true);
+                    let what = if running { "実行中のプログラムがある" } else { "未保存のファイルがある" };
+                    self.say(format!("{what}。もう一度 Ctrl+Q で終了"), true);
                 } else {
                     cx.quit = true;
                 }
@@ -799,6 +1064,17 @@ impl EditorScreen {
             Command::Save => self.save_active(cx),
             // 候補は打鍵の処理の最後で出す（handle_key）
             Command::Complete => {}
+            Command::Run => self.run_active(cx),
+            Command::ToggleTerminal => self.toggle_terminal(),
+            Command::ToggleTerminalFullscreen => {
+                if self.panel_open {
+                    let full = !self.panel_full;
+                    self.set_panel(true, full);
+                } else {
+                    self.panel_full = true;
+                    self.open_terminal();
+                }
+            }
             Command::ShowOutline if !self.tabs.is_empty() => self.open_outline(),
             Command::GotoLine | Command::Find if !self.tabs.is_empty() => {
                 let kind = if cmd == Command::Find { PromptKind::Find } else { PromptKind::GotoLine };
@@ -1105,6 +1381,15 @@ impl EditorScreen {
                     self.status.set_chips(Vec::new());
                 }
             }
+            // 実行中は橙、終わったら終了コード（モック 3・4）
+            if let Some(run) = self.term.as_ref().and_then(|t| t.running.as_ref()) {
+                let secs = now_us().saturating_sub(run.started_us) / 1_000_000;
+                self.status.set_left(&format!("▶ 実行中 {}  {secs}s", run.file));
+                bg = palette::STATUS_RUN;
+            } else if let Some((s, c)) = &self.run_status {
+                self.status.set_left(s);
+                bg = *c;
+            }
             if let Some((m, error)) = &self.message {
                 if self.message_right && !self.tabs.is_empty() {
                     self.status.set_right(m);
@@ -1164,6 +1449,11 @@ impl Screen for EditorScreen {
                         if t.doc.version() == version {
                             t.doc.mark_saved();
                         }
+                        // F5 で保存を待っていたら実行する（保存した版のままのときだけ）
+                        let run_now = self.pending_run == Some(doc) && t.doc.version() == version;
+                        if self.pending_run == Some(doc) {
+                            self.pending_run = None;
+                        }
                         // 保存した中身で構文チェック（batch で使い捨て。§10.2）
                         if let (Some((cmd, pat)), Some(path)) = (t.lang.info().and_then(intel::check_command), t.path.clone()) {
                             let tx = cx.results.clone();
@@ -1184,6 +1474,9 @@ impl Screen for EditorScreen {
                                 self.say(format!("保存した: {title}（ほかで変更されていた内容を上書きした）"), true)
                             }
                             SaveOk::Unchanged => self.say(format!("変更なし: {title}"), false),
+                        }
+                        if run_now && self.tabs.get(self.active).is_some_and(|a| a.id == doc) {
+                            self.start_run(cx);
                         }
                     }
                     Err(e) => {
@@ -1230,6 +1523,12 @@ impl Screen for EditorScreen {
     fn on_timer(&mut self, id: TimerId, cx: &mut LoopCx<'_>) {
         match id {
             TimerId::StatusDelay => self.status_due = true,
+            TimerId::Tick => {
+                if self.term.as_ref().is_some_and(|t| t.running.is_some()) {
+                    self.status_due = true;
+                    cx.timers.set_after(TimerId::Tick, RUN_TICK);
+                }
+            }
             TimerId::CursorBlink => {
                 if self.blinks_left > 0 {
                     self.blinks_left -= 1;
@@ -1242,6 +1541,7 @@ impl Screen for EditorScreen {
                 if let Some(t) = self.tabs.get_mut(self.active) {
                     t.view.set_cursor_on(self.cursor_on);
                 }
+                self.panel.set_cursor_on(self.cursor_on);
             }
             _ => {}
         }
@@ -1253,6 +1553,7 @@ impl Screen for EditorScreen {
         self.status.invalidate();
         self.picker.invalidate();
         self.popup.invalidate();
+        self.panel.invalidate();
         self.empty_drawn = None;
         if let Some(t) = self.tabs.get_mut(self.active) {
             t.view.invalidate();
@@ -1260,7 +1561,12 @@ impl Screen for EditorScreen {
     }
 
     fn render(&mut self, cx: &mut RenderCx<'_>) -> Damage {
-        let regions = Regions::compute(self.tree_open, 0);
+        let panel_h = match (self.panel_open, self.panel_full) {
+            (false, _) => 0,
+            (true, false) => TERM_PANEL_H,
+            (true, true) => u16::MAX,
+        };
+        let regions = Regions::compute(self.tree_open, panel_h);
         let mut damage = Damage::none();
         // タブバー（未保存の印が変わったときも作り直す）
         let changed = self.tabs_dirty || self.tabs.len() != self.tabs_shown.len() || self.tabs.iter().zip(&self.tabs_shown).any(|(t, s)| (t.id, t.doc.is_modified(), t.has_error()) != *s);
@@ -1334,11 +1640,35 @@ impl Screen for EditorScreen {
                 }
             }
         }
+        // ターミナルのパネル（大きさが変わったら端末にも知らせる）
+        if self.panel_open {
+            let (title, hint) = self.panel_header();
+            self.panel.set_header(&title, hint);
+            let grid = TerminalPanel::grid_size(cx, regions.panel);
+            self.term_grid = grid;
+            match self.term.as_mut() {
+                Some(t) => {
+                    if t.term.size() != grid {
+                        let _ = t.term.resize(grid.0, grid.1);
+                    }
+                    damage |= self.panel.render_term(cx, regions.panel, &t.term);
+                }
+                None => damage |= self.panel.render_empty(cx, regions.panel, ""),
+            }
+        }
         if self.status_due {
             self.update_status();
         }
         damage |= self.status.render(cx, regions.status);
         damage
+    }
+
+    fn poll_fd(&self) -> Option<std::os::fd::RawFd> {
+        self.term.as_ref().map(|t| t.term.fd())
+    }
+
+    fn on_poll_fd(&mut self, _cx: &mut LoopCx<'_>) -> bool {
+        self.pump_terminal()
     }
 
     fn wants_raw(&self) -> bool {

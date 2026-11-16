@@ -573,6 +573,7 @@ dependencies = [
  "zc-input",
  "zc-intel",
  "zc-store",
+ "zc-term",
  "zc-ui",
 ]
 

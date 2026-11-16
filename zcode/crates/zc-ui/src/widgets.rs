@@ -1,30 +1,14 @@
-//! 段階 3 以降で実装する部品の雛形（エディタ本体・タブ・ツリーは実装済み:
-//! [`crate::editor`]・[`crate::tabs`]・[`crate::tree`]）。どれも [`crate::Widget`] を実装し、
+//! 段階 4 以降で実装する部品の雛形（エディタ本体・タブ・ツリー・ターミナルは実装済み:
+//! [`crate::editor`]・[`crate::tabs`]・[`crate::tree`]・[`crate::terminal`]）。どれも [`crate::Widget`] を実装し、
 //! 「描き変えた行範囲だけを返す」約束に従う。
 //!
 //! | 部品 | 段階 | 担当 | モック |
 //! |---|---|---|---|
-//! | [`TerminalPanel`] | 3 | Opus / Sonnet | 3・4 |
 //! | [`CandidatePopup`]・[`MiniBuffer`] | 4 | Opus / Sonnet | 8・9 |
 //! | [`ShortcutList`] | 6 | Sonnet | 5・6 |
 
 use crate::{RenderCx, Widget};
 use zc_core::{Command, Damage, KeyChord, Rect};
-
-/// ターミナルのパネル（下半分、または全画面）。`zc_term::Term` の画面を描く。
-#[derive(Default)]
-pub struct TerminalPanel {
-    _private: (),
-}
-
-impl Widget for TerminalPanel {
-    fn render(&mut self, _cx: &mut RenderCx<'_>, _area: Rect) -> Damage {
-        todo!("段階 3")
-    }
-    fn invalidate(&mut self) {
-        todo!("段階 3")
-    }
-}
 
 /// SKK の候補一覧（カーソルの下に出る小窓）。
 #[derive(Default)]
