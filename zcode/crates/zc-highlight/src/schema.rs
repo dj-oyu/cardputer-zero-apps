@@ -31,6 +31,10 @@ pub struct LanguageFile {
     /// F5 で実行するコマンド（`{file}` をパスに置き換える）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
+    /// ビルド係での扱い（`rust` / `c` / `node`。docs/stage3-design.md §10.1）。あれば保存時に
+    /// ビルド係の check を頼み、「試験を実行」が使える。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
     /// 保存時の構文チェックのコマンド（design.md §10.2）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<String>,

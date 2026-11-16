@@ -1,0 +1,50 @@
+// zcode のビルド係（Cloudflare 側）。docs/stage3-design.md §6（設計）・§12.1（人がやること）。
+//
+// 雛形。課題 C3 が、deploy できる形に仕上げる（項目名は wrangler の版で変わりうるので、
+// 公式の「Wrangler configuration → Containers → durable_object scheduling policy」で確かめる）。
+//
+// アカウントごとの値（Access のチーム名・AUD）は、ここに書かない（公開リポジトリ）。
+// `wrangler secret put` で入れる（.dev.vars.example 参照）。
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "zcode-build",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  // workers.dev は使わない（Access を掛けたカスタムドメインだけで受ける）。
+  // 経路は人が決める: "routes": [{ "pattern": "<build-host>", "custom_domain": true }]
+  "workers_dev": false,
+  "observability": { "enabled": true },
+
+  // Durable Object（SQLite）= ジョブの持ち主。実機 1 台につき 1 つ（名前 = device_id）。
+  "durable_objects": {
+    "bindings": [{ "name": "BUILD", "class_name": "BuildSession" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BuildSession"] }],
+
+  // コンテナ。DO が自分でイメージ・大きさ・スナップショットを指定して起動する方式
+  // （durable_object scheduling policy。スナップショットはこの方式でだけ使える）。
+  "containers": [
+    {
+      "class_name": "BuildSession",
+      "scheduling_policy": "durable_object",
+      "images": {
+        // ビルドの文脈は zcode/（受付のプログラム zc-buildd をイメージの中でビルドする）
+        "builder": { "dockerfile": "../container/Dockerfile", "build_context": "../.." }
+      }
+    }
+  ],
+
+  // つなぐ回数の制限（device_id ごと。60 秒に 30 回）。
+  "ratelimits": [
+    { "name": "CONNECT_LIMIT", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } }
+  ],
+
+  "vars": {
+    // コンテナの大きさ（standard-4 = 4 vCPU・12GiB・20GB）。費用は docs/stage3-design.md §6.6
+    "INSTANCE_TYPE": "standard-4",
+    // 最後のジョブ・接続のあと、コンテナを起こしておく時間（秒）
+    "KEEP_WARM_S": "600",
+    // 1 台あたり 1 日のジョブ数の上限
+    "JOBS_PER_DAY": "400"
+  }
+}

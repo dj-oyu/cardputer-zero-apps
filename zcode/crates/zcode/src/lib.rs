@@ -16,6 +16,7 @@ pub mod intel;
 pub mod keylog;
 pub mod keytest;
 pub mod launcher_config;
+pub mod remote;
 pub mod sample;
 pub mod save;
 pub mod stats;

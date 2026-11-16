@@ -107,6 +107,7 @@ fn gen_rust(langs: &[compile::CompiledLanguage], theme: &schema::ThemeFile, buil
         writeln!(o, "        line_comment: {},", opt(&f.line_comment)).unwrap();
         writeln!(o, "        indent: {:?},", f.indent.clone().unwrap_or_else(|| "    ".into())).unwrap();
         writeln!(o, "        run: {},", opt(&f.run)).unwrap();
+        writeln!(o, "        remote: {},", opt(&f.remote)).unwrap();
         writeln!(o, "        check: {},", opt(&f.check)).unwrap();
         writeln!(o, "        check_pattern: {},", opt(&f.check_pattern)).unwrap();
         // 補完のキーワード: keywords と [words] の語を合わせたもの（重複なし、書いた順 → 語の表の順）

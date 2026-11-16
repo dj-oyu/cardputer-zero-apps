@@ -1,0 +1,11 @@
+# 実機に入れる実行環境の版と SHA-256（install-runtimes.sh が読む）。docs/stage3-design.md §10.3。
+#
+# 形: <名前> <版> <SHA-256> <ファイル名> <取ってくる場所（PC で取る。無ければ -）>
+# 雛形: 値は課題 R1 が、実物を取って・作って確かめてから書く（「TODO」の行は入れない）。
+#
+# llrt は自分でビルドするので、SHA-256 は「この版をこの手順で作ったもの」を実機で動かして
+# 確かめた 1 つを書く（ビルドは再現可能とは限らない。作り直したら書き換える）。
+llrt        0.10.0-beta  TODO  llrt-0.10.0-beta-linux-a53-no-sdk         -
+llrt-types  0.10.0-beta  TODO  llrt-types-0.10.0-beta.tar                https://github.com/awslabs/llrt/tree/v0.10.0-beta/types
+tsc         7.0.2        TODO  typescript-linux-arm64-7.0.2.tgz          https://registry.npmjs.org/@typescript/typescript-linux-arm64
+zc-remote   0.1.0        TODO  zc-remote                                 -

@@ -1,0 +1,12 @@
+# ビルド係のイメージ（remote/container/Dockerfile）の文脈を、要るものだけに絞る。
+# 文脈は zcode/。要るのは remote/ のワークスペースと、そこから path で指している crate だけ。
+*
+!Cargo.toml
+!crates/
+crates/*
+!crates/zc-core/
+!crates/zc-remote-ipc/
+!remote/
+remote/out/
+remote/target/
+remote/worker/

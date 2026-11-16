@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn diagnostics_follow_edits() {
-        let d = |line| Diagnostic { line, col: None, severity: Severity::Error, message: String::new() };
+        let d = |line| Diagnostic::at_line(line, Severity::Error, "");
         let mut ds = vec![d(1), d(5), d(9)];
         // 3 行目（0 始まり 2）に 2 行足した
         shift_diagnostics(&mut ds, LineChange { old: LineRange::new(2, 3), new: LineRange::new(2, 5) });

@@ -45,6 +45,8 @@ pub enum AppEvent {
     Saved { doc: DocId, version: Version, result: Result<crate::save::SaveOk, String> },
     /// 書き込み層（`zc-store`）からの、保存以外の返事（控え・SKK 個人辞書）。
     Store(zc_store::StoreResponse),
+    /// `zc-remote` の相手をする専用スレッドからの知らせ（[`crate::remote`]）。
+    Remote(crate::remote::RemoteEvent),
     /// batch がハイライトの残り（行頭の文脈）を計算し終えた。
     HighlightRest { doc: DocId, rest: Versioned<zc_highlight::RestStates> },
 }
@@ -57,6 +59,7 @@ impl std::fmt::Debug for AppEvent {
             AppEvent::Saved { doc, version, result } => write!(f, "Saved({doc:?}, {version:?}, {result:?})"),
             AppEvent::Checked { doc, result } => write!(f, "Checked({doc:?}, {result:?})"),
             AppEvent::Store(r) => f.debug_tuple("Store").field(r).finish(),
+            AppEvent::Remote(r) => f.debug_tuple("Remote").field(r).finish(),
             AppEvent::HighlightRest { doc, rest } => write!(f, "HighlightRest({doc:?}, {:?}, from {})", rest.version, rest.value.from_line),
         }
     }
@@ -129,6 +132,8 @@ pub struct Workers {
     pub batch: Arc<Worker>,
     /// 保存（nice +10）。終了時は join して書き切る。
     pub storage: Arc<Worker>,
+    /// 保存時の構文チェックの子プロセス待ち（nice +10。docs/stage3-design.md §8.3）。
+    pub check: Arc<Worker>,
 }
 
 impl Default for Workers {
@@ -144,6 +149,7 @@ impl Workers {
             batch: Arc::new(Worker::new(WorkerConfig::BATCH)),
             // 保存するまで要らないので、storage も最初の依頼まで作らない
             storage: Arc::new(Worker::new(WorkerConfig { lazy: true, ..WorkerConfig::STORAGE })),
+            check: Arc::new(Worker::new(WorkerConfig::CHECK)),
         }
     }
 }

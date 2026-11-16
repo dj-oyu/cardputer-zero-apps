@@ -15,9 +15,11 @@
 //! | アウトライン | [`outline_item`] / [`outline`] と [`OutlineRules`] | メイン（行ごと）/ batch（全体） |
 
 mod check;
+mod diagstore;
 mod minire;
 mod words;
 
+pub use diagstore::{DiagCounts, DiagStore, ShiftLog, ShiftOutcome, SHIFT_LOG_CAP};
 pub use check::{parse_diagnostics, run_check, run_check_with, split_command, CheckError, DEFAULT_TIMEOUT};
 pub use words::{complete, prefix_at, WordIndex, MAX_WORD_BYTES, MIN_WORD_LEN};
 
@@ -39,23 +41,8 @@ pub struct Completion {
     pub kind: CompletionKind,
 }
 
-/// 診断の重さ。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Severity {
-    Error,
-    Warning,
-}
-
-/// 診断（波線とステータスバーに出す）。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Diagnostic {
-    /// 0 始まりの行。
-    pub line: u32,
-    /// 桁（分かれば。0 始まり）。
-    pub col: Option<u32>,
-    pub severity: Severity,
-    pub message: String,
-}
+// 診断の型は `zc_core::diag`（ビルド係の結果と共通の形）。ここからも同じ名前で使える。
+pub use zc_core::diag::{DiagSource, Diagnostic, DiagnosticSet, FileDiagnostics, Severity};
 
 /// アウトラインの項目の種類。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

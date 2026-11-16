@@ -135,6 +135,8 @@ impl WorkerConfig {
     pub const ASSIST: WorkerConfig = WorkerConfig { name: "zc-assist", nice: 0, lazy: true };
     /// batch: ファイルを開く、ハイライトの残り、検索、構文チェックなど。
     pub const BATCH: WorkerConfig = WorkerConfig { name: "zc-batch", nice: 10, lazy: true };
+    /// check: 保存時の構文チェックの子プロセス待ち（0.4〜4 秒。batch を塞がないよう分ける）。
+    pub const CHECK: WorkerConfig = WorkerConfig { name: "zc-check", nice: 10, lazy: true };
     /// storage: 保存（一時ファイル → fsync → rename）。終了時は join して書き切る。
     pub const STORAGE: WorkerConfig = WorkerConfig { name: "zc-storage", nice: 10, lazy: false };
 }

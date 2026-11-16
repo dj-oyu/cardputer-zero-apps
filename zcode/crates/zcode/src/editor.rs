@@ -1515,6 +1515,8 @@ impl Screen for EditorScreen {
                     }
                 }
             }
+            // 課題 Z3 がつなぐ（docs/stage3-design.md §8）
+            AppEvent::Remote(_) => {}
             AppEvent::Flushed(_) | AppEvent::Store(_) => {}
         }
         self.pump_highlight(Some(cx));
