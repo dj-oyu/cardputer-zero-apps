@@ -23,7 +23,7 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
 | `qrreader/` | QR コードリーダー（カメラ＋液晶） |
 | `bt-tether/` | iPhone との Bluetooth PAN テザリング |
 | `common/` | 液晶アプリ共通の UI 土台 `zero_ui.py` |
-| `zcode/` | VS Code 風コードエディタ（Rust、計画中） |
+| `zcode/` | VS Code 風コードエディタ（Rust。段階 1 の土台まで実装） |
 | `container/` | 開発コンテナ（Dockerfile と Windows 用ラッパー `dev.ps1`） |
 
 新しいアプリは `<app>/` を切り、既存アプリと同じ形
