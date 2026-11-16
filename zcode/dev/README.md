@@ -12,6 +12,7 @@ SSH から zcode を直接起動すると、横で APPLaunch（ランチャー�
 | `/usr/share/APPLaunch/applications/zcode-dev.desktop` | ランチャーへの登録。`Exec=/home/jimmy/.local/bin/zcode-dev` | 最初の 1 回だけ（root） |
 | `~/.local/bin/zcode-dev` | 起動スクリプト（`zcode-dev.sh`） | jimmy |
 | `~/.local/lib/zcode-dev/zcode` | 実行ファイル | jimmy |
+| `~/.local/lib/zcode-dev/icon.png` | アイコン（`tools/make_icon.py --dev` で作る。ランチャーは絶対パスのアイコンをそのまま読む） | jimmy |
 | `~/.config/zcode-dev/args` | 引数（1 行目。無ければ `--keytest`） | jimmy |
 | `~/.cache/zcode-dev/last.log` | 前回の標準エラー（`--stats` の結果など） | zcode |
 
@@ -31,6 +32,8 @@ systemctl --user restart APPLaunch.service
 ## 差し替え（SSH から、sudo なし）
 
 ```sh
+python3 tools/make_icon.py --dev out/zcode-dev-icon.png   # 開発コンテナで
+scp out/zcode-dev-icon.png <実機>:.local/lib/zcode-dev/icon.png
 scp out/zcode <実機>:.local/lib/zcode-dev/zcode
 ssh <実機> 'echo "--keytest --stats" > ~/.config/zcode-dev/args'
 ```

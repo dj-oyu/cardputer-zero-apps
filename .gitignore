@@ -15,3 +15,4 @@ zcode/out/
 
 # Claude Code のエージェント用 worktree
 .claude/worktrees/
+zcode/packaging/zcode.png

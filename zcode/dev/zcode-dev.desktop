@@ -3,4 +3,5 @@ Type=Application
 Name=zcode (dev)
 Comment=zcode development build (runs ~/.local/bin/zcode-dev)
 Exec=/home/jimmy/.local/bin/zcode-dev
+Icon=/home/jimmy/.local/lib/zcode-dev/icon.png
 Terminal=false
