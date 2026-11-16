@@ -122,10 +122,13 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
   Enter / BackSpace / Space あり
 - Fn レイヤー: F1〜F12、Del、矢印（←↓→ と ↑）、Home / End / PgUp / PgDn / Ins、
   音量
-- Sym レイヤー: `] ; ' \` \\ , . /` と `[` は通常のキーコード。残りは
-  テンキー系（KP0〜9、KP*、KP-、KP+、KP.）や NumLock / ScrollLock、
-  かな系（KEY_KATAKANA など）のコードで届く。**刻印との対応は実機で押して
-  確かめるまで未確定**（KEY_MINUS / KEY_EQUAL はどのレイヤーにも無い）
+- Sym レイヤー: 記号は、ドライバが「記号ごとの枠」として決めたキーコードで届く
+  （例: Sym+1 は KEY_LEFTBRACE=26 で届くが意味は `!`、Sym+R は KEY_KP7=71 で `-`）。
+  ふつうの US 配列として読むと間違える。対応の正本はドライバの付属ファイル
+  `/usr/share/keymaps/tca8418_keypad_m5stack_keymap.map`（`keycode 26 = exclam` の形式、
+  32 記号）で、本体のランチャー（CardputerZero/launcher の `cp0_keyboard_keymap.c`）も
+  これを読み、無ければ同じ表を埋め込みで使う。刻印（Sym で出る青い記号）とも一致
+  （2026-11-16 確認）。KEY_MINUS / KEY_EQUAL はどのレイヤーにも無い
 - **キーリピートが無い**（デバイスの EV ビットに EV_REP が無い。EV=13）。
   長押しで連続入力したいアプリは、押下・離上を見て自前でリピートする
 - Python の `zero_ui.KeyReader` は押下コードしか返さない（モディファイアの

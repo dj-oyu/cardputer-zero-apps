@@ -220,6 +220,99 @@ impl Keymap {
         };
         KeyEvent { key: def.key, mods, text, repeat: false }
     }
+
+    /// ドライバの付属ファイル（[`DRIVER_MAP_PATH`]）で Sym レイヤーの記号の対応を
+    /// 上書きする。本体のランチャーと同じ表を使うため（ランチャーも、このファイルが
+    /// あれば読み、無ければ埋め込みの表を使う）。読めなければ何もしない。
+    /// 上書きした件数を返す。
+    pub fn load_driver_map(&mut self) -> usize {
+        match std::fs::read_to_string(DRIVER_MAP_PATH) {
+            Ok(text) => self.apply_driver_map(&text),
+            Err(_) => 0,
+        }
+    }
+
+    /// `keycode 26 = exclam  # コメント` の形の行を読み、そのキーコードの文字を
+    /// 上書きする（キーシンボル名は [`keysym_char`] が分かるものだけ）。
+    /// 上書きした件数を返す。
+    pub fn apply_driver_map(&mut self, text: &str) -> usize {
+        let mut n = 0;
+        for line in text.lines() {
+            let body = line.split('#').next().unwrap_or("").trim();
+            let Some(rest) = body.strip_prefix("keycode") else { continue };
+            let mut it = rest.splitn(2, '=');
+            let (Some(code), Some(name)) = (it.next(), it.next()) else { continue };
+            let (Ok(code), Some(c)) = (code.trim().parse::<u16>(), keysym_char(name.trim())) else { continue };
+            if self.mods.contains_key(&code) {
+                continue;
+            }
+            let def = self.keys.entry(code).or_insert(KeyDef {
+                code,
+                key: Key::Unknown(code),
+                text: None,
+                shift: None,
+                layer: Layer::Sym,
+                pos: None,
+                provisional: false,
+            });
+            def.key = Key::Char(c);
+            def.text = Some(c);
+            def.shift = Some(c);
+            def.provisional = false;
+            n += 1;
+        }
+        n
+    }
+}
+
+/// ドライバ（tca8418_keypad_m5stack）の付属ファイル。Sym レイヤーの「記号ごとの枠」の
+/// キーコードと記号の対応（CardputerZero/launcher の `cp0_keyboard_keymap.c` と同じ）。
+pub const DRIVER_MAP_PATH: &str = "/usr/share/keymaps/tca8418_keypad_m5stack_keymap.map";
+
+/// X11 のキーシンボル名 → 文字（ドライバの付属ファイルに出てくるもの）。
+pub fn keysym_char(name: &str) -> Option<char> {
+    Some(match name {
+        "exclam" => '!',
+        "at" => '@',
+        "numbersign" => '#',
+        "dollar" => '$',
+        "percent" => '%',
+        "asciicircum" => '^',
+        "ampersand" => '&',
+        "asterisk" => '*',
+        "parenleft" => '(',
+        "parenright" => ')',
+        "asciitilde" => '~',
+        "grave" => '`',
+        "underscore" => '_',
+        "minus" => '-',
+        "plus" => '+',
+        "equal" => '=',
+        "bracketleft" => '[',
+        "bracketright" => ']',
+        "braceleft" => '{',
+        "braceright" => '}',
+        "semicolon" => ';',
+        "colon" => ':',
+        "apostrophe" => '\'',
+        "quotedbl" => '"',
+        "less" => '<',
+        "greater" => '>',
+        "backslash" => '\\',
+        "bar" => '|',
+        "comma" => ',',
+        "period" => '.',
+        "slash" => '/',
+        "question" => '?',
+        "space" => ' ',
+        _ => {
+            let mut it = name.chars();
+            match (it.next(), it.next()) {
+                (Some(c), None) if c.is_ascii_alphanumeric() => c,
+                _ => return None,
+            }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -237,12 +330,17 @@ mod tests {
         assert_eq!(km.get(16).unwrap().key, Key::Char('q'));
         assert_eq!(km.get(63).unwrap().key, Key::F(5));
         assert_eq!(km.get(115).unwrap().key, Key::Media(MediaKey::VolumeUp));
-        // Sym レイヤーの未確定キー
-        let kp7 = km.get(71).unwrap();
-        assert!(kp7.provisional);
-        assert_eq!(kp7.key, Key::Unknown(71));
-        assert_eq!(kp7.layer, Layer::Sym);
-        assert_eq!(km.normal_at(kp7.pos.unwrap()).unwrap().key, Key::Char('r'));
+        // Sym レイヤー: 記号ごとの枠のキーコード（71 は KEY_KP7 だが意味は `-`、R の刻印）
+        let minus = km.get(71).unwrap();
+        assert!(!minus.provisional);
+        assert_eq!(minus.key, Key::Char('-'));
+        assert_eq!(minus.layer, Layer::Sym);
+        assert_eq!(km.normal_at(minus.pos.unwrap()).unwrap().key, Key::Char('r'));
+        assert_eq!(km.translate(26, Mods::SYM).text, Some('!')); // Sym+1
+        assert_eq!(km.translate(93, Mods::SYM).text, Some('?')); // Sym+M
+        // Sym レイヤーで確定していないのは、刻印の無い 78 だけ
+        let open: Vec<u16> = km.defs().filter(|d| d.layer == Layer::Sym && d.key == Key::Unknown(d.code)).map(|d| d.code).collect();
+        assert_eq!(open, vec![78]);
         // 通常レイヤーは 41 キー、どれも確定
         let normal: Vec<_> = km.defs().filter(|d| d.layer == Layer::Normal).collect();
         assert_eq!(normal.len(), 41);
@@ -261,6 +359,23 @@ mod tests {
         assert_eq!(km.translate(28, Mods::NONE), KeyEvent::new(Key::Enter, Mods::NONE));
         assert_eq!(km.translate(3, Mods::SHIFT).text, Some('2'));
         assert_eq!(km.translate(600, Mods::NONE).key, Key::Unknown(600));
+    }
+
+    #[test]
+    fn driver_map_overrides_and_matches_builtin() {
+        // 実機の /usr/share/keymaps/tca8418_keypad_m5stack_keymap.map の抜粋（2026-11-16）
+        let file = "# -- Row 4 --\nkeycode 26 = exclam            # 0xb7 -> !\nkeycode 27 = at\n\
+                    keycode 82 = quotedbl  # \"\nkeycode 86 = backslash\nbroken line\nkeycode 42 = at\n";
+        let mut km = Keymap::builtin();
+        let before = km.clone();
+        // 埋め込みの表と同じ内容なので、上書きしても変わらない
+        assert_eq!(km.apply_driver_map(file), 4); // 42 は Shift（モディファイア）なので触らない
+        assert_eq!(km.keys, before.keys);
+        assert_eq!(km.modifier(42), Some(Mods::SHIFT));
+        // 違う対応が来たら従う
+        assert_eq!(km.apply_driver_map("keycode 26 = question"), 1);
+        assert_eq!(km.translate(26, Mods::SYM).text, Some('?'));
+        assert_eq!(keysym_char("nosuchsym"), None);
     }
 
     #[cfg(feature = "parse")]

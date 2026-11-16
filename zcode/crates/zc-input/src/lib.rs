@@ -19,6 +19,6 @@ pub mod repeat;
 pub mod translate;
 
 pub use evdev::{emergency_ungrab, Keyboard, RawRecord};
-pub use keymap::{KeyDef, Keymap, KeymapError, Layer};
+pub use keymap::{keysym_char, KeyDef, Keymap, KeymapError, Layer, DRIVER_MAP_PATH};
 pub use repeat::{RepeatClass, RepeatConfig, Repeater};
 pub use translate::{RawEvent, Translator};

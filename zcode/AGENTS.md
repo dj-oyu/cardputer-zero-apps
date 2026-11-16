@@ -110,13 +110,16 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   キー配列は `zc-input/build.rs` がビルド時に Rust の表に変換する。ユーザーの設定を
   実行時に TOML で読む段階になったら、先にこれを片づける
 - キーボードのデバイスツリーの表は `keymap/cardputer-zero.toml` に写してある（キーコードと
-  行列の位置）。イベントには MSC_SCAN（行列の位置）も付く。Sym レイヤーの刻印は未確定
+  行列の位置）。イベントには MSC_SCAN（行列の位置）も付く。Sym レイヤーの記号は
+  ランチャーと同じ表で確定済み（実行時はドライバの付属ファイルで上書き。
+  `zc_input::Keymap::load_driver_map`）。キーを 1 つずつ押してもらう手順は要らなくなった
 
 ## 次にやること
 
-- **キー確認をユーザーと行う**（`docs/stage1-notes.md` §6）: Sym レイヤーの刻印の対応表、
-  Shift / Sym / Fn の送られ方、読み取りと fsync までの遅延。結果を
-  `keymap/cardputer-zero.toml` と `docs/measurements.md` に入れる
+- **モディファイアの送られ方と遅延を実機で確かめる**（`docs/stage1-notes.md` §6 の手順 2）:
+  Shift / Sym / Fn の押しっぱなし・ワンショット・ロックがどう届くか、読み取りと fsync
+  までの遅延。結果を `docs/measurements.md` に入れる。SSH から試すときは APPLaunch と
+  画面・キーボードを取り合うので、止めるか正式に起動するかをユーザーと決めてから
 - フォント比較画面をユーザーに見てもらい、文字の大きさと行の高さを決める
   （`crates/zc-ui/src/layout.rs` の `CODE_PX` / `CODE_LINE_H`）
 - APPLaunch からアプリとして起動したときに、時計・電池の再描画が止まるか確かめる

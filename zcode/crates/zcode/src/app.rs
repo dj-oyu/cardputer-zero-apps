@@ -216,7 +216,9 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
     let mut timers = Timers::new()?;
 
     // 入力を先に開く（開けなければ、画面に触る前に終わる）
-    let keymap = Keymap::builtin();
+    // Sym レイヤーの記号はドライバの付属ファイルが正本（ランチャーと同じ）。あれば上書き
+    let mut keymap = Keymap::builtin();
+    keymap.load_driver_map();
     stats.mark("keymap parsed");
     let mut kb = Keyboard::open(opts.kbd.as_deref(), keymap, RepeatConfig::default())?;
     stats.mark("keyboard opened");

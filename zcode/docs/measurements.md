@@ -196,7 +196,6 @@ Raspberry Pi OS = Debian 13 aarch64、kernel 6.18.39+rpt-rpi-v8、microSD）。
 |---|---|
 | キー押下から evdev イベントまで（I2C の読み取り・ドライバ） | 段階 1（キー確認モード） |
 | zcode の起動中に APPLaunch が再描画を止めるか | 段階 1 |
-| Sym レイヤーのキーコードと刻印の対応 | 段階 1 |
 | ビットマップフォントと TrueType の読みやすさの比較 | 段階 1 |
 | vte の解析速度 | 段階 3 |
 | SKK 辞書の二分探索 | 段階 4 |

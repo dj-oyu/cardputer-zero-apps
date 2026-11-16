@@ -224,8 +224,11 @@ mod tests {
     fn unknown_and_provisional_codes() {
         let mut t = tr();
         assert_eq!(t.feed(&key(600, 1, 0)).unwrap().key, Key::Unknown(600));
-        let e = t.feed(&key(71, 1, 10)).unwrap(); // KP7: Sym レイヤー、未確定
-        assert_eq!((e.key, e.text), (Key::Unknown(71), None));
+        let e = t.feed(&key(78, 1, 10)).unwrap(); // Sym 中の Shift の位置: 刻印なし
+        assert_eq!((e.key, e.text), (Key::Unknown(78), None));
+        t.feed(&key(78, 0, 15));
+        let e = t.feed(&key(71, 1, 16)).unwrap(); // KEY_KP7 の枠: Sym+R の `-`
+        assert_eq!((e.key, e.text), (Key::Char('-'), Some('-')));
         assert_eq!(t.feed(&key(30, 2, 20)), None); // カーネルのリピートは無視
         assert_eq!(t.feed(&RawEvent { time_us: 0, kind: 4, code: 4, value: 0x21 }), None);
     }

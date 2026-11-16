@@ -195,7 +195,8 @@ mod tests {
         assert!(out.contains(r#"{ code = 43, key = "\\", layer = "sym", pos = [0, 4] },"#), "{out}");
         assert!(out.contains(r#"{ code = 3, key = "2", shift = "_", pos = [0, 0] },"#), "{out}");
         assert!(out.contains("刻印が無いと答えた記号: $"));
-        assert!(out.contains("未確定のキーコード"));
+        // Sym レイヤーはランチャーの表で確定済みなので、未確定のキーは残らない
+        assert!(!out.contains("未確定のキーコード"), "{out}");
         // 出力の行は、そのままキー配列として読める
         let entries: String = out.lines().filter(|l| l.starts_with("  {")).collect::<Vec<_>>().join("\n");
         let src = format!("version = 1\nmodifiers = {{ shift = [42] }}\nkeys = [\n{entries}\n]\n");
