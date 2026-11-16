@@ -16,6 +16,7 @@
 //! [`png::check_golden`] に渡す。
 
 pub mod backend;
+pub mod backlight;
 pub mod diff;
 pub mod fb;
 pub mod flush;
@@ -23,6 +24,7 @@ pub mod plan;
 pub mod png;
 
 pub use backend::{Backend, MemBackend, MemLog, MemOp};
+pub use backlight::Backlight;
 pub use fb::{emergency_restore, FbBackend};
 pub use flush::{Display, FlushConfig, FlushRecord, PresentInfo};
 pub use plan::{FlushGroup, PendingRows, MERGE_GAP_ROWS};

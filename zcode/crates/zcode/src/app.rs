@@ -23,7 +23,7 @@ use std::time::Duration;
 use zc_core::rt::{main_channel, poll_fds, MainReceiver, MainSender, TimerFd, Worker, WorkerConfig};
 use zc_core::time::now_us;
 use zc_core::{Canvas, Damage, KeyEvent, Theme};
-use zc_display::{Display, FlushRecord, PresentInfo};
+use zc_display::{Backlight, Display, FlushRecord, PresentInfo};
 use zc_font::{FontConfig, Fonts, RasterMode};
 use zc_input::{Keyboard, Keymap, RawRecord, RepeatConfig};
 use zc_ui::RenderCx;
@@ -51,6 +51,8 @@ pub enum TimerId {
     CursorBlink,
     /// 控えの保存（§8.4）。
     Backup,
+    /// バックライトの見張り（1 秒ごと。イベントループが受け持ち、画面には渡さない）。
+    Backlight,
 }
 
 /// タイマーの集まり。種類ごとに 1 つの締め切りを持ち、いちばん早いものを
@@ -172,6 +174,10 @@ pub struct Options {
     pub watch_fb: Option<Duration>,
     /// 終了時に統計を標準エラーに出す。
     pub print_stats: bool,
+    /// バックライトを点けるときの明るさ（`None` なら自動。[`zc_display::backlight`]）。
+    pub backlight: Option<u32>,
+    /// バックライトに触らない（開発用）。
+    pub no_backlight: bool,
 }
 
 impl Default for Options {
@@ -184,6 +190,8 @@ impl Default for Options {
             no_grab: false,
             watch_fb: None,
             print_stats: false,
+            backlight: None,
+            no_backlight: false,
         }
     }
 }
@@ -225,6 +233,23 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
         });
     }
     stats.mark("fb0 opened");
+    // 独占すると APPLaunch に打鍵が届かず、APPLaunch の時間切れで画面が消えたまま
+    // 戻らなくなる。実行中はバックライトをこちらで受け持つ（zc_display::backlight）
+    let mut backlight = if opts.no_backlight {
+        None
+    } else {
+        match Backlight::open_default(opts.backlight) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("zcode: バックライトを開けない: {e}");
+                None
+            }
+        }
+    };
+    if let Some(bl) = backlight.as_mut() {
+        bl.ensure_on();
+        timers.set_after(TimerId::Backlight, Duration::from_secs(1));
+    }
     if !opts.no_grab {
         kb.grab()?;
         kb.resync()?;
@@ -276,10 +301,20 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
             if ready[2] {
                 cx.timers.fd.drain();
                 for id in cx.timers.take_due(wake_us) {
+                    if id == TimerId::Backlight {
+                        if let Some(bl) = backlight.as_mut() {
+                            bl.ensure_on();
+                        }
+                        cx.timers.set_after(TimerId::Backlight, Duration::from_secs(1));
+                        continue;
+                    }
                     screen.on_timer(id, &mut cx);
                 }
             }
             if !keys.is_empty() || !raw.is_empty() {
+                if let Some(bl) = backlight.as_mut() {
+                    bl.ensure_on();
+                }
                 stats.key_batches += 1;
                 stats.keys += keys.len() as u32;
                 screen.on_keys(&keys, &raw, &kb, &mut cx);
@@ -337,6 +372,7 @@ pub fn run(opts: &Options, screen: &mut dyn Screen, t_start_us: u64) -> io::Resu
     stats.flushes(&flush_log);
     stats.fonts = fonts.stats();
     stats.syn_dropped = kb.syn_dropped_count();
+    stats.backlight = backlight.as_ref().map(|b| (b.initial(), b.level(), b.restores));
     stats.read_proc(); // スレッドを止める前の値
     drop(display);
     drop(kb);

@@ -36,6 +36,8 @@ zcode — CardputerZero 用コードエディタ（段階 1: 土台。エディ�
   --kbd <パス>             既定はデバイス名 tca8418c で探す
   --inline-raster          字形を assist スレッドでなく、その場で作る
   --no-grab                キーボードを独占しない
+  --backlight <値>         実行中に点けるバックライトの明るさ（既定は自動）
+  --no-backlight           バックライトに触らない
   --version / --help
 ";
 
@@ -97,6 +99,8 @@ fn parse_args() -> Result<Args, String> {
             "--kbd" => a.opts.kbd = Some(val("--kbd")?.into()),
             "--inline-raster" => a.opts.inline_raster = true,
             "--no-grab" => a.opts.no_grab = true,
+            "--backlight" => a.opts.backlight = Some(num("--backlight", val("--backlight")?)? as u32),
+            "--no-backlight" => a.opts.no_backlight = true,
             "--version" => {
                 println!("zcode {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);

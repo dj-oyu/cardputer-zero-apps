@@ -71,6 +71,13 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
   キーは tca8418c（`/dev/input/event3`）。Python アプリの描画・入力は
   `common/zero_ui.py` を使う。fb0 は video、event3 は input グループで
   `jimmy` から読み書きできる
+- **APPLaunch は、キー入力がしばらく無いとバックライトを 0 にして画面を眠らせ、
+  キー入力で起こす。** キーボードを独占（`EVIOCGRAB`）するアプリは、打鍵が
+  APPLaunch に届かないので、放っておくと画面が消えたまま戻らなくなる
+  （2026-11-16、zcode のキー確認中に実機で起きた）。独占するアプリは、実行中は
+  自分でバックライト（`/sys/class/backlight/backlight/brightness`、0〜100、
+  video グループで書ける）を点けておく。zcode は `zc_display::backlight` で、
+  起動時・打鍵ごと・1 秒ごとに 0 なら点け直している
 - 液晶の実体は ST7789V（SPI、spi-max-frequency 60MHz）で、ドライバは
   panel-mipi-dbi-spi（DRM の fbdev エミュレーション、card1-SPI-1）。fb0 への
   書き込みは遅延 I/O でまとめて SPI 転送される（変更されたページを含む
