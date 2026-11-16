@@ -5,7 +5,14 @@
 # - どのアプリを試すかは、変更されたファイルから決める（changes ジョブ）:
 #     qrreader/  → qrreader          bt-tether/ → bt-tether
 #     common/    → qrreader, bt-tether（両方が .deb に同梱するため）
-#     zcode/     → zcode（zcode/bench/ が変わったときはベンチマークもビルド）
+#     zcode/     → zcode（zcode/bench/ が変わったときはベンチマークもビルド。zcode/remote/ だけの
+#                  変更では回さない: 別のワークスペースで、zcode 本体は remote/ を使わない）
+#     zcode/remote/, zcode/tools/, runtimes/, zcode/crates/{zc-core,zc-remote-ipc}/
+#                → zcode-remote（外部ビルドの Rust のワークスペース・aarch64 のビルド・実機への
+#                  入れ方の試験）と zcode-worker（Cloudflare の Worker の型検査と vitest）
+#     zcode/remote/{container,crates/zc-buildd,crates/zc-wire,Cargo.*}, zcode/.dockerignore
+#                → zcode-builder（ビルド係のイメージを作り、その中で zc-buildd の試験を全部回す。
+#                  イメージは 1.5GB あるので、イメージか受付が変わったときだけ）
 #     container/, .github/ → 全部（試験環境そのものが変わったため）
 name: CI
 
@@ -30,6 +37,8 @@ jobs:
       bt_tether: ${{ steps.f.outputs.bt_tether }}
       zcode: ${{ steps.f.outputs.zcode }}
       zcode_bench: ${{ steps.f.outputs.zcode_bench }}
+      zcode_remote: ${{ steps.f.outputs.zcode_remote }}
+      zcode_builder: ${{ steps.f.outputs.zcode_builder }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -57,13 +66,17 @@ jobs:
           echo "変更されたファイル:"; echo "$files" | sed 's/^/  /'
           has() { echo "$files" | grep -qE "$1"; }
           if has '^(container/|\.github/)'; then all=true; fi
-          q=false; b=false; z=false; zb=false
+          q=false; b=false; z=false; zb=false; zr=false; zbd=false
           if $all || has '^(qrreader|common)/'; then q=true; fi
           if $all || has '^(bt-tether|common)/'; then b=true; fi
-          if $all || has '^zcode/'; then z=true; fi
+          # zcode 本体: zcode/remote/ 以外の zcode/ の変更があるとき
+          if $all || echo "$files" | grep -E '^zcode/' | grep -qvE '^zcode/remote/'; then z=true; fi
           if $all || has '^zcode/bench/'; then zb=true; fi
+          if $all || has '^(zcode/remote/|zcode/tools/|runtimes/|zcode/crates/(zc-core|zc-remote-ipc)/)'; then zr=true; fi
+          if $all || has '^zcode/(remote/(container/|crates/(zc-buildd|zc-wire)/|Cargo\.(toml|lock)$)|\.dockerignore$)'; then zbd=true; fi
           {
             echo "qrreader=$q"; echo "bt_tether=$b"; echo "zcode=$z"; echo "zcode_bench=$zb"
+            echo "zcode_remote=$zr"; echo "zcode_builder=$zbd"
           } | tee -a "$GITHUB_OUTPUT"
 
   qrreader:
@@ -188,3 +201,125 @@ jobs:
           name: zcode-aarch64
           path: zcode/out/zcode
           retention-days: 7
+
+  # 外部ビルドの Rust のワークスペース（zcode/remote/）と、実機への入れ方の試験。開発コンテナで。
+  # 開発コンテナには zstd・node・tsc・esbuild が無いので、zc-buildd の試験のうちそれを使うもの
+  # （成果物の圧縮・Node の通し）はここでは飛ぶ。それは zcode-builder（ビルド係のイメージの中）で回す。
+  zcode-remote:
+    needs: changes
+    if: needs.changes.outputs.zcode_remote == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: 開発コンテナを用意する
+        uses: docker/build-push-action@v6
+        with:
+          context: container
+          tags: cz-dev:ci
+          load: true
+          cache-from: type=gha,scope=cz-dev
+          cache-to: type=gha,scope=cz-dev,mode=max
+      - name: crate とビルド成果物のキャッシュ
+        uses: actions/cache@v4
+        with:
+          path: |
+            .ci-cache/cargo-registry
+            .ci-cache/cargo-target-remote
+          key: zcode-remote-${{ hashFiles('zcode/remote/Cargo.lock', 'container/Dockerfile') }}
+          restore-keys: zcode-remote-
+      - name: cargo test・実機用 (aarch64) の zc-remote のビルドと A53 に無い命令の数
+        run: |
+          mkdir -p .ci-cache/cargo-registry .ci-cache/cargo-target-remote
+          docker run --rm -v "$PWD:/work" \
+            -v "$PWD/.ci-cache/cargo-registry:/opt/cargo/registry" \
+            -v "$PWD/.ci-cache/cargo-target-remote:/cargo-target" \
+            -w /work/zcode/remote cz-dev:ci bash -euo pipefail -c '
+              cargo test --workspace --locked
+              # build.sh は objdump があるときだけ LSE / RCpc の命令を数える。飛ばさないように先に確かめる
+              command -v aarch64-linux-gnu-objdump
+              ./build.sh
+              file out/zc-remote | grep -q "ARM aarch64"
+              file out/zc-buildd | grep -q "x86-64"
+            '
+      - name: 実機への入れ方（install-runtimes.sh）の試験
+        run: docker run --rm -v "$PWD:/work" -w /work/zcode cz-dev:ci bash tools/test-install-runtimes.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zc-remote-aarch64
+          path: zcode/remote/out/zc-remote
+          retention-days: 7
+
+  # Cloudflare の Worker と Durable Object（zcode/remote/worker/）。試験は workerd ではなく Node の上
+  # （session.test.ts が node:sqlite を使うので Node 22.13 以上）。deploy はしない。
+  zcode-worker:
+    needs: changes
+    if: needs.changes.outputs.zcode_remote == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: zcode/remote/worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: zcode/remote/worker/package-lock.json
+      - name: 依存（インストールスクリプトは .npmrc で止めてある）
+        run: npm ci --no-audit --no-fund
+      - name: 型検査（TypeScript 7）
+        run: npx tsc --noEmit
+      - name: vitest
+        run: npx vitest run
+      - name: wrangler.jsonc と束ね方の確認（イメージは作らない・Cloudflare にはつながない）
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: npx wrangler deploy --dry-run --containers-rollout=none --outdir "$RUNNER_TEMP/wrangler-dry"
+      - name: deploy 用の docker の読み替え（構文だけ）
+        run: |
+          node --check ../container/wrangler-docker/docker-shim.mjs
+          node --check ../container/wrangler-docker/spawn-hook.cjs
+
+  # ビルド係のイメージ（zcode/remote/container/Dockerfile、約 1.5GB）を作り、その中で zc-buildd の
+  # 試験を全部（zstd・Node・tsc・esbuild を使う通しも）回し、/healthz を確かめる。
+  # イメージが大きいので、毎回は作らない: イメージか受付（zc-buildd・zc-wire・lock）が変わった
+  # ときだけ。層は GitHub Actions のキャッシュ（scope=cz-builder）で使い回すので、Dockerfile の
+  # 道具の部分が変わらなければ、作り直すのは受付の層だけ。
+  zcode-builder:
+    needs: changes
+    if: needs.changes.outputs.zcode_builder == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: ビルド係のイメージを作る
+        uses: docker/build-push-action@v6
+        with:
+          context: zcode
+          file: zcode/remote/container/Dockerfile
+          platforms: linux/amd64
+          tags: cz-builder:ci
+          load: true
+          cache-from: type=gha,scope=cz-builder
+          cache-to: type=gha,scope=cz-builder,mode=max
+      - name: イメージの大きさ
+        run: docker image ls cz-builder:ci
+      - name: イメージの中で zc-buildd の試験（builder ユーザー）
+        run: |
+          docker run --rm -v "$PWD/zcode:/work:ro" -w /work/remote \
+            -e CARGO_TARGET_DIR=/var/lib/zc-buildd/test-target \
+            --entrypoint bash cz-builder:ci -euo pipefail -c '
+              cargo test --locked -p zc-buildd -- --nocapture 2>&1 | tee /tmp/test.log
+              # 道具が無くて飛んだ試験があれば失敗にする（このイメージには全部ある）
+              ! grep -q "が無いので飛ばす" /tmp/test.log
+            '
+      - name: zc-buildd が立ち上がり /healthz に答える
+        run: |
+          docker run -d --rm --name zc-buildd-smoke -p 127.0.0.1:7411:7411 cz-builder:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:7411/healthz; then echo; break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:7411/v1/status
+          docker stop zc-buildd-smoke

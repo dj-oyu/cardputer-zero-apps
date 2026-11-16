@@ -1,5 +1,6 @@
 # ビルド係のイメージ（remote/container/Dockerfile）の文脈を、要るものだけに絞る。
-# 文脈は zcode/。要るのは remote/ のワークスペースと、そこから path で指している crate だけ。
+# 文脈は zcode/。要るのは remote/ のワークスペースと、そこから path で指している crate
+# （とその継承元の Cargo.toml）、イメージに入れる道具の package.json / package-lock.json だけ。
 *
 !Cargo.toml
 !crates/
@@ -10,3 +11,6 @@ crates/*
 remote/out/
 remote/target/
 remote/worker/
+remote/container/tools/node_modules/
+**/target/
+**/*.actual.png
