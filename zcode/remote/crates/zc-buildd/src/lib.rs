@@ -81,7 +81,87 @@ impl Config {
     /// 既定の値を、環境変数（`ZC_BUILDD_LISTEN`・`ZC_BUILDD_DATA`・`ZC_BUILDD_MAX_RUNNING`・
     /// `ZC_BUILDD_JOB_TIMEOUT_S`）と引数（`--listen`・`--data`）で上書きする。
     pub fn from_env(args: &[String]) -> Result<Config, String> {
-        let _ = args;
-        todo!("B1")
+        Config::from_parts(args, &|name| std::env::var(name).ok())
+    }
+
+    /// [`Config::from_env`] の中身（環境変数の読み方を渡す。試験用）。引数が環境変数より強い。
+    pub fn from_parts(args: &[String], env: &dyn Fn(&str) -> Option<String>) -> Result<Config, String> {
+        let mut cfg = Config::defaults();
+        let listen = |v: &str| v.parse::<SocketAddr>().map_err(|_| format!("待ち受けるアドレスとして読めない: {v}（例 0.0.0.0:7411）"));
+        if let Some(v) = env("ZC_BUILDD_LISTEN") {
+            cfg.listen = listen(&v)?;
+        }
+        if let Some(v) = env("ZC_BUILDD_DATA") {
+            cfg.data_dir = PathBuf::from(v);
+        }
+        if let Some(v) = env("ZC_BUILDD_MAX_RUNNING") {
+            cfg.max_running = v.parse::<usize>().ok().filter(|n| (1..=64).contains(n)).ok_or_else(|| format!("ZC_BUILDD_MAX_RUNNING は 1〜64: {v}"))?;
+        }
+        if let Some(v) = env("ZC_BUILDD_JOB_TIMEOUT_S") {
+            let s = v.parse::<u64>().ok().filter(|n| *n >= 1).ok_or_else(|| format!("ZC_BUILDD_JOB_TIMEOUT_S は 1 以上の秒数: {v}"))?;
+            cfg.job_timeout = Duration::from_secs(s);
+        }
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            let (name, inline) = match a.split_once('=') {
+                Some((n, v)) if n.starts_with("--") => (n, Some(v.to_string())),
+                _ => (a.as_str(), None),
+            };
+            let mut value = || inline.clone().or_else(|| it.next().cloned()).ok_or_else(|| format!("{name} の値が無い"));
+            match name {
+                "--listen" => cfg.listen = listen(&value()?)?,
+                "--data" => cfg.data_dir = PathBuf::from(value()?),
+                _ => return Err(format!("知らない引数: {a}
+使い方: zc-buildd [--listen 0.0.0.0:7411] [--data /var/lib/zc-buildd]")),
+            }
+        }
+        if cfg.data_dir.as_os_str().is_empty() {
+            return Err("置き場（--data）が空".into());
+        }
+        Ok(cfg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn defaults_env_and_args() {
+        let none = |_: &str| None;
+        let c = Config::from_parts(&[], &none).unwrap();
+        assert_eq!(c.listen.port(), 7411);
+        assert_eq!(c.data_dir, PathBuf::from("/var/lib/zc-buildd"));
+        assert_eq!((c.max_running, c.max_queued, c.keep_done_max), (2, 8, 32));
+
+        let env = |n: &str| match n {
+            "ZC_BUILDD_LISTEN" => Some("127.0.0.1:9000".to_string()),
+            "ZC_BUILDD_DATA" => Some("/tmp/a".to_string()),
+            "ZC_BUILDD_MAX_RUNNING" => Some("3".to_string()),
+            "ZC_BUILDD_JOB_TIMEOUT_S" => Some("60".to_string()),
+            _ => None,
+        };
+        let c = Config::from_parts(&[], &env).unwrap();
+        assert_eq!(c.listen, "127.0.0.1:9000".parse().unwrap());
+        assert_eq!((c.data_dir.to_str().unwrap(), c.max_running, c.job_timeout), ("/tmp/a", 3, Duration::from_secs(60)));
+
+        // 引数が環境変数より強い。`--名前=値` の形も読む。
+        let c = Config::from_parts(&args(&["--listen", "127.0.0.1:0", "--data=/tmp/b"]), &env).unwrap();
+        assert_eq!(c.listen, "127.0.0.1:0".parse().unwrap());
+        assert_eq!(c.data_dir, PathBuf::from("/tmp/b"));
+    }
+
+    #[test]
+    fn bad_values_are_rejected() {
+        let none = |_: &str| None;
+        assert!(Config::from_parts(&args(&["--listen", "nowhere"]), &none).is_err());
+        assert!(Config::from_parts(&args(&["--listen"]), &none).is_err());
+        assert!(Config::from_parts(&args(&["--frobnicate"]), &none).is_err());
+        assert!(Config::from_parts(&[], &|n| (n == "ZC_BUILDD_MAX_RUNNING").then(|| "0".to_string())).is_err());
+        assert!(Config::from_parts(&[], &|n| (n == "ZC_BUILDD_JOB_TIMEOUT_S").then(|| "soon".to_string())).is_err());
     }
 }
