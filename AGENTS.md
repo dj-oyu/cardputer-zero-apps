@@ -9,6 +9,11 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
 行う。上位にワークスペースの `AGENTS.md` があれば併せて従う
 （git ルールはそちらが最優先）。
 
+**main には直接 push もマージもしない。必ず PR 経由。** 作業はブランチ
+（またはエージェントの worktree のブランチ）で行い、ブランチを push して PR を
+作る。PR のマージはユーザーの承認を得てから。GitHub のルールセット
+「main: PR only」で PR 必須・強制 push 禁止・削除禁止になっている。
+
 ## このリポジトリに書いてはいけないもの
 
 公開リポジトリなので、個人環境の情報（Tailscale のホスト名・IP、
