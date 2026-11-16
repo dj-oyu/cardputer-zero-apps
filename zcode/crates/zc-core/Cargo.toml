@@ -1,0 +1,10 @@
+[package]
+name = "zc-core"
+description = "zcode 共通の型: Rect, Color, Style, Canvas, Damage, KeyEvent, Command, 版番号, スレッドの受け渡し"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc.workspace = true

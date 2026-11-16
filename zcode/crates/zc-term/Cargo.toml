@@ -1,0 +1,10 @@
+[package]
+name = "zc-term"
+description = "zcode のpty・端末エミュレーション (vte)・スクロールバック"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zc-core.workspace = true

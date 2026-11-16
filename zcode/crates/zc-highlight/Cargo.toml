@@ -1,0 +1,10 @@
+[package]
+name = "zc-highlight"
+description = "zcode の言語登録・ハイライト (ビルド時に DFA 化)・行単位の状態キャッシュ"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zc-core.workspace = true

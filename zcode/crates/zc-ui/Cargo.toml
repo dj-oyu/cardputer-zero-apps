@@ -1,0 +1,17 @@
+[package]
+name = "zc-ui"
+description = "zcode の画面部品 (タブ・ツリー・エディタ・パネル・ステータスバー・一覧)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zc-core.workspace = true
+zc-font.workspace = true
+zc-buffer.workspace = true
+zc-highlight.workspace = true
+zc-markdown.workspace = true
+zc-skk.workspace = true
+zc-term.workspace = true
+zc-intel.workspace = true

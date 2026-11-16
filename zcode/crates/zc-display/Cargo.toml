@@ -1,0 +1,12 @@
+[package]
+name = "zc-display"
+description = "zcode の表示: fb0 出力・PNG 出力 (render-test)・行差分・フラッシュ計画・flush スレッド"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zc-core.workspace = true
+libc.workspace = true
+png.workspace = true

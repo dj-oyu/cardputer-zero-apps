@@ -1,6 +1,7 @@
 # zcode
 
-VS Code 風のコードエディタ（APPLaunch アプリ、設計済み・実装前）。**Rust** で書く。
+VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書く。段階 1（土台）まで
+実装済みで、エディタ本体は段階 2 から（`docs/design.md` §11）。
 
 ## 文書
 
@@ -8,6 +9,7 @@ VS Code 風のコードエディタ（APPLaunch アプリ、設計済み・実�
 |---|---|
 | `docs/design.md` | 設計・crate 構成・スレッド構成・遅延の目標・ハイライトの拡張方式・SD 前提のデータの持ち方・LSP の方針・段階とモデルの担当。**実装担当は自分の節と「共通の約束」（§3）を先に読む** |
 | `docs/measurements.md` | 設計の根拠になる実測値（測り方・条件・出典つき）。数字を変えるときはここを先に直す |
+| `docs/stage1-notes.md` | 段階 1 の作業メモ: API の決定と理由、design.md への提案、実機の計測、未解決の点、**キー確認の進め方** |
 | `docs/ui-mock.html` | 画面のモック（320×170 実寸を拡大表示）。画面 1〜11 とショートカットの全項目 |
 | `bench/` | 実測に使ったベンチマーク（`bench/README.md`）。測り直すときはこれを使う |
 
@@ -57,8 +59,67 @@ VS Code 風のコードエディタ（APPLaunch アプリ、設計済み・実�
   その操作を実行（コマンドパレットを兼ねる）。一覧と実際のキー割り当ては
   **同じ 1 つの表** から作る
 
+## 作り方・試し方
+
+ワークスペースは `zcode/Cargo.toml`（`crates/*`。`bench/` は別）。Windows では開発
+コンテナで回す（`cd zcode` してから）:
+
+```powershell
+..\container\dev.ps1 cargo test --workspace       # 単体テストと render-test
+..\container\dev.ps1 ./build.sh                   # 実機用 (aarch64) → out/zcode
+..\container\dev.ps1 cargo run -p zcode -- --fonttest --page 2 --render-test out/x.png
+```
+
+- render-test の正解画像は `tests/golden/`。描画を変えたら
+  `ZCODE_UPDATE_GOLDEN=1 cargo test -p zcode --test render` で更新し、**画像を目で
+  見てから**コミットする。不一致のときは隣に `*.actual.png` が出る（git 管理外）。
+  実機で描いた PNG は開発コンテナの正解と 1 バイトも違わない（2026-11-16 確認）ので、
+  描画の確認はコンテナだけで足りる
+- 段階 1 で動く画面: `--keytest [--guide]`（キー確認）、`--fonttest`（フォント比較）、
+  `--bench <line|line-status|scroll|full>`（描画の計測）。どれも `--stats` で終了時に
+  計測値（起動の内訳、フレームの所要、fsync、RSS）を標準エラーに出す。`--help` 参照
+- crate を足すときは `crates/<名前>/` に置けば入る。ほかの crate とやり取りする型は
+  `zc-core` に置く（横同士は依存しない）
+
+## 実機で動かすときの決まり
+
+- 実機には `/tmp` にだけ置き、終わったら消す。**必ず `timeout` を付ける**
+  （例: `timeout -s INT -k 5 30 /tmp/zcode --fonttest --auto 3000 --stats`）。zcode は
+  キーボードを独占（`EVIOCGRAB`）し、液晶を上書きするので、固まると実機を操作できなくなる
+- zcode は、ふつうの終了・SIGINT / SIGTERM / SIGHUP・panic・メインが固まった場合の
+  どれでも、独占を放して起動前の画面に戻す（`crates/zcode/src/crash.rs`。実機で確認済み）。
+  新しい終了経路を足したら、`--bench panic` / `--bench hang` と同じやり方で確かめる
+- キー確認モードの終了は Esc を続けて 5 回（無操作 120 秒でも終わる）
+
+## 段階 1 で分かったこと（2026-11-16、詳しくは `docs/stage1-notes.md`）
+
+- 打鍵 1 回ぶんのこちらの持ち時間（`poll()` から戻る → 描画 → 行差分 → flush スレッドが
+  `fsync` を呼ぶまで）は p50 0.2ms / p95 0.35ms。スクロールは 0.5 / 0.8ms。fsync →
+  転送開始の 4.6ms（measurements.md）が支配的
+- テキスト 1 行（11 画素行）を変えると、SPI には約 12.9KB（3 ページ ≒ 19 行ぶん）出る
+- 起動 → 最初のフレームは 10〜12ms、RSS は約 6MB、スレッドは 3 本
+- **APPLaunch は、ランチャー表示中は右上の時計と電池（行 2〜18）を描き続ける。** SSH から
+  起動した zcode の画面は、そこだけ上書きされる（SPI は 17.9kB/秒のまま）。APPLaunch から
+  アプリとして起動したときに止まるかは未確認
+- `/dev/input/event*` を全部開いて名前を調べると 60〜85ms かかる。キーボードは sysfs
+  （`/sys/class/input/event*/device/name`）で探して、目当てのものだけ開く
+- 初めての字が多い画面で、字形を 1 字ずつ最大 2ms 待つと 1 フレームが 145ms になった。
+  1 フレームの合計にも上限（6ms）を入れてある（`zc_font::FRAME_WAIT_FACTOR`）
+- **実機の実行ファイルに `toml` を入れない。** fat LTO の aarch64 ビルドで `toml` 0.8 の
+  パーサが異常終了した（原因は未特定。x86_64・thin LTO・LTO なしでは起きない）。
+  キー配列は `zc-input/build.rs` がビルド時に Rust の表に変換する。ユーザーの設定を
+  実行時に TOML で読む段階になったら、先にこれを片づける
+- キーボードのデバイスツリーの表は `keymap/cardputer-zero.toml` に写してある（キーコードと
+  行列の位置）。イベントには MSC_SCAN（行列の位置）も付く。Sym レイヤーの記号は
+  ランチャーと同じ表で確定済み（実行時はドライバの付属ファイルで上書き。
+  `zc_input::Keymap::load_driver_map`）。キーを 1 つずつ押してもらう手順は要らなくなった
+
 ## 次にやること
 
-- 段階 1（`docs/design.md` §11）: 土台・スレッド構成・キー確認モード。Sym レイヤーの
-  キーコードと刻印の対応、キー押下から evdev までの遅延、APPLaunch が起動中に
-  再描画を止めるかを実機で確かめる（`docs/measurements.md` §8 の未計測項目）
+- モディファイアの届き方と読み取りの遅延は確認済み（`docs/measurements.md` §8）。
+  打鍵 → fsync を呼ぶまで p50 1.4ms
+- フォント比較画面をユーザーに見てもらい、文字の大きさと行の高さを決める
+  （`crates/zc-ui/src/layout.rs` の `CODE_PX` / `CODE_LINE_H`）
+- 実機で試すときはランチャーの「zcode (dev)」から起動する（`dev/README.md`）。
+  SSH から直接起動すると APPLaunch と画面・キーボードを取り合う
+- `docs/stage1-notes.md` §3 の提案を design.md に取り込むか決めてから、段階 2 へ

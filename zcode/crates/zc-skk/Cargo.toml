@@ -1,0 +1,10 @@
+[package]
+name = "zc-skk"
+description = "zcode のSKK エンジン (UI 非依存)・辞書 (mmap 二分探索)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zc-core.workspace = true

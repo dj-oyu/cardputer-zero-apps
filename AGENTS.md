@@ -9,6 +9,11 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
 行う。上位にワークスペースの `AGENTS.md` があれば併せて従う
 （git ルールはそちらが最優先）。
 
+**main には直接 push もマージもしない。必ず PR 経由。** 作業はブランチ
+（またはエージェントの worktree のブランチ）で行い、ブランチを push して PR を
+作る。PR のマージはユーザーの承認を得てから。GitHub のルールセット
+「main: PR only」で PR 必須・強制 push 禁止・削除禁止になっている。
+
 ## このリポジトリに書いてはいけないもの
 
 公開リポジトリなので、個人環境の情報（Tailscale のホスト名・IP、
@@ -23,7 +28,7 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
 | `qrreader/` | QR コードリーダー（カメラ＋液晶） |
 | `bt-tether/` | iPhone との Bluetooth PAN テザリング |
 | `common/` | 液晶アプリ共通の UI 土台 `zero_ui.py` |
-| `zcode/` | VS Code 風コードエディタ（Rust、計画中） |
+| `zcode/` | VS Code 風コードエディタ（Rust。段階 1 の土台まで実装） |
 | `container/` | 開発コンテナ（Dockerfile と Windows 用ラッパー `dev.ps1`） |
 
 新しいアプリは `<app>/` を切り、既存アプリと同じ形
@@ -44,8 +49,17 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
 - 開発コンテナでできるのは .deb ビルド・`--render-test`・selftest まで。
   カメラ / fb0 / キー / BlueZ は実機で確認する（詳細は `container/README.md`）
 - 改行は `.gitattributes` で LF 固定。CRLF の sh / postinst / sudoers は壊れる
+- 実行するスクリプト（`build.sh`、`postinst`、起動スクリプト）は git に実行権限
+  （100755）で入れる。Windows では `core.filemode=false` のうえ、WSL コンテナの
+  マウントは全部を実行可能に見せるので気づかない。足したら
+  `git update-index --chmod=+x <ファイル>` を付ける（CI の Linux では権限で落ちる）
 - リリースはアプリごとのタグ（例: `qrreader-v3.5.1`）。`.deb` は
   そのタグの GitHub Release に添付
+- CI（`.github/workflows/ci.yml`）は PR と main への push で、**変更のあったアプリだけ**を
+  開発コンテナの中で試す（qrreader: 自己テスト・描画・.deb、bt-tether: 描画・.deb と
+  sudoers の権限、zcode: cargo test・描画の正解画像・aarch64 ビルド）。`common/` は
+  qrreader と bt-tether、`container/` と `.github/` は全部を試す対象にする。新しい
+  アプリを足したら、ここにジョブと判定を足す
 - コミットメッセージは `<app> v<version>: <要約>` の形
   （例: `bt-tether v0.2: IPv4 via dhcpcd`）
 
@@ -66,6 +80,28 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
   キーは tca8418c（`/dev/input/event3`）。Python アプリの描画・入力は
   `common/zero_ui.py` を使う。fb0 は video、event3 は input グループで
   `jimmy` から読み書きできる
+- **APPLaunch（ランチャー）とアプリの作法**（公式 CardputerZero/launcher のソースと
+  `docs/launcher-project-guide-ja/` で確認、2026-11-16）:
+  - APPLaunch はアプリを起動すると、自分の LVGL タイマーを全部止めて子の終了を待つ。
+    スクリーンセーバー（無操作で画面を黒く塗り、バックライトを下げる）も時計の
+    再描画も止まる。**アプリの実行中に画面を眠らせるのはアプリの役目**
+  - キーボードは `keyboard_pause()` で APPLaunch 側の処理を止めるだけで、
+    **`EVIOCGRAB` しない（アプリと共有）**。アプリも独占しないこと
+  - APPLaunch はアプリの実行中も Esc だけは見ていて、**Esc を約 3 秒押し続けると
+    アプリのプロセスグループに SIGTERM、続けて SIGKILL** を送る（本体共通の強制終了）。
+    アプリは Esc の長押しを操作に使わない。SIGTERM を受けたら手早く後始末して終わる
+  - ランチャーの設定は `~/.config/cardputerzero/config.json`（JSON。入れ子は点区切りの
+    キー、値は文字列か数値）。`dark_time` は無操作で眠らせるまでの秒数（設定画面で
+    0 / 10 / 30 / 60 / 300、無ければ 30、0 は眠らせない）、`brightness` はバックライトの
+    明るさ（無ければ触らない＝100）。アプリが画面を眠らせるときはこれに従う
+    （zcode の `launcher_config.rs`）。古い手引きにある `/var/lib/applaunch/settings` は
+    実機に無い
+  - SSH から直接起動したアプリの横では APPLaunch が動き続けるので、スクリーン
+    セーバーが画面を黒く塗り、時計（右上、行 2〜18）を描き続ける。正式に起動した
+    ときとは条件が違う。デバッグでは `systemctl --user stop APPLaunch.service` で
+    止める方法が手引きにある（止める・戻すはユーザーに確認してから）
+- バックライトは `/sys/class/backlight/backlight/brightness`（0〜100、video グループで
+  書ける）
 - 液晶の実体は ST7789V（SPI、spi-max-frequency 60MHz）で、ドライバは
   panel-mipi-dbi-spi（DRM の fbdev エミュレーション、card1-SPI-1）。fb0 への
   書き込みは遅延 I/O でまとめて SPI 転送される（変更されたページを含む
@@ -95,10 +131,18 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
   Enter / BackSpace / Space あり
 - Fn レイヤー: F1〜F12、Del、矢印（←↓→ と ↑）、Home / End / PgUp / PgDn / Ins、
   音量
-- Sym レイヤー: `] ; ' \` \\ , . /` と `[` は通常のキーコード。残りは
-  テンキー系（KP0〜9、KP*、KP-、KP+、KP.）や NumLock / ScrollLock、
-  かな系（KEY_KATAKANA など）のコードで届く。**刻印との対応は実機で押して
-  確かめるまで未確定**（KEY_MINUS / KEY_EQUAL はどのレイヤーにも無い）
+- Sym レイヤー: 記号は、ドライバが「記号ごとの枠」として決めたキーコードで届く
+  （例: Sym+1 は KEY_LEFTBRACE=26 で届くが意味は `!`、Sym+R は KEY_KP7=71 で `-`）。
+  ふつうの US 配列として読むと間違える。対応の正本はドライバの付属ファイル
+  `/usr/share/keymaps/tca8418_keypad_m5stack_keymap.map`（`keycode 26 = exclam` の形式、
+  32 記号）で、本体のランチャー（CardputerZero/launcher の `cp0_keyboard_keymap.c`）も
+  これを読み、無ければ同じ表を埋め込みで使う。刻印（Sym で出る青い記号）とも一致
+  （2026-11-16 確認）。KEY_MINUS / KEY_EQUAL はどのレイヤーにも無い
+- Shift / Sym / Fn は、押しっぱなし・1 回タップ・2 回タップのどれでも「そのキーを
+  押している間」として届く（2026-11-16 実機で確認）。ワンショットは「タップで押下、
+  次のキーを離した直後に離上」、ロックは「押下 1 回、解除のタップまで押したまま」。
+  アプリは押下〜離上でモディファイアの状態を持てばよい。コードは Shift 42、Ctrl 29、
+  Alt 56、Sym 383、Fn 389
 - **キーリピートが無い**（デバイスの EV ビットに EV_REP が無い。EV=13）。
   長押しで連続入力したいアプリは、押下・離上を見て自前でリピートする
 - Python の `zero_ui.KeyReader` は押下コードしか返さない（モディファイアの

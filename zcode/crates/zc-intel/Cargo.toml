@@ -1,0 +1,10 @@
+[package]
+name = "zc-intel"
+description = "zcode の単語補完・構文チェックの実行・アウトライン"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zc-core.workspace = true

@@ -1,0 +1,190 @@
+# 自動テストと .deb のビルドテスト。変更のあったアプリだけを試す。
+#
+# - 試験は開発コンテナ（container/Dockerfile、実機と同じ Debian 13）の中で行う。
+#   イメージは GitHub Actions のキャッシュで使い回す
+# - どのアプリを試すかは、変更されたファイルから決める（changes ジョブ）:
+#     qrreader/  → qrreader          bt-tether/ → bt-tether
+#     common/    → qrreader, bt-tether（両方が .deb に同梱するため）
+#     zcode/     → zcode（zcode/bench/ が変わったときはベンチマークもビルド）
+#     container/, .github/ → 全部（試験環境そのものが変わったため）
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      qrreader: ${{ steps.f.outputs.qrreader }}
+      bt_tether: ${{ steps.f.outputs.bt_tether }}
+      zcode: ${{ steps.f.outputs.zcode }}
+      zcode_bench: ${{ steps.f.outputs.zcode_bench }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: f
+        name: 変更されたアプリを調べる
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          all=false
+          case "$EVENT" in
+            pull_request) files=$(git diff --name-only "$PR_BASE...$PR_HEAD") ;;
+            push)
+              if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+                all=true; files=""
+              else
+                files=$(git diff --name-only "$BEFORE" "$GITHUB_SHA")
+              fi ;;
+            *) all=true; files="" ;;
+          esac
+          echo "変更されたファイル:"; echo "$files" | sed 's/^/  /'
+          has() { echo "$files" | grep -qE "$1"; }
+          if has '^(container/|\.github/)'; then all=true; fi
+          q=false; b=false; z=false; zb=false
+          if $all || has '^(qrreader|common)/'; then q=true; fi
+          if $all || has '^(bt-tether|common)/'; then b=true; fi
+          if $all || has '^zcode/'; then z=true; fi
+          if $all || has '^zcode/bench/'; then zb=true; fi
+          {
+            echo "qrreader=$q"; echo "bt_tether=$b"; echo "zcode=$z"; echo "zcode_bench=$zb"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  qrreader:
+    needs: changes
+    if: needs.changes.outputs.qrreader == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: 開発コンテナを用意する
+        uses: docker/build-push-action@v6
+        with:
+          context: container
+          tags: cz-dev:ci
+          load: true
+          cache-from: type=gha,scope=cz-dev
+          cache-to: type=gha,scope=cz-dev,mode=max
+      - name: 自己テスト・描画テスト・.deb のビルド
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work/qrreader cz-dev:ci bash -euo pipefail -c '
+            python3 tools/make_test_qr.py
+            python3 qrreader.py --selftest
+            python3 qrreader_lcd.py --render-test /tmp/qrreader.png
+            ./build.sh 0.0.0-ci
+            dpkg-deb --info qrreader-lcd_0.0.0-ci_arm64.deb
+            dpkg-deb --contents qrreader-lcd_0.0.0-ci_arm64.deb
+            # 同梱物と改行コードの確認（CRLF の postinst は壊れる）
+            dpkg-deb --contents qrreader-lcd_0.0.0-ci_arm64.deb | grep -q "lib/qrreader/zero_ui.py"
+            dpkg-deb --ctrl-tarfile qrreader-lcd_0.0.0-ci_arm64.deb | tar -xO ./postinst | (! grep -q $'"'"'\r'"'"')
+          '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qrreader-deb
+          path: qrreader/*.deb
+          retention-days: 7
+
+  bt-tether:
+    needs: changes
+    if: needs.changes.outputs.bt_tether == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: 開発コンテナを用意する
+        uses: docker/build-push-action@v6
+        with:
+          context: container
+          tags: cz-dev:ci
+          load: true
+          cache-from: type=gha,scope=cz-dev
+          cache-to: type=gha,scope=cz-dev,mode=max
+      - name: 描画テスト・.deb のビルド
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work/bt-tether cz-dev:ci bash -euo pipefail -c '
+            python3 bt_tether_lcd.py --render-test /tmp/bt
+            ls /tmp/bt*.png
+            ./build.sh 0.0.0-ci
+            dpkg-deb --info bt-tether-lcd_0.0.0-ci_arm64.deb
+            dpkg-deb --contents bt-tether-lcd_0.0.0-ci_arm64.deb
+            dpkg-deb --contents bt-tether-lcd_0.0.0-ci_arm64.deb | grep -q "lib/bt-tether/zero_ui.py"
+            # sudoers は mode 440・LF でないと sudo が読まない
+            dpkg-deb --contents bt-tether-lcd_0.0.0-ci_arm64.deb | grep -E "^-r--r----- .*etc/sudoers.d/bt-tether$"
+            dpkg-deb --fsys-tarfile bt-tether-lcd_0.0.0-ci_arm64.deb | tar -xO ./etc/sudoers.d/bt-tether | (! grep -q $'"'"'\r'"'"')
+          '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bt-tether-deb
+          path: bt-tether/*.deb
+          retention-days: 7
+
+  zcode:
+    needs: changes
+    if: needs.changes.outputs.zcode == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: 開発コンテナを用意する
+        uses: docker/build-push-action@v6
+        with:
+          context: container
+          tags: cz-dev:ci
+          load: true
+          cache-from: type=gha,scope=cz-dev
+          cache-to: type=gha,scope=cz-dev,mode=max
+      - name: crate とビルド成果物のキャッシュ
+        uses: actions/cache@v4
+        with:
+          path: |
+            .ci-cache/cargo-registry
+            .ci-cache/cargo-target
+          key: zcode-${{ hashFiles('zcode/Cargo.lock', 'zcode/bench/*/Cargo.lock', 'container/Dockerfile') }}
+          restore-keys: zcode-
+      - name: テスト（単体テストと描画の正解画像）・実機用のビルド
+        run: |
+          mkdir -p .ci-cache/cargo-registry .ci-cache/cargo-target
+          docker run --rm -v "$PWD:/work" \
+            -v "$PWD/.ci-cache/cargo-registry:/opt/cargo/registry" \
+            -v "$PWD/.ci-cache/cargo-target:/cargo-target" \
+            -w /work/zcode cz-dev:ci bash -euo pipefail -c '
+              cargo test --workspace --locked
+              cargo test --workspace --locked --features zc-input/parse
+              ./build.sh
+              file out/zcode | grep -q "ARM aarch64"
+            '
+      - name: ベンチマークのビルド
+        if: needs.changes.outputs.zcode_bench == 'true'
+        run: |
+          docker run --rm -v "$PWD:/work" \
+            -v "$PWD/.ci-cache/cargo-registry:/opt/cargo/registry" \
+            -v "$PWD/.ci-cache/cargo-target:/cargo-target" \
+            -w /work/zcode/bench cz-dev:ci ./build.sh
+      - name: 描画テストが合わなかったときの画像
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zcode-render-actual
+          path: zcode/tests/golden/*.actual.png
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zcode-aarch64
+          path: zcode/out/zcode
+          retention-days: 7
