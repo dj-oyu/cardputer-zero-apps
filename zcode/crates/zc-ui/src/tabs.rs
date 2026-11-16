@@ -12,6 +12,8 @@ pub struct Tab {
     pub title: String,
     /// 未保存（● を付ける）。
     pub modified: bool,
+    /// 構文チェックでエラーがある（名前を赤くする。モック 13）。
+    pub error: bool,
 }
 
 /// タブバー。タブが入りきらないときは、選択中のタブが見える位置まで横にずらす。
@@ -87,7 +89,10 @@ impl Widget for TabBar {
             if x + w > clip.x as i32 && x < clip.right() {
                 let on = i == self.active;
                 let r = Rect::new(x as i16, area.y, w as u16, area.h);
-                let (bg, fg) = if on { (palette::TAB_ACTIVE, Color::WHITE) } else { (palette::TABBAR, palette::DIM) };
+                let (bg, mut fg) = if on { (palette::TAB_ACTIVE, Color::WHITE) } else { (palette::TABBAR, palette::DIM) };
+                if tab.error {
+                    fg = palette::ERROR;
+                }
                 if on {
                     cx.canvas.fill_rect(r.intersect(&clip), bg);
                     cx.canvas.fill_rect(Rect::new(r.x, r.y, r.w, 1).intersect(&clip), palette::STATUS);
@@ -115,7 +120,7 @@ mod tests {
     use zc_font::{FontConfig, Fonts, RasterMode};
 
     fn tab(i: u32, title: &str, modified: bool) -> Tab {
-        Tab { doc: DocId(i), title: title.into(), modified }
+        Tab { doc: DocId(i), title: title.into(), modified, error: false }
     }
 
     #[test]

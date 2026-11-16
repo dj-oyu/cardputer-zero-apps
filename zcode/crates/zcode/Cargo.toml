@@ -23,6 +23,7 @@ zc-ui.workspace = true
 zc-buffer.workspace = true
 zc-highlight.workspace = true
 zc-store.workspace = true
+zc-intel.workspace = true
 libc.workspace = true
 
 [dev-dependencies]

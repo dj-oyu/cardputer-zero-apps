@@ -314,6 +314,28 @@ impl EditorView {
         self.tail_y = i32::MAX;
         self.all_dirty = true;
     }
+    /// 画面の行 `y0..y1` に重なっている行を、次の `render` で必ず描き直す（上に重ねた
+    /// 小窓を閉じた・動かしたとき。ほかの行はそのまま）。
+    pub fn invalidate_rows(&mut self, y0: i32, y1: i32) {
+        let mut i = 0;
+        while i < self.painted.len() {
+            let p = &self.painted[i];
+            if p.y < y1 && p.y + p.height as i32 > y0 {
+                let p = self.painted.remove(i);
+                self.pool.push(p.layout);
+            } else {
+                i += 1;
+            }
+        }
+        // 最後の行より下（地の色で塗ってある所）に重なっていれば、そこも塗り直す
+        if y1 > self.tail_y {
+            self.tail_y = y1;
+        }
+    }
+    /// 波線。
+    pub fn marks(&self) -> &[LineMark] {
+        &self.marks
+    }
     /// 波線を置き換える。
     pub fn set_marks(&mut self, marks: Vec<LineMark>) {
         if self.marks != marks {

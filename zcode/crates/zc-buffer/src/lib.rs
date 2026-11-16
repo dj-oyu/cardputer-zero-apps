@@ -759,6 +759,23 @@ impl Buffer {
         self.end_op(acc)
     }
 
+    /// `start..end` を `text` に置き換え、カーソルを入れた文字列の末尾に置く（補完の確定）。
+    /// 取り消しの 1 単位になり、取り消すと置き換える前の選択（ふつうはカーソルだけ）に戻る。
+    pub fn replace_range(&mut self, start: Pos, end: Pos, text: &str) -> Option<LineChange> {
+        let text = normalize_newlines(text);
+        let (start, end) = (self.clamp(start.min(end)), self.clamp(start.max(end)));
+        if text.is_empty() && start == end {
+            return None;
+        }
+        self.begin_op(Kind::Other);
+        let a = idx_of(&self.rope, start);
+        let b = idx_of(&self.rope, end);
+        let mut acc = None;
+        self.edit(&mut acc, a, b - a, &text);
+        self.selection = Selection::caret(pos_of(&self.rope, a + text.chars().count()));
+        self.end_op(acc)
+    }
+
     /// Enter。直前の行の字下げをそのまま写す。カーソルの手前が `indent_after` に含まれる
     /// 文字（例 `":{(["`）で終わっていれば、`indent_unit` を 1 段足す。
     pub fn newline(&mut self, indent_unit: &str, indent_after: &str) -> Option<LineChange> {

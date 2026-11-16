@@ -515,3 +515,138 @@ fn save_skips_unchanged_and_warns_on_external_change(backend: DocBackend) {
     assert!(ed.message().unwrap().starts_with("保存した"), "{:?}", ed.message());
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// 描き直しだけで得た画面が、全部を描き直した画面と同じか（小窓の消し残しが無いか）。
+fn assert_screen_is_clean(g: &mut Gfx, ed: &mut EditorScreen) {
+    g.render(ed);
+    let partial = g.canvas.clone();
+    ed.on_glyphs_ready();
+    g.render(ed);
+    assert!(partial == g.canvas, "部分的な描き直しが、全部を描き直した画面と違う（消し残し）");
+}
+
+both!(word_completion_popup, word_completion_popup_simple, word_completion_popup_buffer);
+fn word_completion_popup(backend: DocBackend) {
+    let mut lp = Loop::new();
+    let mut ed = editor_with(backend, "led_blink = 1\nled = 2\nname = \"lemon\"\n");
+    let mut g = Gfx::new();
+    if let Some(g) = g.as_mut() {
+        g.render(&mut ed);
+    }
+    lp.keys(&mut ed, &[key(Key::Down), key(Key::Down), key(Key::End), key(Key::Enter)]);
+    // 1 文字では出ない。2 文字で出る（近い行の語が先: lemon は 1 行上、led は 2 行上。キーワードは後）
+    lp.type_str(&mut ed, "l");
+    assert!(ed.completion().is_none());
+    lp.type_str(&mut ed, "e");
+    let (items, sel) = ed.completion().expect("候補が出る");
+    assert_eq!((items.as_slice(), sel), (&["lemon".to_string(), "led".into(), "led_blink".into(), "len".into()][..], 0));
+    if let Some(g) = g.as_mut() {
+        let d = g.render(&mut ed);
+        assert!(!d.is_empty());
+    }
+    // ↓ で次の候補、Tab で置き換え（打った "le" ごと）
+    let second = items[1].clone();
+    lp.keys(&mut ed, &[key(Key::Down)]);
+    assert_eq!(ed.completion().unwrap().1, 1);
+    lp.keys(&mut ed, &[key(Key::Tab)]);
+    assert!(ed.completion().is_none());
+    assert_eq!(text(&ed).trim_end().lines().last().unwrap(), second);
+    // 取り消すと打った "le" に戻る
+    lp.keys(&mut ed, &[ctrl('z')]);
+    assert_eq!(text(&ed).trim_end().lines().last().unwrap(), "le");
+    if let Some(g) = g.as_mut() {
+        assert_screen_is_clean(g, &mut ed);
+    }
+    // 打ち足すと絞り込み直す。Esc で閉じる。閉じた後の画面に消し残しが無い
+    lp.type_str(&mut ed, "d_");
+    assert_eq!(ed.completion().unwrap().0, vec!["led_blink".to_string()]);
+    if let Some(g) = g.as_mut() {
+        g.render(&mut ed);
+    }
+    lp.keys(&mut ed, &[key(Key::Esc)]);
+    assert!(ed.completion().is_none());
+    if let Some(g) = g.as_mut() {
+        assert_screen_is_clean(g, &mut ed);
+    }
+    // 文字列の中・単語の途中では自動で出ない。Ctrl+Space なら出る
+    lp.keys(&mut ed, &[key(Key::Enter)]);
+    lp.type_str(&mut ed, "s = \"le");
+    assert!(ed.completion().is_none());
+    lp.keys(&mut ed, &[key(Key::Enter)]);
+    lp.type_str(&mut ed, "na");
+    assert!(ed.completion().is_some());
+    lp.keys(&mut ed, &[key(Key::Left)]);
+    assert!(ed.completion().is_none());
+    lp.keys(&mut ed, &[KeyEvent::new(Key::Char(' '), Mods::CTRL)]);
+    assert!(ed.completion().is_some_and(|c| c.0.contains(&"name".to_string())));
+}
+
+both!(outline_filter_and_jump, outline_filter_and_jump_simple, outline_filter_and_jump_buffer);
+fn outline_filter_and_jump(backend: DocBackend) {
+    let mut lp = Loop::new();
+    let src = "import time\n\nclass Blinker:\n    def __init__(self):\n        pass\n\n    def make_pattern(self):\n        return [1, 0]\n\n\ndef main():\n    # def not_this(): コメントの中は出さない\n    pass\n\n\ndef run_formatted():\n    pass\n";
+    let mut ed = editor_with(backend, src);
+    let g = Gfx::new();
+    lp.keys(&mut ed, &[ctrl('o')]);
+    let (rows, sel) = ed.outline_rows().expect("Ctrl+O で開く");
+    let names: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+    assert_eq!(names, ["Blinker", "__init__", "make_pattern", "main", "run_formatted"]);
+    assert_eq!(sel, 0);
+    // 絞り込み: 一致した項目の親は残す（選べない）
+    lp.type_str(&mut ed, "ma");
+    let (rows, sel) = ed.outline_rows().unwrap();
+    assert_eq!(rows, vec![("Blinker".into(), true), ("make_pattern".into(), false), ("main".into(), false), ("run_formatted".into(), false)]);
+    assert_eq!(sel, 1);
+    if let Some(mut g) = g {
+        assert!(!g.render(&mut ed).is_empty());
+        // ↓ で main、Enter でその行へ。閉じたあとの画面に一覧が残らない
+        lp.keys(&mut ed, &[key(Key::Down), key(Key::Enter)]);
+        assert!(ed.outline_rows().is_none());
+        assert_eq!(cursor(&ed), Pos::new(10, 0));
+        assert_screen_is_clean(&mut g, &mut ed);
+    } else {
+        lp.keys(&mut ed, &[key(Key::Down), key(Key::Enter)]);
+        assert_eq!(cursor(&ed), Pos::new(10, 0));
+    }
+    // Esc は何もせず閉じる
+    lp.keys(&mut ed, &[ctrl('o'), key(Key::Esc)]);
+    assert!(ed.outline_rows().is_none());
+    assert_eq!(cursor(&ed), Pos::new(10, 0));
+}
+
+both!(save_runs_syntax_check, save_runs_syntax_check_simple, save_runs_syntax_check_buffer);
+fn save_runs_syntax_check(backend: DocBackend) {
+    if std::process::Command::new("python3").arg("-c").arg("pass").status().map_or(true, |s| !s.success()) {
+        eprintln!("python3 が無いので飛ばす");
+        return;
+    }
+    let dir = tmp_dir("check");
+    let p = dir.join("bad.py");
+    fs::write(&p, "def main():\n    for i in range(3)\n        print(i)\n").unwrap();
+    let mut lp = Loop::new();
+    let mut ed = EditorScreen::new(EditorConfig { backend, root: dir.clone(), files: vec![p.clone()] });
+    lp.with(|cx| ed.start(cx));
+    lp.pump(&mut ed);
+    lp.keys(&mut ed, &[ctrl('s')]);
+    lp.pump(&mut ed); // 保存 → チェックを batch に出す
+    lp.pump(&mut ed); // チェックの結果
+    let diags = ed.diagnostics();
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].line, 1);
+    assert!(ed.message().unwrap().starts_with("2 行:"), "{:?}", ed.message());
+    assert_eq!(ed.active_view().unwrap().marks().len(), 1);
+    // 上に 1 行足すと、波線もずれる
+    lp.keys(&mut ed, &[KeyEvent::new(Key::Home, Mods::CTRL)]);
+    lp.type_str(&mut ed, "import os\n");
+    assert_eq!(ed.diagnostics()[0].line, 2);
+    // 直して保存すると消える（カーソルは 2 行目の頭 → 3 行目の for の行末へ）
+    lp.keys(&mut ed, &[key(Key::Down), key(Key::End)]);
+    lp.type_str(&mut ed, ":");
+    lp.keys(&mut ed, &[ctrl('s')]);
+    lp.pump(&mut ed);
+    lp.pump(&mut ed);
+    assert!(ed.diagnostics().is_empty(), "{:?}", ed.diagnostics());
+    assert!(ed.active_view().unwrap().marks().is_empty());
+    assert!(fs::read_to_string(&p).unwrap().contains("range(3):"));
+    let _ = fs::remove_dir_all(&dir);
+}

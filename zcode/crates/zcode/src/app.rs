@@ -37,7 +37,10 @@ pub enum AppEvent {
     /// flush スレッドが 1 回 fsync した。
     Flushed(FlushRecord),
     /// batch がファイルを読み終えた（[`crate::editor::EditorScreen::open_path`]）。
-    Opened { doc: DocId, result: Result<Box<dyn crate::doc::TextDoc + Send>, String> },
+    /// 単語補完の索引も batch で作っておく。
+    Opened { doc: DocId, result: Result<(Box<dyn crate::doc::TextDoc + Send>, zc_intel::WordIndex), String> },
+    /// batch が保存時の構文チェックを終えた（§10.2）。
+    Checked { doc: DocId, result: Result<Vec<zc_intel::Diagnostic>, String> },
     /// 保存が終わった（[`crate::save::Saver`]）。`version` は書き出した中身の版。
     Saved { doc: DocId, version: Version, result: Result<crate::save::SaveOk, String> },
     /// 書き込み層（`zc-store`）からの、保存以外の返事（控え・SKK 個人辞書）。
@@ -52,6 +55,7 @@ impl std::fmt::Debug for AppEvent {
             AppEvent::Flushed(r) => f.debug_tuple("Flushed").field(r).finish(),
             AppEvent::Opened { doc, result } => write!(f, "Opened({doc:?}, {:?})", result.as_ref().map(|_| "..")),
             AppEvent::Saved { doc, version, result } => write!(f, "Saved({doc:?}, {version:?}, {result:?})"),
+            AppEvent::Checked { doc, result } => write!(f, "Checked({doc:?}, {result:?})"),
             AppEvent::Store(r) => f.debug_tuple("Store").field(r).finish(),
             AppEvent::HighlightRest { doc, rest } => write!(f, "HighlightRest({doc:?}, {:?}, from {})", rest.version, rest.value.from_line),
         }

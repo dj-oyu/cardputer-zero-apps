@@ -546,6 +546,7 @@ dependencies = [
  "zc-font",
  "zc-highlight",
  "zc-input",
+ "zc-intel",
  "zc-store",
  "zc-ui",
 ]

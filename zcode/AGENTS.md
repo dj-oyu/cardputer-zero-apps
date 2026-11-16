@@ -1,7 +1,7 @@
 # zcode
 
-VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書く。段階 1（土台）まで
-実装済みで、エディタ本体は段階 2 から（`docs/design.md` §11）。
+VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書く。段階 2（エディタ）まで
+実装済み（`docs/design.md` §11）。実機での段階 2 の確認はまだ。
 
 ## 文書
 
@@ -127,10 +127,30 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - 書き込みは `zc-store`（原子的な保存、CRC 付きの独自形式と `.bak`、2 段の控え、SKK 個人辞書の
   書き戻し）。storage ワーカーには `zc_store::submit` で依頼する
 
+## 段階 2 の統合で決めたこと（2026-11-16）
+
+- 保存は `zc-store` 経由（`save.rs` の `StoreSaver`）。内容が前回と同じでディスクも
+  変わっていなければ書かない（「変更なし」）。開いた後にほかのプログラムが変えた
+  ファイルを上書きしたら、ステータスバーで知らせる
+- 保存できたら、`language.toml` の `check` を batch で使い捨てで走らせる（`intel.rs`）。
+  エラーは赤い波線・赤いタブ名・ステータスバーの件数 `⊗ n` と右のメッセージ（モック 13）。
+  波線は編集に合わせて行をずらす
+- 単語補完（モック 12）: 単語を 2 文字打つと自動で出す。Tab で確定（↑↓ で選ぶ、Esc で
+  閉じる）。Enter は改行のまま。文字列・コメントの中、単語の途中では自動で出さない
+  （Ctrl+Space なら出す）。確定は `TextDoc::replace_range` で 1 回の取り消しで戻せる
+- アウトライン（モック 14）: Ctrl+O。`language.toml` の `[outline]` から作る。絞り込みで
+  一致した項目の親は薄く残す（選べない）
+- 小窓（補完）を閉じる・動かすときは、下にあった行だけ描き直す
+  （`EditorView::invalidate_rows`）。全部を描き直すと SPI の転送が全画面ぶんになる
+- エディタの試験は `SimpleDoc` と本物の `zc_buffer::Buffer` の両方で回す（`both!`）。
+  一時フォルダは試験ごとに別にする（同じ名前だと並列に走ったときに消し合う）
+- Shell / C の `check`・`run`、Rust の `run` の書き方は実機で未確認（`bash -n` / `gcc` の
+  出力の形、実機に gcc・rustc があるか）
+
 ## 次にやること
 
-- モディファイアの届き方と読み取りの遅延は確認済み（`docs/measurements.md` §8）。
-  打鍵 → fsync を呼ぶまで p50 1.4ms
-- 実機で試すときはランチャーの「zcode (dev)」から起動する（`dev/README.md`）。
-  SSH から直接起動すると APPLaunch と画面・キーボードを取り合う
-- `docs/stage1-notes.md` §3 の提案を design.md に取り込むか決めてから、段階 2 へ
+- 段階 2 を実機の「zcode (dev)」で確かめる（`dev/README.md`）: Python を開いて編集・保存、
+  補完・構文チェック・アウトライン、打鍵の遅延（目標内か）、実行ファイルが約 3.1MB に
+  増えた分の起動時間。SSH から直接起動すると APPLaunch と画面・キーボードを取り合う
+- ハイライトの実機の計測（`zc-highlight` の `hlbench`。`docs/measurements.md` §6）
+- 段階 3（ターミナル・F5 実行）

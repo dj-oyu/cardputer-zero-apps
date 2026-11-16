@@ -17,15 +17,17 @@
 use crate::app::{AppEvent, LoopCx, Screen, TimerId};
 use crate::commands;
 use crate::doc::{DocBackend, TextDoc};
+use crate::intel;
 use crate::save::{SaveOk, SaveRequest, Saver, StoreSaver};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use zc_core::{palette, CancelToken, Color, Command, Damage, DocId, KeyEvent, LineChange, Mods, Motion, Pos, Rect, Span, Version};
+use zc_core::{palette, CancelToken, Color, Command, Damage, DocId, Key, KeyEvent, LineChange, Mods, Motion, Pos, Rect, Span, Version};
 use zc_font::TextStyle;
-use zc_highlight::{Highlighter, LanguageId, Registry};
+use zc_highlight::{Highlighter, LanguageId, LanguageInfo, Registry};
+use zc_intel::{Completion, CompletionKind, Diagnostic, Severity, WordIndex};
 use zc_input::{Keyboard, RawRecord};
 use zc_ui::layout::{Regions, SIDE_W, UI_PX};
-use zc_ui::{EditorStatus, EditorView, FileTree, ImeMode, RenderCx, SpanSource, StatusBar, Tab, TabBar, Widget};
+use zc_ui::{CompletionPopup, EditorStatus, EditorView, FileTree, ImeMode, PickerList, PopupItem, RenderCx, SpanSource, StatusBar, Tab, TabBar, Widget};
 
 /// ステータスバーを遅らせる時間（§5.2）。
 const STATUS_DELAY: Duration = Duration::from_millis(50);
@@ -72,6 +74,10 @@ struct Lang {
 }
 
 impl Lang {
+    /// `zc-highlight` に登録のある言語なら、その設定。
+    fn info(&self) -> Option<&'static LanguageInfo> {
+        self.id.map(|id| Registry::builtin().info(id))
+    }
     /// ファイル名と 1 行目から決める。`zc-highlight` に登録が無ければ、拡張子の小さな
     /// 表で名前と行コメントだけ決める（色は付かない）。
     fn detect(path: Option<&Path>, first_line: &str) -> Lang {
@@ -119,6 +125,10 @@ struct DocTab {
     custom_spans: Option<Box<dyn SpanSource>>,
     /// batch で読み込み中（中身はまだ空）。
     loading: bool,
+    /// 単語補完の索引（§10.2）。
+    words: WordIndex,
+    /// 保存時の構文チェックの結果（編集に合わせて行をずらす）。
+    diags: Vec<Diagnostic>,
 }
 
 /// 描画に渡すトークンの出どころ。
@@ -140,7 +150,8 @@ impl SpanSource for TabSpans<'_> {
 
 impl DocTab {
     fn new(id: DocId, path: Option<PathBuf>, title: String, doc: Box<dyn TextDoc + Send>) -> DocTab {
-        let mut t = DocTab { id, path, title, doc, view: EditorView::code(), lang: Lang::detect(None, ""), hl: None, custom_spans: None, loading: false };
+        let words = WordIndex::build(doc.as_lines(), &CancelToken::never()).unwrap_or_else(|_| WordIndex::new());
+        let mut t = DocTab { id, path, title, doc, view: EditorView::code(), lang: Lang::detect(None, ""), hl: None, custom_spans: None, loading: false, words, diags: Vec::new() };
         t.detect_language();
         t
     }
@@ -159,6 +170,20 @@ impl DocTab {
             h.dirty = true;
         }
         self.view.lines_changed(change);
+        self.words.edited(self.doc.as_lines(), change);
+        if !self.diags.is_empty() {
+            intel::shift_diagnostics(&mut self.diags, change);
+            self.view.set_marks(intel::marks_of(&self.diags));
+        }
+    }
+    /// 構文チェックでエラーがあるか（タブの名前を赤くする）。
+    fn has_error(&self) -> bool {
+        self.diags.iter().any(|d| d.severity == Severity::Error)
+    }
+    /// カーソル行の診断。
+    fn diag_at_cursor(&self) -> Option<&Diagnostic> {
+        let line = self.doc.selection().1.line;
+        self.diags.iter().find(|d| d.line == line)
     }
     /// 文書の選択範囲をビューに写す。
     fn sync_cursor(&mut self) {
@@ -186,6 +211,23 @@ struct Prompt {
     text: String,
 }
 
+/// 開いている補完の候補（モック 12）。
+struct CompState {
+    items: Vec<Completion>,
+    sel: usize,
+    /// 置き換える単語の先頭部分（打った文字）。
+    prefix: String,
+}
+
+/// 開いているアウトライン（モック 14）。
+struct OutlineState {
+    items: Vec<zc_intel::OutlineItem>,
+    query: String,
+    /// 絞り込んだ行と、選べる行の行番号。
+    rows: Vec<intel::OutlineRow>,
+    sel: usize,
+}
+
 /// 二度押しで確かめる操作。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Confirm {
@@ -210,12 +252,22 @@ pub struct EditorScreen {
     last_find: String,
     /// ステータスバーに出す知らせ（次の打鍵で消える）と、エラーかどうか。
     message: Option<(String, bool)>,
+    /// 知らせをステータスバーの右に出す（左のファイル名・行・桁と件数は残す。モック 13）。
+    message_right: bool,
     confirm: Option<Confirm>,
     mods: Mods,
     /// 次の描画でステータスバーの中身を作り直す。
     status_due: bool,
-    /// タブバーに出した内容（変わったときだけ作り直す）。
-    tabs_shown: Vec<(DocId, bool)>,
+    /// 単語補完の候補と小窓。
+    completion: Option<CompState>,
+    popup: CompletionPopup,
+    /// 小窓の下の行を描き直してから、小窓を置き直す。
+    popup_stale: bool,
+    /// アウトライン（開いているあいだは本文の全体を覆う）。
+    outline: Option<OutlineState>,
+    picker: PickerList,
+    /// タブバーに出した内容（変わったときだけ作り直す）: 文書・未保存・エラー。
+    tabs_shown: Vec<(DocId, bool, bool)>,
     tabs_dirty: bool,
     blinks_left: u32,
     cursor_on: bool,
@@ -244,9 +296,15 @@ impl EditorScreen {
             prompt: None,
             last_find: String::new(),
             message: None,
+            message_right: false,
             confirm: None,
             mods: Mods::NONE,
             status_due: true,
+            completion: None,
+            popup: CompletionPopup::new("Tab 確定  ↑↓ 選ぶ  Esc 閉じる"),
+            popup_stale: false,
+            outline: None,
+            picker: PickerList::new("アウトライン"),
             tabs_shown: Vec::new(),
             tabs_dirty: true,
             blinks_left: 0,
@@ -272,6 +330,8 @@ impl EditorScreen {
             self.tree_open = open;
             self.tree.invalidate();
             self.tabs_dirty = true;
+            self.completion = None;
+            self.popup.forget();
             if !open {
                 self.set_focus(Focus::Editor);
             }
@@ -297,6 +357,10 @@ impl EditorScreen {
     pub fn active_view(&self) -> Option<&EditorView> {
         self.tabs.get(self.active).map(|t| &t.view)
     }
+    /// 選択中の文書の番号。
+    pub fn active_doc_id(&self) -> Option<DocId> {
+        self.tabs.get(self.active).map(|t| t.id)
+    }
     /// 選択中の文書のパス。
     pub fn active_path(&self) -> Option<&Path> {
         self.tabs.get(self.active).and_then(|t| t.path.as_deref())
@@ -304,6 +368,18 @@ impl EditorScreen {
     /// ステータスバーに出ている知らせ。
     pub fn message(&self) -> Option<&str> {
         self.message.as_ref().map(|m| m.0.as_str())
+    }
+    /// 開いている補完の候補と、選んでいる位置（テスト用）。
+    pub fn completion(&self) -> Option<(Vec<String>, usize)> {
+        self.completion.as_ref().map(|c| (c.items.iter().map(|i| i.label.clone()).collect(), c.sel))
+    }
+    /// 開いているアウトラインの行（名前、親として残しただけの行か）と選んでいる位置（テスト用）。
+    pub fn outline_rows(&self) -> Option<(Vec<(String, bool)>, usize)> {
+        self.outline.as_ref().map(|o| (o.rows.iter().map(|r| (r.row.name.clone(), r.line.is_none())).collect(), o.sel))
+    }
+    /// 選択中の文書の診断（テスト用）。
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        self.tabs.get(self.active).map_or(&[], |t| &t.diags)
     }
 
     fn set_focus(&mut self, focus: Focus) {
@@ -321,7 +397,13 @@ impl EditorScreen {
 
     fn say(&mut self, text: impl Into<String>, error: bool) {
         self.message = Some((text.into(), error));
+        self.message_right = false;
         self.status_due = true;
+    }
+    /// 右に出す知らせ（構文チェックの結果）。
+    fn say_right(&mut self, text: impl Into<String>, error: bool) {
+        self.say(text, error);
+        self.message_right = true;
     }
 
     fn alloc_id(&mut self) -> DocId {
@@ -348,6 +430,9 @@ impl EditorScreen {
         self.empty_drawn = None;
         self.tabs_dirty = true;
         self.status_due = true;
+        // 別の文書の上に出ていた小窓は消す（ビューは全部描き直す）
+        self.completion = None;
+        self.popup.forget();
     }
 
     /// 読み込み済みの文書をタブに足して、選ぶ（render-test・計測・テスト用。実行中に
@@ -382,14 +467,15 @@ impl EditorScreen {
         cx.workers.batch.submit(move || {
             let result = match backend.load(&path, &CancelToken::never()) {
                 Ok(doc) => {
+                    let words = WordIndex::build(doc.as_lines(), &CancelToken::never()).unwrap_or_else(|_| WordIndex::new());
                     // 書き込み層に読んだ中身を知らせる（保存時の「変わっていなければ書かない」
                     // 「ほかのプログラムが変えた」の判定）。読んだ直後なのでページキャッシュから読める
                     if let (Some(note), Ok(bytes)) = (note, std::fs::read(&path)) {
                         note(&path, &bytes);
                     }
-                    Ok(doc)
+                    Ok((doc, words))
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(backend.empty()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((backend.empty(), WordIndex::new())),
                 Err(e) => Err(e.to_string()),
             };
             tx.send(AppEvent::Opened { doc: id, result });
@@ -447,11 +533,208 @@ impl EditorScreen {
             self.prompt_key(ev, cx);
             return;
         }
+        if self.outline.is_some() {
+            self.outline_key(ev);
+            return;
+        }
         let Some(cmd) = commands::lookup(ev) else { return };
         if ev.repeat && !cmd.repeatable() {
             return;
         }
+        if self.popup.drawn().is_some() {
+            // 小窓の下の行を描き直してから置き直す（カーソルも中身も変わりうる）
+            self.popup_stale = true;
+        }
+        if let Some(c) = self.completion.as_mut() {
+            match cmd {
+                Command::Indent => {
+                    self.accept_completion();
+                    return;
+                }
+                Command::Move { motion: m @ (Motion::Up | Motion::Down), select: false } => {
+                    let n = c.items.len();
+                    c.sel = if m == Motion::Up { (c.sel + n - 1) % n } else { (c.sel + 1) % n };
+                    return;
+                }
+                Command::Cancel => {
+                    self.completion = None;
+                    return;
+                }
+                _ => {}
+            }
+        }
         self.exec(cmd, cx);
+        // 単語を打っている間・消している間は候補を出し直す。ほかの操作では閉じる
+        match cmd {
+            Command::InsertChar(c) if c.is_alphanumeric() || c == '_' => self.update_completion(false),
+            Command::Backspace if self.completion.is_some() => self.update_completion(false),
+            Command::Complete => self.update_completion(true),
+            _ => self.completion = None,
+        }
+    }
+
+    // --- 単語補完（モック 12） ---
+
+    /// カーソルの前の単語から候補を作り直す。`manual`（Ctrl+Space）なら 1 文字からでも出し、
+    /// 候補が無ければそう知らせる。
+    fn update_completion(&mut self, manual: bool) {
+        self.completion = None;
+        if self.focus != Focus::Editor {
+            return;
+        }
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let (a, h) = tab.doc.selection();
+        if tab.loading || a != h {
+            return;
+        }
+        let Some(prefix) = zc_intel::prefix_at(tab.doc.as_lines(), h) else {
+            if manual {
+                self.say("補完: カーソルの前に単語が無い", false);
+            }
+            return;
+        };
+        if !manual && prefix.chars().count() < intel::AUTO_MIN_CHARS {
+            return;
+        }
+        let mut text = String::new();
+        tab.doc.line(h.line, &mut text);
+        // 単語の途中（カーソルの後ろにも単語の文字が続く）では自動で出さない
+        if !manual && text.chars().nth(h.col as usize).is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            return;
+        }
+        // 文字列・コメントの中では出さない
+        if let Some(hl) = tab.hl.as_ref() {
+            let mut spans = Vec::new();
+            hl.hl.spans(h.line, &text, &mut spans);
+            let byte = text.char_indices().nth(h.col as usize).map_or(text.len(), |(b, _)| b);
+            if intel::in_string_or_comment(&spans, byte) {
+                return;
+            }
+        }
+        let keywords = tab.lang.info().map_or(&[][..], |i| i.keywords);
+        let items = zc_intel::complete(&tab.words, keywords, &prefix, h, intel::MAX_ITEMS);
+        if items.is_empty() {
+            if manual {
+                self.say(format!("「{prefix}」の候補は無い"), false);
+            }
+            return;
+        }
+        self.completion = Some(CompState { items, sel: 0, prefix });
+    }
+
+    /// 選んでいる候補で、打っている単語を置き換える（1 回の取り消しで戻せる）。
+    fn accept_completion(&mut self) {
+        let Some(c) = self.completion.take() else { return };
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let Some(item) = c.items.get(c.sel) else { return };
+        let (_, h) = tab.doc.selection();
+        let start = Pos::new(h.line, h.col.saturating_sub(c.prefix.chars().count() as u32));
+        tab.doc.break_undo_group();
+        if let Some(ch) = tab.doc.replace_range(start, h, &item.label) {
+            tab.edited(ch);
+        }
+        tab.doc.break_undo_group();
+        tab.sync_cursor();
+    }
+
+    // --- アウトライン（モック 14） ---
+
+    fn open_outline(&mut self) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let Some(spec) = tab.lang.info().and_then(|i| i.outline.as_ref()) else {
+            let msg = format!("{} にはアウトラインが無い", tab.lang.name);
+            self.say(msg, false);
+            return;
+        };
+        let hl = tab.hl.as_ref().map(|h| &h.hl);
+        let items = intel::with_outline_rules(spec, |rules| {
+            zc_intel::outline(tab.doc.as_lines(), rules, &mut |l, text, out| {
+                out.clear();
+                if let Some(h) = hl {
+                    h.spans(l, text, out);
+                }
+            })
+        });
+        // カーソルのいる項目（カーソルより前で最後のもの）を選んでおく
+        let cur = tab.doc.selection().1.line;
+        let rows = intel::filter_outline(&items, "");
+        let sel = rows.iter().rposition(|r| r.line.is_some_and(|l| l <= cur)).unwrap_or(0);
+        let title = format!("アウトライン — {}", tab.title);
+        self.picker.set_title(&title);
+        self.picker.set_empty_text("項目が無い");
+        self.outline = Some(OutlineState { items, query: String::new(), rows, sel });
+        self.completion = None;
+        self.sync_picker();
+        self.picker.invalidate();
+        self.status_due = true;
+    }
+
+    fn close_outline(&mut self) {
+        self.outline = None;
+        self.tree.invalidate();
+        self.tabbar.invalidate();
+        self.empty_drawn = None;
+        if let Some(t) = self.tabs.get_mut(self.active) {
+            t.view.invalidate();
+        }
+        self.status_due = true;
+    }
+
+    fn sync_picker(&mut self) {
+        if let Some(o) = &self.outline {
+            self.picker.set(&o.query, o.rows.iter().map(|r| r.row.clone()).collect(), o.sel);
+        }
+    }
+
+    fn outline_key(&mut self, ev: &KeyEvent) {
+        self.status_due = true;
+        let Some(o) = self.outline.as_mut() else { return };
+        // 選べる行（親として残しただけの行は飛ばす）の間を動く
+        fn step(o: &OutlineState, dir: i32) -> usize {
+            let n = o.rows.len() as i32;
+            let mut i = o.sel as i32;
+            for _ in 0..n {
+                i = (i + dir).rem_euclid(n.max(1));
+                if o.rows[i as usize].line.is_some() {
+                    return i as usize;
+                }
+            }
+            o.sel
+        }
+        match ev.key {
+            Key::Esc => {
+                self.close_outline();
+                return;
+            }
+            Key::Enter => {
+                let line = o.rows.get(o.sel).and_then(|r| r.line);
+                self.close_outline();
+                if let (Some(line), Some(tab)) = (line, self.tabs.get_mut(self.active)) {
+                    let pos = Pos::new(line, 0);
+                    tab.doc.break_undo_group();
+                    tab.doc.set_selection(pos, pos);
+                    tab.sync_cursor();
+                }
+                return;
+            }
+            Key::Up if !o.rows.is_empty() => o.sel = step(o, -1),
+            Key::Down if !o.rows.is_empty() => o.sel = step(o, 1),
+            Key::Backspace => {
+                o.query.pop();
+                o.rows = intel::filter_outline(&o.items, &o.query);
+                o.sel = o.rows.iter().position(|r| r.line.is_some()).unwrap_or(0);
+            }
+            _ => {
+                let Some(c) = ev.text.filter(|c| !c.is_control()) else { return };
+                if ev.mods.ctrl() {
+                    return;
+                }
+                o.query.push(c);
+                o.rows = intel::filter_outline(&o.items, &o.query);
+                o.sel = o.rows.iter().position(|r| r.line.is_some()).unwrap_or(0);
+            }
+        }
+        self.sync_picker();
     }
 
     /// 操作を実行する。
@@ -514,6 +797,9 @@ impl EditorScreen {
                 self.set_focus(Focus::Editor);
             }
             Command::Save => self.save_active(cx),
+            // 候補は打鍵の処理の最後で出す（handle_key）
+            Command::Complete => {}
+            Command::ShowOutline if !self.tabs.is_empty() => self.open_outline(),
             Command::GotoLine | Command::Find if !self.tabs.is_empty() => {
                 let kind = if cmd == Command::Find { PromptKind::Find } else { PromptKind::GotoLine };
                 let text = if kind == PromptKind::Find { self.last_find.clone() } else { String::new() };
@@ -774,7 +1060,11 @@ impl EditorScreen {
     fn update_status(&mut self) {
         self.status_due = false;
         let mut bg = palette::STATUS;
-        if let Some(p) = &self.prompt {
+        if self.outline.is_some() {
+            self.status.set_left("アウトライン");
+            self.status.set_right("Enter 移動  Esc 閉じる");
+            self.status.set_chips(Vec::new());
+        } else if let Some(p) = &self.prompt {
             let label = match p.kind {
                 PromptKind::GotoLine => "行へ移動",
                 PromptKind::Find => "検索",
@@ -799,6 +1089,15 @@ impl EditorScreen {
                         ime: Some(ImeMode::Ascii),
                     };
                     st.apply(&mut self.status);
+                    if !t.diags.is_empty() {
+                        let left = format!("{}  ⊗ {}", self.status.left(), t.diags.len());
+                        self.status.set_left(&left);
+                    }
+                    // カーソルがエラーの行にあれば、そのメッセージを右に出す（モック 13）
+                    if let Some(d) = t.diag_at_cursor() {
+                        let right = format!("{} 行: {}", d.line + 1, d.message);
+                        self.status.set_right(&right);
+                    }
                 }
                 None => {
                     self.status.set_left("zcode");
@@ -807,7 +1106,11 @@ impl EditorScreen {
                 }
             }
             if let Some((m, error)) = &self.message {
-                self.status.set_left(m);
+                if self.message_right && !self.tabs.is_empty() {
+                    self.status.set_right(m);
+                } else {
+                    self.status.set_left(m);
+                }
                 if *error {
                     bg = STATUS_ERROR;
                 }
@@ -836,9 +1139,10 @@ impl Screen for EditorScreen {
             AppEvent::Opened { doc, result } => {
                 let Some(i) = self.tabs.iter().position(|t| t.id == doc) else { return };
                 match result {
-                    Ok(d) => {
+                    Ok((d, words)) => {
                         let t = &mut self.tabs[i];
                         t.doc = d;
+                        t.words = words;
                         t.loading = false;
                         t.detect_language();
                         t.view.invalidate();
@@ -860,6 +1164,14 @@ impl Screen for EditorScreen {
                         if t.doc.version() == version {
                             t.doc.mark_saved();
                         }
+                        // 保存した中身で構文チェック（batch で使い捨て。§10.2）
+                        if let (Some((cmd, pat)), Some(path)) = (t.lang.info().and_then(intel::check_command), t.path.clone()) {
+                            let tx = cx.results.clone();
+                            cx.workers.batch.submit(move || {
+                                let result = zc_intel::run_check(cmd, pat, &path, &CancelToken::never()).map_err(|e| e.to_string());
+                                tx.send(AppEvent::Checked { doc, result });
+                            });
+                        }
                         let title = t.title.clone();
                         let path = t.path.clone();
                         self.tree.refresh();
@@ -878,6 +1190,26 @@ impl Screen for EditorScreen {
                         let title = t.title.clone();
                         self.say(format!("{title} を保存できない: {e}"), true);
                     }
+                }
+            }
+            AppEvent::Checked { doc, result } => {
+                let Some(t) = self.tabs.iter_mut().find(|t| t.id == doc) else { return };
+                match result {
+                    Ok(diags) => {
+                        let first = diags.first().map(|d| format!("{} 行: {}", d.line + 1, d.message));
+                        let had = !t.diags.is_empty();
+                        t.diags = diags;
+                        t.view.set_marks(intel::marks_of(&t.diags));
+                        self.tabs_dirty = true;
+                        self.status_due = true;
+                        if let Some(m) = first {
+                            self.say_right(m, true);
+                        } else if had {
+                            self.say("構文エラーは無くなった", false);
+                        }
+                    }
+                    // チェックの道具が無い・時間切れ: 波線はそのまま、知らせるだけ
+                    Err(e) => self.say(format!("構文チェックできない: {e}"), false),
                 }
             }
             AppEvent::HighlightRest { doc, rest } => {
@@ -919,6 +1251,8 @@ impl Screen for EditorScreen {
         self.tabbar.invalidate();
         self.tree.invalidate();
         self.status.invalidate();
+        self.picker.invalidate();
+        self.popup.invalidate();
         self.empty_drawn = None;
         if let Some(t) = self.tabs.get_mut(self.active) {
             t.view.invalidate();
@@ -929,24 +1263,62 @@ impl Screen for EditorScreen {
         let regions = Regions::compute(self.tree_open, 0);
         let mut damage = Damage::none();
         // タブバー（未保存の印が変わったときも作り直す）
-        let changed = self.tabs_dirty || self.tabs.len() != self.tabs_shown.len() || self.tabs.iter().zip(&self.tabs_shown).any(|(t, s)| (t.id, t.doc.is_modified()) != *s);
+        let changed = self.tabs_dirty || self.tabs.len() != self.tabs_shown.len() || self.tabs.iter().zip(&self.tabs_shown).any(|(t, s)| (t.id, t.doc.is_modified(), t.has_error()) != *s);
         if changed {
             self.tabs_dirty = false;
-            self.tabs_shown = self.tabs.iter().map(|t| (t.id, t.doc.is_modified())).collect();
-            let tabs = self.tabs.iter().map(|t| Tab { doc: t.id, title: t.title.clone(), modified: t.doc.is_modified() }).collect();
+            self.tabs_shown = self.tabs.iter().map(|t| (t.id, t.doc.is_modified(), t.has_error())).collect();
+            let tabs = self.tabs.iter().map(|t| Tab { doc: t.id, title: t.title.clone(), modified: t.doc.is_modified(), error: t.has_error() }).collect();
             self.tabbar.set_tabs(tabs, self.active);
             self.tabbar.set_inset(if self.tree_open { SIDE_W } else { 0 });
             self.status_due = true;
         }
         damage |= self.tabbar.render(cx, regions.tabs);
+        if self.outline.is_some() {
+            // 本文（ツリーとエディタ）の全体を覆う（モック 14）
+            let body = Rect::new(0, regions.tabs.bottom() as i16, Rect::SCREEN.w, (regions.status.y as i32 - regions.tabs.bottom()) as u16);
+            damage |= self.picker.render(cx, body);
+            if self.status_due {
+                self.update_status();
+            }
+            damage |= self.status.render(cx, regions.status);
+            return damage;
+        }
         if self.tree_open {
             damage |= self.tree.render(cx, regions.side);
         }
         self.pump_highlight(None);
+        let want_popup = self.completion.is_some() && self.focus == Focus::Editor;
         match self.tabs.get_mut(self.active) {
             Some(t) => {
+                // 小窓を閉じる・置き直すときは、下にあった行を描き直させる
+                if let Some(old) = self.popup.drawn() {
+                    if !want_popup || std::mem::take(&mut self.popup_stale) {
+                        t.view.invalidate_rows(old.y as i32, old.bottom());
+                        self.popup.forget();
+                    }
+                }
                 let mut spans = TabSpans { custom: t.custom_spans.as_deref_mut(), hl: t.hl.as_ref().map(|h| &h.hl) };
-                damage |= t.view.render(cx, regions.editor, t.doc.as_lines(), &mut spans);
+                let view_damage = t.view.render(cx, regions.editor, t.doc.as_lines(), &mut spans);
+                damage |= view_damage;
+                if let (true, Some(c), Some(caret)) = (want_popup, self.completion.as_ref(), t.view.caret_rect()) {
+                    let items = c
+                        .items
+                        .iter()
+                        .map(|i| {
+                            let (tag, tag_color) = match i.kind {
+                                CompletionKind::Word => ("ab", palette::STATUS),
+                                CompletionKind::Keyword => ("kw", palette::CONTROL),
+                            };
+                            PopupItem { tag, tag_color, label: i.label.clone(), hit_chars: c.prefix.chars().count() }
+                        })
+                        .collect();
+                    self.popup.set(items, c.sel);
+                    let (_, h) = t.doc.selection();
+                    let word = Pos::new(h.line, h.col.saturating_sub(c.prefix.chars().count() as u32));
+                    let word_x = t.view.point_of(word).map_or(caret.x as i32, |r| r.x as i32);
+                    let rect = self.popup.place(cx, caret, word_x, regions.editor);
+                    damage |= self.popup.render_at(cx, rect, !view_damage.is_empty());
+                }
             }
             None => {
                 if self.empty_drawn != Some(regions.editor) {

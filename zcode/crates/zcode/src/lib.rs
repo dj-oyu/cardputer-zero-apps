@@ -12,6 +12,7 @@ pub mod doc;
 pub mod edbench;
 pub mod editor;
 pub mod fonttest;
+pub mod intel;
 pub mod keylog;
 pub mod keytest;
 pub mod launcher_config;

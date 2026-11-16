@@ -776,3 +776,19 @@ fn tab_without_selection_is_its_own_undo_group() {
     b.undo();
     assert_eq!(b.to_text(), "y    ");
 }
+
+#[test]
+fn replace_range_is_one_undo_step_back_to_the_caret() {
+    // 補完の確定: 打った "le" を "led" に置き換え、取り消すとカーソルだけの "le" に戻る
+    let mut b = Buffer::from_text("x = 1\nle");
+    b.set_selection(Selection::caret(p(1, 2)));
+    b.break_undo_group();
+    b.replace_range(p(1, 0), p(1, 2), "led").unwrap();
+    assert_eq!(lines(&b), ["x = 1", "led"]);
+    assert_eq!(b.selection(), Selection::caret(p(1, 3)));
+    b.undo().unwrap();
+    assert_eq!(lines(&b), ["x = 1", "le"]);
+    assert_eq!(b.selection(), Selection::caret(p(1, 2)));
+    b.redo().unwrap();
+    assert_eq!(lines(&b), ["x = 1", "led"]);
+}

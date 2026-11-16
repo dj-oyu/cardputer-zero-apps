@@ -37,6 +37,9 @@ pub trait TextDoc: LineSource {
     /// 選択範囲の文字列。
     fn selected_text(&self) -> String;
     fn insert(&mut self, text: &str) -> Option<LineChange>;
+    /// `start..end` を `text` に置き換える（取り消しの 1 単位。取り消すと置き換える前の
+    /// 選択に戻る）。カーソルは入れた文字列の末尾。
+    fn replace_range(&mut self, start: Pos, end: Pos, text: &str) -> Option<LineChange>;
     fn delete_backward(&mut self) -> Option<LineChange>;
     fn delete_forward(&mut self) -> Option<LineChange>;
     fn delete_lines(&mut self) -> Option<LineChange>;
@@ -95,6 +98,9 @@ impl TextDoc for zc_buffer::Buffer {
     }
     fn insert(&mut self, text: &str) -> Option<LineChange> {
         zc_buffer::Buffer::insert(self, text)
+    }
+    fn replace_range(&mut self, start: Pos, end: Pos, text: &str) -> Option<LineChange> {
+        zc_buffer::Buffer::replace_range(self, start, end, text)
     }
     fn delete_backward(&mut self) -> Option<LineChange> {
         zc_buffer::Buffer::delete_backward(self)
@@ -481,6 +487,14 @@ impl TextDoc for SimpleDoc {
         }
         let single = s == e && text.chars().count() == 1 && text != "\n";
         self.begin_edit(single);
+        Some(self.replace(s, e, text))
+    }
+    fn replace_range(&mut self, start: Pos, end: Pos, text: &str) -> Option<LineChange> {
+        let (s, e) = (self.clamp(start.min(end)), self.clamp(start.max(end)));
+        if text.is_empty() && s == e {
+            return None;
+        }
+        self.begin_edit(false);
         Some(self.replace(s, e, text))
     }
     fn delete_backward(&mut self) -> Option<LineChange> {
