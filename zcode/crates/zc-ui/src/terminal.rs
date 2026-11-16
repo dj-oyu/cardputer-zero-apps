@@ -171,8 +171,16 @@ impl TerminalPanel {
                 _ => None,
             };
             let now = PaintedRow { cells: cells[..cells.len().min(cols as usize)].to_vec(), caret, preedit };
-            if let Some((c, _, _)) = &now.preedit {
+            // 未確定を置く x と幅。右端からはみ出すなら、右端に収まるまで左へずらす
+            // （カーソルが行末に近いとき。左端より左へは出さない）
+            let pre_at = now.preedit.as_ref().map(|(c, s, _)| {
                 let x = body.x as i32 + 4 + *c as i32 * cell_w;
+                let w = cx.fonts.measure(s, &ts);
+                let right = row_rect.right() - 2;
+                let x = if x + w > right { (right - w).max(body.x as i32 + 4) } else { x };
+                (x, w)
+            });
+            if let Some((x, _)) = pre_at {
                 self.preedit_rect = Some(Rect::new(x as i16, y, 1, TERM_ROW_H));
             }
             if self.painted[r].as_ref() == Some(&now) {
@@ -209,9 +217,7 @@ impl TerminalPanel {
             }
             // SKK の未確定はカーソルの位置に重ね、カーソルはその後ろ（モック 7・8 と同じ見た目）
             let mut caret_x = caret.map(|c| x0 + c as i32 * cell_w);
-            if let Some((c, s, conv)) = &now.preedit {
-                let x = x0 + *c as i32 * cell_w;
-                let w = cx.fonts.measure(s, &ts);
+            if let (Some((_, s, conv)), Some((x, w))) = (&now.preedit, pre_at) {
                 let r = Rect::new(x as i16, y, w.max(0) as u16, TERM_ROW_H).intersect(&row_rect);
                 let bg = if *conv { palette::SELECTION } else { palette::BG };
                 cx.canvas.fill_rect(r, bg);
@@ -318,5 +324,28 @@ mod tests {
         t.cursor = Some((0, 0));
         let d = p.render_term(&mut cx, area, &t);
         assert_eq!(d.iter().count(), 2);
+    }
+
+    #[test]
+    fn preedit_near_the_right_edge_shifts_left() {
+        let Ok(mut fonts) = Fonts::load(&FontConfig::default(), RasterMode::Inline) else { return };
+        let (mut canvas, theme) = (Canvas::new(), Theme::dark_plus());
+        let mut cx = RenderCx::new(&mut canvas, &mut fonts, &theme);
+        let area = Rect::new(0, 80, 320, TERM_PANEL_H);
+        let (cols, _) = TerminalPanel::grid_size(&mut cx, area);
+        let mut p = TerminalPanel::new();
+        // カーソルが行末の 2 桁手前。長い未確定はそのまま置くと右端を越える
+        let t = Fake { rows: (0..6).map(|_| line("$")).collect(), cursor: Some((cols - 2, 0)) };
+        p.set_preedit(Some(("▼かーどぴゅーたー".into(), true)));
+        p.render_term(&mut cx, area, &t);
+        let r = p.preedit_rect().unwrap();
+        let w = cx.fonts.measure("▼かーどぴゅーたー", &TextStyle::mono(UI_PX));
+        assert!(r.x as i32 + w <= area.right() - 2, "{r:?} + {w}");
+        // 短い未確定はカーソルの位置のまま
+        let t = Fake { rows: (0..6).map(|_| line("$")).collect(), cursor: Some((2, 0)) };
+        p.set_preedit(Some(("▽か".into(), false)));
+        p.render_term(&mut cx, area, &t);
+        let cell = cx.metrics(&TextStyle::mono(UI_PX)).cell_w as i32;
+        assert_eq!(p.preedit_rect().unwrap().x as i32, 4 + 2 * cell);
     }
 }
