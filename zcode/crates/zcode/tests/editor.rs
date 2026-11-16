@@ -403,3 +403,44 @@ fn bench_screens_follow_the_real_path() {
         assert_eq!((s.scrolled, s.lines_painted), (-(CODE_LINE_H as i32), 2));
     }
 }
+
+/// 打鍵 1 回ぶんのメインの処理時間の目安（計測用。ふだんは走らせない）:
+/// `cargo test --release -p zcode --test editor -- --ignored --nocapture`
+///
+/// 開発機での値なので、実機の値は「全画面の描き直し」（段階 1 の実測: 600MHz で
+/// 約 400µs）との比で見積もる。実機での計測は `zcode --bench editor-type --stats`。
+#[test]
+#[ignore]
+fn perf_keystroke() {
+    use std::time::Instant;
+    let Some(mut g) = Gfx::new() else { return };
+    let mut lp = Loop::new();
+    let median = |v: &mut Vec<u128>| {
+        v.sort();
+        v[v.len() / 2]
+    };
+    for kind in [EdBenchKind::Type, EdBenchKind::Scroll] {
+        let mut b = EditorBench::new(kind, 0);
+        g.render(&mut b);
+        let (mut input, mut draw) = (Vec::new(), Vec::new());
+        for _ in 0..400 {
+            let t0 = Instant::now();
+            lp.with(|cx| b.step(cx));
+            let t1 = Instant::now();
+            g.render(&mut b);
+            input.push((t1 - t0).as_nanos());
+            draw.push(t1.elapsed().as_nanos());
+        }
+        eprintln!("{kind:?}: 打鍵の処理 p50 {} ns、描画 p50 {} ns", median(&mut input), median(&mut draw));
+    }
+    // 比べる相手: 段階 1 の「エディタ風の全画面を描き直す」
+    let ts = zc_font::TextStyle::mono(zc_ui::layout::CODE_PX);
+    let mut full = Vec::new();
+    for i in 0..400 {
+        let t = Instant::now();
+        let mut cx = RenderCx::new(&mut g.canvas, &mut g.fonts, &g.theme);
+        zcode::sample::draw_editor(&mut cx, zc_core::Rect::new(0, 13, 320, 146), &ts, CODE_LINE_H, i % 12);
+        full.push(t.elapsed().as_nanos());
+    }
+    eprintln!("全画面の描き直し（段階 1 の描き方）: p50 {} ns", median(&mut full));
+}
