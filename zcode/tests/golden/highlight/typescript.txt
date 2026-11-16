@@ -1,0 +1,109 @@
+# TypeScript (typescript) — zc-highlight の見本の正解。ZCODE_UPDATE_GOLDEN=1 で作り直す
+   1| // 見本: 型・ジェネリクスと比較、テンプレートの入れ子、正規表現と割り算
+    : comment "// 見本: 型・ジェネリクスと比較、テンプレートの入れ子、正規表現と割り算"
+   2| import type { Readable } from "node:stream";
+    : control "import" · punctuation "{" · type "Readable" · punctuation "}" · control "from" · string "\"node:stream\"" · punctuation ";"
+   3| import { readFile } from 'node:fs/promises';
+    : control "import" · punctuation "{" · punctuation "}" · control "from" · string "'node:fs/promises'" · punctuation ";"
+   4| 
+   5| /** 設定。@deprecated ではない */
+    : comment "/** 設定。" · keyword "@deprecated" · comment " ではない */"
+   6| export interface Options<T = string> extends Base {
+    : control "export" · keyword "interface" · type "Options" · operator "<" · type "T" · operator "=" · type "string" · operator ">" · keyword "extends" · type "Base" · punctuation "{"
+   7|   readonly name: string;
+    : keyword "readonly" · punctuation ":" · type "string" · punctuation ";"
+   8|   limit?: number;
+    : operator "?" · punctuation ":" · type "number" · punctuation ";"
+   9|   tags: Array<T> | null;
+    : punctuation ":" · type "Array" · operator "<" · type "T" · operator ">" · operator "|" · constant "null" · punctuation ";"
+  10|   onDone(result: Map<string, number[]>): void;
+    : function "onDone" · punctuation "(" · punctuation ":" · type "Map" · operator "<" · type "string" · punctuation "," · type "number" · punctuation "[]" · operator ">" · punctuation "):" · type "void" · punctuation ";"
+  11| }
+    : punctuation "}"
+  12| 
+  13| type Pair<K, V> = [key: K, value: V];
+    : keyword "type" · type "Pair" · operator "<" · type "K" · punctuation "," · type "V" · operator ">" · operator "=" · punctuation "[" · punctuation ":" · type "K" · punctuation "," · punctuation ":" · type "V" · punctuation "];"
+  14| export type Mode = 'fast' | "slow" | `x-${string}`;
+    : control "export" · keyword "type" · type "Mode" · operator "=" · string "'fast'" · operator "|" · string "\"slow\"" · operator "|" · string "`x-" · constant "${" · type "string" · constant "}" · string "`" · punctuation ";"
+  15| declare const VERSION: string;
+    : keyword "declare" · keyword "const" · constant "VERSION" · punctuation ":" · type "string" · punctuation ";"
+  16| const type = 1, from = type;
+    : keyword "const" · operator "=" · number "1" · punctuation "," · control "from" · operator "=" · punctuation ";"
+  17| 
+  18| enum Color { Red = 1, Green = 0x10, Blue = 1_0 }
+    : keyword "enum" · type "Color" · punctuation "{" · type "Red" · operator "=" · number "1" · punctuation "," · type "Green" · operator "=" · number "0x10" · punctuation "," · type "Blue" · operator "=" · number "1_0" · punctuation "}"
+  19| 
+  20| namespace Util {
+    : keyword "namespace" · type "Util" · punctuation "{"
+  21|   export const MAX_LEN = 100n;
+    : control "export" · keyword "const" · constant "MAX_LEN" · operator "=" · number "100n" · punctuation ";"
+  22| }
+    : punctuation "}"
+  23| 
+  24| abstract class Shape<T extends object> implements Options<T> {
+    : keyword "abstract" · keyword "class" · type "Shape" · operator "<" · type "T" · keyword "extends" · type "object" · operator ">" · keyword "implements" · type "Options" · operator "<" · type "T" · operator ">" · punctuation "{"
+  25|   private readonly #id: number = 0;
+    : keyword "private" · keyword "readonly" · variable "#id" · punctuation ":" · type "number" · operator "=" · number "0" · punctuation ";"
+  26|   protected static count = 0;
+    : keyword "protected" · keyword "static" · operator "=" · number "0" · punctuation ";"
+  27|   public tags: T[] = [];
+    : keyword "public" · punctuation ":" · type "T" · punctuation "[]" · operator "=" · punctuation "[];"
+  28|   abstract area(): number;
+    : keyword "abstract" · function "area" · punctuation "():" · type "number" · punctuation ";"
+  29| 
+  30|   constructor(public name: string, private limit?: number) {
+    : function "constructor" · punctuation "(" · keyword "public" · punctuation ":" · type "string" · punctuation "," · keyword "private" · operator "?" · punctuation ":" · type "number" · punctuation ")" · punctuation "{"
+  31|     super();
+    : constant "super" · punctuation "();"
+  32|   }
+    : punctuation "}"
+  33| 
+  34|   describe(this: Shape<T>): string {
+    : function "describe" · punctuation "(" · constant "this" · punctuation ":" · type "Shape" · operator "<" · type "T" · operator ">" · punctuation "):" · type "string" · punctuation "{"
+  35|     return `${this.name}:${this.area().toFixed(2)} ${this.tags.map((t) => `${String(t)}`).join(",")}`;
+    : control "return" · string "`" · constant "${this" · punctuation "." · constant "}" · string ":" · constant "${this" · punctuation "." · function "area" · punctuation "()." · function "toFixed" · punctuation "(" · number "2" · punctuation ")" · constant "}" · constant "${this" · punctuation "." · punctuation "." · function "map" · punctuation "((" · punctuation ")" · keyword "=>" · string "`" · constant "${" · function "String" · punctuation "(" · punctuation ")" · constant "}" · string "`" · punctuation ")." · function "join" · punctuation "(" · string "\",\"" · punctuation ")" · constant "}" · string "`" · punctuation ";"
+  36|   }
+    : punctuation "}"
+  37| }
+    : punctuation "}"
+  38| 
+  39| @Injectable({ providedIn: 'root' })
+    : attribute "@Injectable" · punctuation "({" · punctuation ":" · string "'root'" · punctuation "})"
+  40| export class Service {
+    : control "export" · keyword "class" · type "Service" · punctuation "{"
+  41|   async load<T>(path: string, fallback?: T): Promise<T | undefined> {
+    : keyword "async" · function "load" · operator "<" · type "T" · operator ">" · punctuation "(" · punctuation ":" · type "string" · punctuation "," · operator "?" · punctuation ":" · type "T" · punctuation "):" · type "Promise" · operator "<" · type "T" · operator "|" · constant "undefined" · operator ">" · punctuation "{"
+  42|     const text = (await readFile(path, "utf8")) as string;
+    : keyword "const" · operator "=" · punctuation "(" · control "await" · function "readFile" · punctuation "(" · punctuation "," · string "\"utf8\"" · punctuation "))" · control "as" · type "string" · punctuation ";"
+  43|     const parsed = JSON.parse(text) as unknown as T;
+    : keyword "const" · operator "=" · constant "JSON" · punctuation "." · function "parse" · punctuation "(" · punctuation ")" · control "as" · type "unknown" · control "as" · type "T" · punctuation ";"
+  44|     return parsed ?? fallback;
+    : control "return" · operator "??" · punctuation ";"
+  45|   }
+    : punctuation "}"
+  46| }
+    : punctuation "}"
+  47| 
+  48| function first<T>(xs: readonly T[]): T | undefined {
+    : keyword "function" · function "first" · operator "<" · type "T" · operator ">" · punctuation "(" · punctuation ":" · keyword "readonly" · type "T" · punctuation "[]):" · type "T" · operator "|" · constant "undefined" · punctuation "{"
+  49|   const n = xs.length, i = 0;
+    : keyword "const" · operator "=" · punctuation "." · punctuation "," · operator "=" · number "0" · punctuation ";"
+  50|   if (i < n && n > (i + 1)) return xs[i];
+    : control "if" · punctuation "(" · operator "<" · operator "&&" · operator ">" · punctuation "(" · operator "+" · number "1" · punctuation "))" · control "return" · punctuation "[" · punctuation "];"
+  51|   return undefined;
+    : control "return" · constant "undefined" · punctuation ";"
+  52| }
+    : punctuation "}"
+  53| 
+  54| const ratio = (a: number, b: number): number => a / b / 2;
+    : keyword "const" · operator "=" · punctuation "(" · punctuation ":" · type "number" · punctuation "," · punctuation ":" · type "number" · punctuation "):" · type "number" · keyword "=>" · operator "/" · operator "/" · number "2" · punctuation ";"
+  55| const ok = /^[a-z]+\/\d$/.test("a/1") && first<number>([1, 2]) !== void 0;
+    : keyword "const" · operator "=" · string "/^[a-z]+\\/\\d$/" · punctuation "." · function "test" · punctuation "(" · string "\"a/1\"" · punctuation ")" · operator "&&" · function "first" · operator "<" · type "number" · operator ">" · punctuation "([" · number "1" · punctuation "," · number "2" · punctuation "])" · operator "!==" · type "void" · number "0" · punctuation ";"
+  56| const cfg = { port: 8080, host: "0.0.0.0" } satisfies Record<string, unknown>;
+    : keyword "const" · operator "=" · punctuation "{" · punctuation ":" · number "8080" · punctuation "," · punctuation ":" · string "\"0.0.0.0\"" · punctuation "}" · keyword "satisfies" · type "Record" · operator "<" · type "string" · punctuation "," · type "unknown" · operator ">" · punctuation ";"
+  57| const keys = Object.keys(cfg) as Array<keyof typeof cfg>;
+    : keyword "const" · operator "=" · type "Object" · punctuation "." · function "keys" · punctuation "(" · punctuation ")" · control "as" · type "Array" · operator "<" · keyword "keyof" · keyword "typeof" · operator ">" · punctuation ";"
+  58| const el = new Set<string>();
+    : keyword "const" · operator "=" · keyword "new" · type "Set" · operator "<" · type "string" · operator ">" · punctuation "();"
+  59| let u: unknown = NaN, big: bigint = 10n, s: symbol = Symbol("s");
+    : keyword "let" · punctuation ":" · type "unknown" · operator "=" · constant "NaN" · punctuation "," · punctuation ":" · type "bigint" · operator "=" · number "10n" · punctuation "," · punctuation ":" · type "symbol" · operator "=" · function "Symbol" · punctuation "(" · string "\"s\"" · punctuation ");"
