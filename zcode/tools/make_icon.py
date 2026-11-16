@@ -6,10 +6,11 @@
 
 生成物なので git には入れない（ほかのアプリと同じ流儀）。
 
-見た目: Y2K 風のツヤのある、Mac 風ターミナルのウィンドウ。銀色のタイトルバーに
-赤・黄・緑の丸いボタン、黒い画面にうっすら走査線、燐光の緑で `</>` と
-`zcode▌`（ブロックカーソル）。全体に上半分の光沢。4 倍の大きさで描いてから縮小して
-縁をなめらかにする。
+見た目: Y2K 風のツヤのある、Mac 風ターミナルのウィンドウ。黒いガラスの本体（走査線は
+窓全体に通す）に、スモークガラスのタイトルバーを半透明で重ね、赤・黄・緑の丸い
+ボタンを置く。燐光の緑の `</>` は、まわりの走査線ごと魚眼で少し膨らませる。下に
+`zcode▌`（ブロックカーソル）。最後に窓全体へ 1 枚のガラスのツヤをかける（タイトルバー
+や札が最前面に浮かないように）。4 倍の大きさで描いてから縮小して縁をなめらかにする。
 """
 
 import os
@@ -125,6 +126,42 @@ def pill(img, box, top, bottom, radius):
     gloss(img, box, radius, strength=170)
 
 
+def bulge(img, center, radius, strength=0.4):
+    """center を中心に、半径 radius の円の中を膨らませる（魚眼）。
+    円の縁では歪みがゼロになるので、境目は出ない。strength は 0〜1。"""
+    import numpy as np
+
+    a = np.asarray(img).astype(np.float32)
+    h, w = a.shape[:2]
+    cx, cy = center
+    y0, y1 = max(cy - radius, 0), min(cy + radius, h)
+    x0, x1 = max(cx - radius, 0), min(cx + radius, w)
+    yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
+    dx, dy = xx - cx, yy - cy
+    r = np.sqrt(dx * dx + dy * dy) / radius
+    inside = r < 1.0
+    # 出力の半径 r に、元の半径 r' = r^(1+k) を対応させる（中心ほど拡大される）。
+    # 縁 (r=1) では r' = 1 なので、まわりとつながる
+    k = strength
+    scale = np.where(inside, np.power(np.maximum(r, 1e-6), k), 1.0)
+    sx = cx + dx * scale
+    sy = cy + dy * scale
+    # 双一次補間
+    sx0 = np.clip(np.floor(sx).astype(int), 0, w - 2)
+    sy0 = np.clip(np.floor(sy).astype(int), 0, h - 2)
+    fx = (sx - sx0)[..., None]
+    fy = (sy - sy0)[..., None]
+    p00 = a[sy0, sx0]
+    p01 = a[sy0, sx0 + 1]
+    p10 = a[sy0 + 1, sx0]
+    p11 = a[sy0 + 1, sx0 + 1]
+    out = (p00 * (1 - fx) * (1 - fy) + p01 * fx * (1 - fy) + p10 * (1 - fx) * fy + p11 * fx * fy)
+    region = a[y0:y1, x0:x1]
+    region[inside] = out[inside]
+    a[y0:y1, x0:x1] = region
+    return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), "RGBA")
+
+
 def make(dev: bool) -> Image.Image:
     img = Image.new("RGBA", (W, W), (0, 0, 0, 0))
     box = (3 * S, 3 * S, W - 4 * S, W - 4 * S)
@@ -143,50 +180,55 @@ def make(dev: bool) -> Image.Image:
     bar_h = 22 * S
     bar = (inner[0], inner[1], inner[2], inner[1] + bar_h)
     screen = (inner[0], bar[3], inner[2], inner[3])
+    imask = rounded_mask(img.size, inner, r_in)
 
-    # タイトルバー（銀、上の角だけ丸い）と、画面との境目の線
-    paste_grad(img, bar, BAR_TOP, BAR_BOTTOM,
-               rounded_mask(img.size, bar, r_in, corners=(True, True, False, False)))
-    ImageDraw.Draw(img).line((bar[0], bar[3] - S, bar[2], bar[3] - S), fill=(90, 92, 100, 255), width=S)
-
-    # 黒い画面（下の角だけ丸い）
-    smask = rounded_mask(img.size, screen, r_in, corners=(False, False, True, True))
-    paste_grad(img, screen, SCREEN_TOP, SCREEN_BOTTOM, smask)
-    # 走査線（うっすら）
+    # 本体: 黒いガラスを窓全体に敷き、走査線もタイトルバーの下まで通す
+    # （タイトルバーは、この上に重ねる半透明のガラスにする）
+    paste_grad(img, inner, SCREEN_TOP, SCREEN_BOTTOM, imask)
     scan = Image.new("RGBA", img.size, (0, 0, 0, 0))
     sd = ImageDraw.Draw(scan)
-    for y in range(screen[1], screen[3], 3 * S):
-        sd.line((screen[0], y, screen[2], y), fill=(0, 0, 0, 70), width=S)
-    scan.putalpha(ImageChops.multiply(scan.getchannel("A"), smask))
+    for y in range(inner[1], inner[3], 3 * S):
+        sd.line((inner[0], y, inner[2], y), fill=(0, 0, 0, 70), width=S)
+    scan.putalpha(ImageChops.multiply(scan.getchannel("A"), imask))
     img.alpha_composite(scan)
     # 画面の緑のにじみ（中央を少しだけ明るく）
+    smask = rounded_mask(img.size, screen, r_in, corners=(False, False, True, True))
     haze = Image.new("RGBA", img.size, (0, 0, 0, 0))
     ImageDraw.Draw(haze).ellipse((screen[0] + 8 * S, screen[1] + 6 * S, screen[2] - 8 * S, screen[3] - 4 * S),
-                                 fill=(30, 120, 60, 70))
+                                 fill=(30, 120, 60, 80))
     haze = haze.filter(ImageFilter.GaussianBlur(8 * S))
     haze.putalpha(ImageChops.multiply(haze.getchannel("A"), smask))
     img.alpha_composite(haze)
 
-    # 信号機（閉じる / しまう / 広げる）
-    cy = bar[1] + bar_h // 2
-    for i, (top, bottom) in enumerate(LIGHTS):
-        glossy_dot(img, bar[0] + 11 * S + i * 12 * S, cy, 4 * S, top, bottom)
-
-    # 中央の </> と、プロンプト風の名前
+    # 中央の </>（光ごと描いてから、まわりを魚眼で膨らませる。走査線も一緒にたわむ）
     d = ImageDraw.Draw(img)
     big = ImageFont.truetype(FONT, 30 * S)
     t = "</>"
     tw = d.textlength(t, font=big)
-    glow_text(img, ((W - tw) / 2, screen[1] + 5 * S), t, big, GREEN_TOP, GREEN_BOTTOM, GREEN_DARK,
+    ty = screen[1] + 5 * S
+    glow_text(img, ((W - tw) / 2, ty), t, big, GREEN_TOP, GREEN_BOTTOM, GREEN_DARK,
               glow=GREEN_GLOW, stroke=2 * S)
+    lens_c = (W // 2, int(ty + 21 * S))
+    lens_r = 31 * S
+    img = bulge(img, lens_c, lens_r, strength=0.42)
+    # レンズの照り（ごく薄い円弧の光）
+    lens = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ImageDraw.Draw(lens).arc((lens_c[0] - lens_r + 6 * S, lens_c[1] - lens_r + 4 * S,
+                              lens_c[0] + lens_r - 6 * S, lens_c[1] + lens_r - 8 * S),
+                             start=200, end=320, fill=WHITE + (70,), width=2 * S)
+    lens = lens.filter(ImageFilter.GaussianBlur(S))
+    lens.putalpha(ImageChops.multiply(lens.getchannel("A"), smask))
+    img.alpha_composite(lens)
+
+    # 下の名前とブロックカーソル（歪ませない）
+    d = ImageDraw.Draw(img)
     small = ImageFont.truetype(FONT, 14 * S)
     n = "zcode"
     nw = d.textlength(n, font=small)
     cursor_w = 7 * S
     nx = (W - nw - cursor_w - S) / 2
-    ny = screen[1] + 43 * S
+    ny = screen[1] + 45 * S
     glow_text(img, (nx, ny), n, small, GREEN_TOP, GREEN_BOTTOM, GREEN_DARK, glow=GREEN_GLOW)
-    # ブロックカーソル
     cx0 = int(nx + nw + S)
     cur = (cx0, int(ny + 3 * S), cx0 + cursor_w, int(ny + 17 * S))
     gl = Image.new("RGBA", img.size, (0, 0, 0, 0))
@@ -194,12 +236,28 @@ def make(dev: bool) -> Image.Image:
     img.alpha_composite(gl.filter(ImageFilter.GaussianBlur(2 * S)))
     paste_grad(img, cur, GREEN_TOP, GREEN_BOTTOM, rounded_mask(img.size, cur, S))
 
-    # 全体の光沢と、内側の光の縁
-    gloss(img, inner, r_in, strength=150)
-    ImageDraw.Draw(img).rounded_rectangle(inner, radius=r_in, outline=(255, 255, 255, 80), width=S)
+    # タイトルバー: 本体の上に重ねるスモークガラス（下の黒と走査線が透ける）
+    bmask = rounded_mask(img.size, bar, r_in, corners=(True, True, False, False))
+    glass = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glass)
+    for i in range(bar_h):
+        a = int(150 - 95 * i / bar_h)          # 上ほど白っぽい
+        c = int(235 - 70 * i / bar_h)
+        gd.line((bar[0], bar[1] + i, bar[2], bar[1] + i), fill=(c, c, c + 8, a))
+    glass.putalpha(ImageChops.multiply(glass.getchannel("A"), bmask))
+    img.alpha_composite(glass)
+    # 境目は硬い線にせず、上に細い光、下にごく薄い影
+    edge = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ed = ImageDraw.Draw(edge)
+    ed.line((bar[0], bar[3] - S, bar[2], bar[3] - S), fill=(0, 0, 0, 90), width=S)
+    ed.line((bar[0], bar[3], bar[2], bar[3]), fill=(255, 255, 255, 30), width=S)
+    edge.putalpha(ImageChops.multiply(edge.getchannel("A"), imask))
+    img.alpha_composite(edge)
 
-    # きらめき
-    sparkle(img, screen[2] - 9 * S, screen[1] + 9 * S, 5 * S)
+    # 信号機（閉じる / しまう / 広げる）
+    cy = bar[1] + bar_h // 2
+    for i, (top, bottom) in enumerate(LIGHTS):
+        glossy_dot(img, bar[0] + 11 * S + i * 12 * S, cy, 4 * S, top, bottom)
 
     if dev:
         b = (bar[2] - 34 * S, bar[1] + 5 * S, bar[2] - 6 * S, bar[3] - 5 * S)
@@ -208,6 +266,11 @@ def make(dev: bool) -> Image.Image:
         tw = d.textlength("DEV", font=tag)
         glow_text(img, (b[0] + (b[2] - b[0] - tw) / 2, b[1] + 0.5 * S), "DEV", tag,
                   WHITE, (255, 230, 240), (90, 10, 40), stroke=S)
+
+    # 最後に、窓全体のツヤ（タイトルバーも札も、同じ 1 枚のガラスの下に入る）
+    gloss(img, inner, r_in, strength=135)
+    ImageDraw.Draw(img).rounded_rectangle(inner, radius=r_in, outline=(255, 255, 255, 70), width=S)
+    sparkle(img, screen[2] - 9 * S, screen[1] + 9 * S, 5 * S)
 
     return img.resize((SIZE, SIZE), Image.LANCZOS)
 
