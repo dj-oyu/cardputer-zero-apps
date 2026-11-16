@@ -523,6 +523,8 @@ dependencies = [
 name = "zc-skk"
 version = "0.1.0"
 dependencies = [
+ "encoding_rs",
+ "libc",
  "zc-core",
 ]
 
