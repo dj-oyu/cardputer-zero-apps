@@ -47,6 +47,8 @@ impl TermScreen for zc_term::Term {
 struct PaintedRow {
     cells: Vec<Cell>,
     caret: Option<u16>,
+    /// この行のカーソルの位置に重ねた未確定（SKK）。
+    preedit: Option<(u16, String, bool)>,
 }
 
 /// ターミナルのパネル。
@@ -60,6 +62,10 @@ pub struct TerminalPanel {
     last_area: Rect,
     focused: bool,
     cursor_on: bool,
+    /// SKK の未確定（▽ / ▼ の記号込み）と、変換中（▼）か。カーソルの位置に重ねて描く。
+    preedit: Option<(String, bool)>,
+    /// 前回描いた未確定の始まり（候補一覧を置く位置）。
+    preedit_rect: Option<Rect>,
 }
 
 impl Default for TerminalPanel {
@@ -70,7 +76,17 @@ impl Default for TerminalPanel {
 
 impl TerminalPanel {
     pub fn new() -> TerminalPanel {
-        TerminalPanel { title: String::new(), hint: String::new(), head_dirty: true, painted: Vec::new(), last_area: Rect::default(), focused: true, cursor_on: true }
+        TerminalPanel {
+            title: String::new(),
+            hint: String::new(),
+            head_dirty: true,
+            painted: Vec::new(),
+            last_area: Rect::default(),
+            focused: true,
+            cursor_on: true,
+            preedit: None,
+            preedit_rect: None,
+        }
     }
 
     /// 見出しの文字。
@@ -88,6 +104,14 @@ impl TerminalPanel {
     /// カーソルの点滅の点いている側か。
     pub fn set_cursor_on(&mut self, on: bool) {
         self.cursor_on = on;
+    }
+    /// SKK の未確定（モック 7・8 と同じ見た目で、端末のカーソルの位置に重ねる。端末には送らない）。
+    pub fn set_preedit(&mut self, preedit: Option<(String, bool)>) {
+        self.preedit = preedit;
+    }
+    /// 前回描いた未確定の始まり（幅 1）。候補一覧はここに合わせて置く。
+    pub fn preedit_rect(&self) -> Option<Rect> {
+        self.preedit_rect
     }
 
     /// `area`（パネル全体）に入る端末の大きさ（桁, 行）。
@@ -130,7 +154,9 @@ impl TerminalPanel {
         let body = Rect::new(area.x, area.y + 1 + TERM_HEAD_H as i16, area.w, area.h.saturating_sub(1 + TERM_HEAD_H));
         let cell_w = cx.metrics(&ts).cell_w.max(1) as i32;
         let (cols, rows) = term.size();
-        let cursor = if self.focused && self.cursor_on { term.cursor() } else { None };
+        let at = if self.focused { term.cursor() } else { None };
+        let cursor = at.filter(|_| self.cursor_on);
+        self.preedit_rect = None;
         let visible = (body.h / TERM_ROW_H) as usize;
         if self.painted.len() != visible {
             self.painted = vec![None; visible];
@@ -140,7 +166,15 @@ impl TerminalPanel {
             let row_rect = Rect::new(body.x, y, body.w, TERM_ROW_H);
             let cells: &[Cell] = if (r as u16) < rows { term.row(r as u16) } else { &[] };
             let caret = cursor.filter(|c| c.1 as usize == r).map(|c| c.0);
-            let now = PaintedRow { cells: cells[..cells.len().min(cols as usize)].to_vec(), caret };
+            let preedit = match (at, &self.preedit) {
+                (Some((c, row)), Some((s, conv))) if row as usize == r => Some((c, s.clone(), *conv)),
+                _ => None,
+            };
+            let now = PaintedRow { cells: cells[..cells.len().min(cols as usize)].to_vec(), caret, preedit };
+            if let Some((c, _, _)) = &now.preedit {
+                let x = body.x as i32 + 4 + *c as i32 * cell_w;
+                self.preedit_rect = Some(Rect::new(x as i16, y, 1, TERM_ROW_H));
+            }
             if self.painted[r].as_ref() == Some(&now) {
                 continue;
             }
@@ -173,8 +207,19 @@ impl TerminalPanel {
                     cx.canvas.hline(x, y as i32 + TERM_ROW_H as i32 - 2, w as u16, fg);
                 }
             }
-            if let Some(c) = caret {
-                let x = x0 + c as i32 * cell_w;
+            // SKK の未確定はカーソルの位置に重ね、カーソルはその後ろ（モック 7・8 と同じ見た目）
+            let mut caret_x = caret.map(|c| x0 + c as i32 * cell_w);
+            if let Some((c, s, conv)) = &now.preedit {
+                let x = x0 + *c as i32 * cell_w;
+                let w = cx.fonts.measure(s, &ts);
+                let r = Rect::new(x as i16, y, w.max(0) as u16, TERM_ROW_H).intersect(&row_rect);
+                let bg = if *conv { palette::SELECTION } else { palette::BG };
+                cx.canvas.fill_rect(r, bg);
+                cx.text(x, base, s, &ts, Color::WHITE, bg, row_rect);
+                cx.canvas.hline(x, y as i32 + TERM_ROW_H as i32 - 1, r.w, Color::WHITE);
+                caret_x = caret_x.map(|_| x + w);
+            }
+            if let Some(x) = caret_x {
                 cx.canvas.fill_rect(Rect::new(x as i16, y + 1, 1, TERM_ROW_H - 2).intersect(&row_rect), palette::CURSOR);
             }
             damage.add(row_rect.rows(), Priority::Edit);

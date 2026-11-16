@@ -297,3 +297,46 @@ fn skk_kana_goes_into_the_terminal() {
     lp.until(&mut ed, "かなの echo", |ed| ed.terminal_text().is_some_and(|rows| rows.iter().any(|r| r == "にほんご")));
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// ターミナルでの SKK の変換（未確定はカーソルの所、候補一覧はその上下）。シェルのプロンプトが
+/// 環境で変わるので正解画像にはしない。`-- --ignored` で `out/terminal-skk.png` に描く。
+#[test]
+#[ignore]
+fn terminal_skk_picture() {
+    if !has_tools() {
+        return;
+    }
+    let dict = std::env::temp_dir().join(format!("zcode-term-skk-dict-{}", std::process::id()));
+    let (bytes, _, _) = encoding_rs::EUC_JP.encode(";; okuri-ari entries.
+;; okuri-nasi entries.
+てんめつ /点滅/明滅;めいめつ/天滅/
+");
+    fs::write(&dict, &bytes).unwrap();
+    std::env::set_var("ZCODE_SKK_DICT", &dict);
+    let dir = fixed_dir("zcode-golden-skk");
+    fs::write(dir.join("a.py"), "x = 1
+").unwrap();
+    let mut lp = Loop::new();
+    let mut ed = open(&mut lp, &dir, "a.py");
+    lp.keys(&mut ed, &[f12()]);
+    lp.until(&mut ed, "プロンプト", |ed| ed.terminal_text().is_some_and(|r| r.iter().any(|l| l.ends_with('$') || l.ends_with('#'))));
+    lp.type_str(&mut ed, "echo ");
+    lp.keys(&mut ed, &[ctrl('j')]);
+    // 実機の Shift のタップと同じ形（字は大文字、キーは小文字）
+    let mut t = KeyEvent::char('T');
+    t.key = Key::Char('t');
+    t.mods = Mods::SHIFT;
+    lp.keys(&mut ed, &[t]);
+    for c in "enmetu ".chars() {
+        lp.keys(&mut ed, &[KeyEvent::char(c)]);
+        lp.workers.assist.wait_idle();
+        lp.pump(&mut ed);
+    }
+    lp.until(&mut ed, "echo の表示", |ed| ed.terminal_text().is_some_and(|r| r.iter().any(|l| l.contains("echo"))));
+    assert_eq!(ed.skk_state().2, ["点滅", "明滅", "天滅"]);
+    if let Some(canvas) = render_to(&mut ed) {
+        let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../out/terminal-skk.png");
+        zc_display::png::write_png(&canvas, &out).unwrap();
+    }
+    let _ = fs::remove_dir_all(&dir);
+}

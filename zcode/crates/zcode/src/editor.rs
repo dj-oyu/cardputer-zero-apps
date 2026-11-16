@@ -1587,10 +1587,6 @@ impl EditorScreen {
             // 辞書登録中（モック 9）・ターミナルでの未確定
             if self.skk.registration().is_some() {
                 self.status.set_left("Enter 登録  Ctrl+G やめる");
-            } else if self.focus == Focus::Terminal {
-                if let Some((s, _)) = preedit_text(self.skk.preedit()) {
-                    self.status.set_left(&s);
-                }
             }
             // 実行中は橙、終わったら終了コード（モック 3・4）
             if let Some(run) = self.term.as_ref().and_then(|t| t.running.as_ref()) {
@@ -1811,7 +1807,9 @@ impl Screen for EditorScreen {
             self.cand_popup.forget();
             self.status_due = true;
         }
-        let cand = if self.focus == Focus::Editor || (self.focus == Focus::Terminal && mini_area.is_some()) { self.skk_candidate_rows() } else { None };
+        let cand = if matches!(self.focus, Focus::Editor | Focus::Terminal) { self.skk_candidate_rows() } else { None };
+        // ターミナルに入力があるときの候補一覧は、パネルを描いた後に、端末のカーソルの所へ置く
+        let cand_on_panel = self.focus == Focus::Terminal && mini_area.is_none() && self.panel_open;
         let mut damage = Damage::none();
         // タブバー（未保存の印が変わったときも作り直す）
         let changed = self.tabs_dirty || self.tabs.len() != self.tabs_shown.len() || self.tabs.iter().zip(&self.tabs_shown).any(|(t, s)| (t.id, t.doc.is_modified(), t.has_error()) != *s);
@@ -1851,6 +1849,9 @@ impl Screen for EditorScreen {
                 if let Some(old) = self.cand_popup.drawn() {
                     if cand.is_none() || std::mem::take(&mut self.cand_stale) {
                         t.view.invalidate_rows(old.y as i32, old.bottom());
+                        if old.bottom() > regions.panel.y as i32 {
+                            self.panel.invalidate();
+                        }
                         self.cand_popup.forget();
                     }
                 }
@@ -1884,7 +1885,7 @@ impl Screen for EditorScreen {
                     damage |= self.popup.render_at(cx, rect, !view_damage.is_empty());
                 }
                 // SKK の候補一覧（モック 8）。▼ の語の下（登録欄の中の変換なら登録欄の上）
-                if let Some((rows, sel, page)) = cand {
+                if let (false, Some((rows, sel, page))) = (cand_on_panel, cand.clone()) {
                     let anchor = match mini_area {
                         Some(m) => Some(Rect::new(m.x + 4, m.y, 1, m.h)),
                         None => t.view.preedit_rect().or_else(|| t.view.caret_rect()),
@@ -1917,14 +1918,32 @@ impl Screen for EditorScreen {
             self.panel.set_header(&title, hint);
             let grid = TerminalPanel::grid_size(cx, regions.panel);
             self.term_grid = grid;
+            // SKK の未確定はカーソルの位置に重ねて見せる（端末にはまだ送っていない）
+            let pre = if self.focus == Focus::Terminal && mini_area.is_none() { preedit_text(self.skk.preedit()) } else { None };
+            self.panel.set_preedit(pre);
+            let mut panel_damage = Damage::none();
             match self.term.as_mut() {
                 Some(t) => {
                     if t.term.size() != grid {
                         let _ = t.term.resize(grid.0, grid.1);
                     }
-                    damage |= self.panel.render_term(cx, regions.panel, &t.term);
+                    panel_damage |= self.panel.render_term(cx, regions.panel, &t.term);
                 }
-                None => damage |= self.panel.render_empty(cx, regions.panel, ""),
+                None => panel_damage |= self.panel.render_empty(cx, regions.panel, ""),
+            }
+            damage |= panel_damage;
+            // 候補一覧（ターミナル）。パネルの行が描き直されたら重ね直す
+            if let (true, Some((rows, sel, page)), Some(anchor)) = (cand_on_panel, cand.clone(), self.panel.preedit_rect()) {
+                // 文書が無いとき（上の描き直しを通らない）は、ここで置き直しの前にパネルを描き直させる
+                if self.tabs.is_empty() && self.cand_popup.drawn().is_some() && std::mem::take(&mut self.cand_stale) {
+                    self.panel.invalidate();
+                    self.empty_drawn = None;
+                    self.cand_popup.forget();
+                }
+                self.cand_popup.set(rows, sel, &page);
+                let bounds = Rect::new(0, regions.tabs.bottom() as i16, Rect::SCREEN.w, (regions.status.y as i32 - regions.tabs.bottom()) as u16);
+                let rect = self.cand_popup.place(cx, anchor, bounds);
+                damage |= self.cand_popup.render_at(cx, rect, !panel_damage.is_empty());
             }
         }
         // 辞書登録欄（モック 9）
