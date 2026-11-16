@@ -45,6 +45,9 @@ pub trait Saver {
     }
     /// 文書を閉じた。
     fn closed(&mut self, _path: &Path) {}
+    /// SKK の個人辞書（`~/.skk-uim-jisyo`）に学習した語を書き戻す（storage スレッドで、
+    /// uim-skk と同じロックを取って読み直し、重ねて丸ごと書く）。
+    fn skk_sync(&mut self, _changes: Vec<zc_store::DictChange>, _cx: &mut LoopCx<'_>) {}
 }
 
 /// `zc-store` の storage サービスに依頼する。
@@ -100,5 +103,11 @@ impl Saver for StoreSaver {
 
     fn closed(&mut self, path: &Path) {
         self.svc.forget(path);
+    }
+
+    fn skk_sync(&mut self, changes: Vec<zc_store::DictChange>, cx: &mut LoopCx<'_>) {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return };
+        let dict = zc_store::SkkUserDict::uim_default(&home);
+        zc_store::submit(&cx.workers.storage, &self.svc, StoreRequest::SkkSync { dict, changes }, cx.results.clone(), wrap);
     }
 }

@@ -276,3 +276,24 @@ if __name__ == '__main__':
     }
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn skk_kana_goes_into_the_terminal() {
+    if !has_tools() {
+        return;
+    }
+    let dir = tmp_dir("skk");
+    fs::write(dir.join("a.py"), "x = 1
+").unwrap();
+    let mut lp = Loop::new();
+    let mut ed = open(&mut lp, &dir, "a.py");
+    lp.keys(&mut ed, &[f12()]);
+    lp.type_str(&mut ed, "echo ");
+    // かなモードで打った字は確定するたびに端末へ。l で英数に戻して Enter
+    lp.keys(&mut ed, &[ctrl('j')]);
+    lp.type_str(&mut ed, "nihongo");
+    lp.keys(&mut ed, &[KeyEvent::char('l')]);
+    lp.keys(&mut ed, &[KeyEvent::new(Key::Enter, Mods::NONE)]);
+    lp.until(&mut ed, "かなの echo", |ed| ed.terminal_text().is_some_and(|rows| rows.iter().any(|r| r == "にほんご")));
+    let _ = fs::remove_dir_all(&dir);
+}

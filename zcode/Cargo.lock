@@ -566,6 +566,7 @@ dependencies = [
 name = "zcode"
 version = "0.1.0"
 dependencies = [
+ "encoding_rs",
  "libc",
  "zc-buffer",
  "zc-core",
@@ -574,6 +575,7 @@ dependencies = [
  "zc-highlight",
  "zc-input",
  "zc-intel",
+ "zc-skk",
  "zc-store",
  "zc-term",
  "zc-ui",
