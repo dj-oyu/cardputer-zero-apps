@@ -3,11 +3,8 @@
 //! 本物の受付をループバックに立てて、WebSocket の相手を演じる。実行の口（[`Runner`]）だけ
 //! 偽物。
 //!
-//! **どれも `#[ignore]`**: 受付は `zc-wire` の WebSocket の枠・Upgrade（課題 W1）、メッセージの
-//! 読み取り・目録・ID（課題 W2）、中身の置き場（課題 B2）を通るので、それらの中身が
-//! `todo!()` の間は走らない。3 つが入ったら `#[ignore]` を外す（試験の中身は変えなくてよい
-//! はず。相手の役も `zc-wire` の公開の関数だけで書いてある）。それまでは
-//! `cargo test -p zc-buildd --test protocol -- --ignored` で回せる。
+//! 受付は本物の `zc-wire`（課題 W1・W2）と中身の置き場（課題 B2）を通る。相手の役も
+//! `zc-wire` の公開の関数だけで書いてある。
 
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
@@ -447,7 +444,7 @@ fn done_of(evs: &[Ev]) -> Status {
 // ───────────── HTTP の口 ─────────────
 
 #[test]
-#[ignore = "W1・W2・B2 の中身が入ってから外す"]
+
 fn healthz_status_and_other_paths() {
     let sv = Server::start("http");
     assert_eq!(http_get(sv.addr(), "/healthz"), (200, "ok".to_string()));
@@ -471,7 +468,7 @@ fn healthz_status_and_other_paths() {
 }
 
 #[test]
-#[ignore = "W1・W2・B2 の中身が入ってから外す"]
+
 fn upgrade_needs_the_right_path_and_subprotocol() {
     let sv = Server::start("upgrade");
     // サブプロトコルなしの Upgrade は断る。
@@ -490,7 +487,7 @@ fn upgrade_needs_the_right_path_and_subprotocol() {
 // ───────────── ひととおり ─────────────
 
 #[test]
-#[ignore = "W1・W2・B2 の中身が入ってから外す"]
+
 fn full_flow_then_cached_and_no_reupload() {
     let sv = Server::start("flow");
     let mut c = Client::open(sv.addr());
@@ -534,7 +531,7 @@ fn full_flow_then_cached_and_no_reupload() {
 // ───────────── 約束の間違い ─────────────
 
 #[test]
-#[ignore = "W1・W2・B2 の中身が入ってから外す"]
+
 fn hello_rules() {
     let sv = Server::start("hello");
     // 版が違う。
@@ -567,7 +564,7 @@ fn hello_rules() {
 }
 
 #[test]
-#[ignore = "W1・W2・B2 の中身が入ってから外す"]
+
 fn job_errors_are_per_job_and_keep_the_connection() {
     let sv = Server::start("joberr");
     let mut c = Client::open(sv.addr());
@@ -594,7 +591,7 @@ fn job_errors_are_per_job_and_keep_the_connection() {
 }
 
 #[test]
-#[ignore = "W1・W2・B2 の中身が入ってから外す"]
+
 fn bad_manifests_are_refused() {
     let sv = Server::start("manifest");
     let e = |p: &str, s: u64| FileEntry { path: p.into(), size: s, sha256: "ab".repeat(32), exec: false };
@@ -619,7 +616,7 @@ fn bad_manifests_are_refused() {
 }
 
 #[test]
-#[ignore = "W1・W2・B2 の中身が入ってから外す"]
+
 fn bad_blobs_are_refused() {
     let sv = Server::start("blob");
     let need = |c: &mut Client, t: &Tree| {
@@ -668,7 +665,7 @@ fn bad_blobs_are_refused() {
 // ───────────── 切れても続く・attach・cancel ─────────────
 
 #[test]
-#[ignore = "W1・W2・B2 の中身が入ってから外す"]
+
 fn job_survives_disconnect_and_attach_sends_only_the_rest() {
     let sv = Server::start("attach");
     let t = project("fn main() {} // WAIT\n");
@@ -709,7 +706,7 @@ fn job_survives_disconnect_and_attach_sends_only_the_rest() {
 }
 
 #[test]
-#[ignore = "W1・W2・B2 の中身が入ってから外す"]
+
 fn attach_while_running_streams_the_rest_live() {
     let sv = Server::start("live");
     let t = project("fn main() {} // WAIT\n");
@@ -729,7 +726,7 @@ fn attach_while_running_streams_the_rest_live() {
 }
 
 #[test]
-#[ignore = "W1・W2・B2 の中身が入ってから外す"]
+
 fn cancel_ends_the_job_for_every_connection() {
     let sv = Server::start("cancel");
     let t = project("fn main() {}\n");
@@ -759,7 +756,7 @@ fn cancel_ends_the_job_for_every_connection() {
 }
 
 #[test]
-#[ignore = "W1・W2・B2 の中身が入ってから外す"]
+
 fn two_connections_watch_the_same_job_and_a_repeat_does_not_duplicate() {
     let sv = Server::start("two");
     let t = project("fn main() {} // WAIT\n");
@@ -786,7 +783,7 @@ fn two_connections_watch_the_same_job_and_a_repeat_does_not_duplicate() {
 // ───────────── 遅い相手 ─────────────
 
 #[test]
-#[ignore = "W1・W2・B2 の中身が入ってから外す"]
+
 fn slow_client_is_dropped_but_the_job_goes_on() {
     let sv = Server::start("slow");
     let t = project("fn main() {} // FLOOD WAIT\n");
@@ -828,7 +825,7 @@ fn slow_client_is_dropped_but_the_job_goes_on() {
 // ───────────── 止める ─────────────
 
 #[test]
-#[ignore = "W1・W2・B2 の中身が入ってから外す"]
+
 fn dropping_the_handle_closes_connections_and_stops_jobs() {
     let sv = Server::start("stop");
     let t = project("fn main() {}\n");
