@@ -1,0 +1,10 @@
+[package]
+name = "zc-buffer"
+description = "zcode のテキストバッファ (rope)・カーソル/選択・undo・変更通知"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zc-core.workspace = true

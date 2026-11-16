@@ -1,0 +1,10 @@
+[package]
+name = "zc-markdown"
+description = "zcode のMarkdown の解析とライブプレビューの行レイアウト"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zc-core.workspace = true
