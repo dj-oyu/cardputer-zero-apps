@@ -6,8 +6,10 @@ Linux マシン）向けに自作した APPLaunch アプリの monorepo。
 | ディレクトリ | 内容 |
 |---|---|
 | `qrreader/` | QRコードリーダー（本体液晶版）。バースト積算・静止画シャッター・距離ガイダンス搭載 |
-| `bt-tether/` | iPhone との Bluetooth テザリングアプリ（計画中） |
+| `bt-tether/` | iPhone との Bluetooth テザリングアプリ |
 | `common/` | 本体 LCD アプリ共通の UI 部品 `zero_ui.py`（fb0 描画、キー入力、パネル等） |
+| `zcode/` | VS Code 風のコードエディタ（Rust、設計済み・実装前）。設計・実測値・UI モック・ベンチマーク |
+| `container/` | 開発コンテナ（.deb のビルド、描画確認、Rust の aarch64 クロスビルド。Windows では WSL コンテナー） |
 
 ## 方針
 

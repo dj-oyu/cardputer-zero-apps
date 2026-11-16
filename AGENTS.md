@@ -23,6 +23,7 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
 | `qrreader/` | QR コードリーダー（カメラ＋液晶） |
 | `bt-tether/` | iPhone との Bluetooth PAN テザリング |
 | `common/` | 液晶アプリ共通の UI 土台 `zero_ui.py` |
+| `zcode/` | VS Code 風コードエディタ（Rust、計画中） |
 | `container/` | 開発コンテナ（Dockerfile と Windows 用ラッパー `dev.ps1`） |
 
 新しいアプリは `<app>/` を切り、既存アプリと同じ形
@@ -54,10 +55,65 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
   ライブラリ（zxing-cpp、libcamera、numpy）に寄せ、Python は配管に徹する
 - 重い純 Python 処理は GIL でアプリ全体を固める（ハードウェア
   ウォッチドッグで再起動した実例あり）→ 別プロセスに分離する
-- 液晶は 320×170 RGB565 の `/dev/fb0`、キーは tca8418c
-  （`/dev/input/event3`）。描画・入力は `common/zero_ui.py` を使う
+- ストレージは SD カード（ext4、noatime）。書き込み寿命・fsync の遅延のばらつき・
+  電池切れによる電源断を前提にする: 頻繁に変わるものは RAM（`/run/user/1000` の
+  tmpfs）に置き、SD には間隔をあけてまとめて書く。内容が変わらなければ書かない。
+  再計算できるキャッシュは SD に書かない。保存は一時ファイル → fsync → rename。
+  ログは SD に書かない。スワップは zram（SD ではない）
+- 実行時に重い変換が要るデータ（正規表現など）は、ビルド時に実行できる形へ
+  変換して埋め込む（例: zcode のハイライト。実行時コンパイルは A53 で数百 ms）
+- 液晶は 320×170 RGB565 の `/dev/fb0`（stride 640、リトルエンディアン）、
+  キーは tca8418c（`/dev/input/event3`）。Python アプリの描画・入力は
+  `common/zero_ui.py` を使う。fb0 は video、event3 は input グループで
+  `jimmy` から読み書きできる
+- 液晶の実体は ST7789V（SPI、spi-max-frequency 60MHz）で、ドライバは
+  panel-mipi-dbi-spi（DRM の fbdev エミュレーション、card1-SPI-1）。fb0 への
+  書き込みは遅延 I/O でまとめて SPI 転送される（変更されたページを含む
+  1 つの行範囲、横は全幅。1 ページ 4KB ≒ 6.4 行）。全画面 108,800 バイトは
+  60MHz でも理論値で約 15ms
+- 書いただけだと転送開始まで中央値 30ms・最大 56ms（約 50ms 周期）。書いた直後に
+  **`fsync(fb0)` すると約 5ms（1 行）〜8ms（全画面）で転送が始まる**（2026-11-16
+  実測。SPI の統計 `/sys/class/spi_master/spi0/statistics/bytes_tx` で計測）。
+  打鍵に反応するアプリは描いたら fsync する
+- APPLaunch はランチャー表示中も常に再描画している（SPI 約 35 万バイト/秒、CPU 約 9%）。
+  labwc が使うのは HDMI 側の card0 で、液晶（card1）には触らない
+- 2026-11-16 計測（デスクトップ常駐時）: OS から見えるメモリ 352MB のうち
+  available は約 74MB。スワップは zram（約 352MB、すでに約 140MB 使用）。
+  CPU は ondemand ガバナで 600MHz〜1GHz。温度は約 56℃、スロットリング無し
+- fb0 を mmap するときは長さ（320*170*2）を明示する。文字デバイスは
+  ファイルサイズが 0 と報告されるので、省略すると 0 バイトのマップになる
 - 文字は必ず CJK フォント（`zero_ui.font()`）。PIL のデフォルト
-  フォントは日本語が豆腐になる
+  フォントは日本語が豆腐になる。等幅は DejaVu Sans Mono / Noto Sans Mono CJK
+  （NotoSansCJK-*.ttc 内）が実機にある
+
+## キーボード（tca8418c ドライバ、デバイスツリーから読んだもの）
+
+- Shift / Sym / Fn は押しっぱなしでも、1 回タップ（次の 1 キーだけ）でも、
+  2 回タップ（ロック）でも効く。ドライバが `linux,keymap`（通常）/
+  `keymap1`（Sym）/ `keymap2`（Fn）を切り替えてキーコードを送る
+- 通常レイヤー: 数字は 2〜0 が最上段、1 は最下段。Ctrl / Alt / Esc / Tab /
+  Enter / BackSpace / Space あり
+- Fn レイヤー: F1〜F12、Del、矢印（←↓→ と ↑）、Home / End / PgUp / PgDn / Ins、
+  音量
+- Sym レイヤー: `] ; ' \` \\ , . /` と `[` は通常のキーコード。残りは
+  テンキー系（KP0〜9、KP*、KP-、KP+、KP.）や NumLock / ScrollLock、
+  かな系（KEY_KATAKANA など）のコードで届く。**刻印との対応は実機で押して
+  確かめるまで未確定**（KEY_MINUS / KEY_EQUAL はどのレイヤーにも無い）
+- **キーリピートが無い**（デバイスの EV ビットに EV_REP が無い。EV=13）。
+  長押しで連続入力したいアプリは、押下・離上を見て自前でリピートする
+- Python の `zero_ui.KeyReader` は押下コードしか返さない（モディファイアの
+  状態は持たない）
+
+## Rust アプリ
+
+- 開発コンテナに rustup の stable と aarch64 クロスリンカが入っている。
+  `cargo build --release --target aarch64-unknown-linux-gnu` で作ったバイナリは
+  実機（trixie の glibc）でそのまま動く（2026-11-16 確認）
+- ビルド成果物は `CARGO_TARGET_DIR=/cargo-target`（名前付きボリューム
+  `cz-cargo-target`）に出る。リポジトリの中には出ない。.deb は build.sh が
+  そこから拾う
+- 依存は C ライブラリを要求しない pure Rust の crate を優先する
+  （クロスビルドで C の依存を足すと aarch64 用の開発パッケージが要る）
 
 ## 進め方
 
