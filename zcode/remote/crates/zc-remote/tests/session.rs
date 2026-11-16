@@ -1,12 +1,9 @@
 //! 会話の状態機械の受け入れ試験（課題 D2）。台本の形: 入力を 1 つ与えるたびに、出てきた
 //! 「やってほしいこと」の列を確かめる。ソケットも時計も使わない。
-//!
-//! `zc-wire` の中身が入るまでは `src/session.rs` の中の試験として動かしている
-//! （`tests/inproc/fake_wire.rs` を参照）。公開の形しか使っていない。
 
-use super::wire::msg::{encode, ArtifactKind, BinHeader, BinKind, ClientMsg, Diag, ErrorCode, FileDiags, FileEntry, JobOpts, Kind, Lang, ServerMsg, Severity, Status};
-use super::wire::tree::{job_id, Manifest};
-use super::{Action, Event, JobRequest, Outcome, Session, Ticket};
+use zc_wire::msg::{encode, ArtifactKind, BinHeader, BinKind, ClientMsg, Diag, ErrorCode, FileDiags, FileEntry, JobOpts, Kind, Lang, ServerMsg, Severity, Status};
+use zc_wire::tree::{job_id, Manifest};
+use zc_remote::session::{Action, Event, JobRequest, Outcome, Session, Ticket};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
@@ -38,7 +35,7 @@ fn text(m: &ClientMsg) -> Action {
 }
 
 fn hello() -> Action {
-    text(&ClientMsg::Hello { v: 1, client: crate::CLIENT_NAME.into() })
+    text(&ClientMsg::Hello { v: 1, client: zc_remote::CLIENT_NAME.into() })
 }
 
 fn manifest(m: &Manifest) -> Action {

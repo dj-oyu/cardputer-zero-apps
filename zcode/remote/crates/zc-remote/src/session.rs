@@ -47,14 +47,6 @@
 //!   知らせない（知らせると、失敗が 1 回余分に数えられる）。つなぎ直しに失敗したら
 //!   `on_closed` を呼ぶ
 
-// `zc-wire` の中身（課題 W1 / W2）が入るまでの間、試験のときだけ同じ形の代わりに差し替える。
-// 統合したら、この 6 行を `use zc_wire as wire;` にして `tests/inproc/fake_wire.rs` を消す。
-#[cfg(test)]
-#[path = "../tests/inproc/fake_wire.rs"]
-mod fake_wire;
-#[cfg(test)]
-use fake_wire as wire;
-#[cfg(not(test))]
 use zc_wire as wire;
 
 use std::collections::{HashMap, VecDeque};
@@ -885,8 +877,4 @@ impl Default for Session {
     }
 }
 
-// 受け入れ試験（課題 D2）。台本（入力の列 → 期待する出力の列）の形。公開の形しか使って
-// いないので、`zc-wire` の中身が入ったら tests/session.rs へそのまま移せる。
-#[cfg(test)]
-#[path = "../tests/inproc/session.rs"]
-mod tests;
+// 受け入れ試験（課題 D2）は tests/session.rs（台本の形: 入力の列 → 期待する出力の列）。

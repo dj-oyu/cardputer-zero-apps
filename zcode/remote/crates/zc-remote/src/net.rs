@@ -58,14 +58,6 @@
 //! - 読むのは、TLS では rustls の `read_tls`（1 回 4KB 前後）→ 16KB の作業用バッファ →
 //!   枠の復号。ヒープの確保は rustls の中（レコードごと）だけ
 
-// `zc-wire` の中身（課題 W1）が入るまでの間、試験のときだけ同じ形の代わりに差し替える。
-// 統合したら、この 6 行を `use zc_wire as wire;` にして `tests/inproc/fake_wire.rs` を消す。
-#[cfg(test)]
-#[path = "../tests/inproc/fake_wire.rs"]
-mod fake_wire;
-#[cfg(test)]
-use fake_wire as wire;
-#[cfg(not(test))]
 use zc_wire as wire;
 
 use crate::auth::{AuthError, Credential};
@@ -623,6 +615,8 @@ pub struct Dial {
 }
 
 /// [`Dial::advance`] の結果。
+// `Open` は接続 1 本につき 1 回、受け取ってすぐ中身を取り出す（箱に入れても得が無い）。
+#[allow(clippy::large_enum_variant)]
 pub enum DialStep {
     /// まだ途中。
     Pending,
@@ -1121,11 +1115,17 @@ mod tests {
     }
 }
 
-// 受け入れ試験（課題 D1。docs/stage3-design.md §14 の表）: ループバックの受付（TLS なし）と
-// 試験用の TLS サーバ（rustls のサーバ側 + tests/data/ の証明書）に対して、
-// つなぐ → Upgrade → 往復、途中で切る、黙る、302 / 403 / 429、期限切れ・未来の証明書、
-// AES-GCM しか出さないサーバ（つながらないこと）、再開、少しずつしか書けないソケット。
-// `zc-wire` の中身が入るまでは、ここ（crate の中の試験）として動かす。
+// 受け入れ試験（課題 D1。docs/stage3-design.md §14 の表）は tests/net.rs（公開の形だけを使う）。
+// 中の関数が要るもの（名前の引き方の差し替え・経路の表・TLS の失敗の読み分け）だけ、
+// ここから読み込んで crate の中の試験として動かす。道具（tests/support/）は共用。
+#[cfg(test)]
+mod api {
+    pub use super::*;
+    pub use crate::auth::*;
+}
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod support;
 #[cfg(test)]
 #[path = "../tests/inproc/net.rs"]
 mod inproc;
