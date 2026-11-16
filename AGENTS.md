@@ -51,6 +51,11 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
 - 改行は `.gitattributes` で LF 固定。CRLF の sh / postinst / sudoers は壊れる
 - リリースはアプリごとのタグ（例: `qrreader-v3.5.1`）。`.deb` は
   そのタグの GitHub Release に添付
+- CI（`.github/workflows/ci.yml`）は PR と main への push で、**変更のあったアプリだけ**を
+  開発コンテナの中で試す（qrreader: 自己テスト・描画・.deb、bt-tether: 描画・.deb と
+  sudoers の権限、zcode: cargo test・描画の正解画像・aarch64 ビルド）。`common/` は
+  qrreader と bt-tether、`container/` と `.github/` は全部を試す対象にする。新しい
+  アプリを足したら、ここにジョブと判定を足す
 - コミットメッセージは `<app> v<version>: <要約>` の形
   （例: `bt-tether v0.2: IPv4 via dhcpcd`）
 
