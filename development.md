@@ -139,3 +139,53 @@ QR Reader の実装から、本体 LCD アプリの土台（fb0 描画、
 - 「効くはず」で配布せず、効果を A/B で実測してから入れる。
   原因の帰属は、構図を固定した対照実験ができるまで保留する
 - 不具合の報告があったら、新機能より先に直してから出す
+
+## 参考リンク
+
+### 公式・ハードウェア
+
+- [CardputerZero ドキュメント (M5Stack)](https://docs.m5stack.com/en/CardputerZero)
+  — 本体仕様、Cap の着脱は電源 OFF で行うことなどの注意、
+  回路図への入口
+- [CardputerZero GitHub 組織](https://github.com/CardputerZero)
+  — 公式アプリ（ランチャー、Cap 系アプリなど）と
+  アプリ開発テンプレートのソース
+- [Raspberry Pi Compute Module Zero データシート](https://pip-assets.raspberrypi.com/categories/1286-raspberry-pi-compute-module-zero/documents/RP-009251-DS-3-cm0-datasheet.pdf)
+  — CM0 (RP3A0) の一次情報
+
+### Cap のチップ
+
+- [CC1101 データシート (TI)](https://www.ti.com/lit/ds/symlink/cc1101.pdf)
+  — レジスタ表と SPI プロトコル。VERSION レジスタの読みが
+  生存確認に使える
+- [ST25R3916 製品ページ (ST)](https://www.st.com/en/nfc/st25r3916.html)
+  — Cap CC1101 の NFC フロントエンド
+
+### カメラ
+
+- [Picamera2 マニュアル (Raspberry Pi)](https://pip-assets.raspberrypi.com/categories/810-raspberry-pi-global-shutter-camera/documents/RP-008156-DS-3-picamera2-manual.pdf)
+  — ストリーム構成、センサモード、Transform の仕様
+- [picamera2 ソース](https://github.com/raspberrypi/picamera2)
+- [libcamera](https://libcamera.org/)
+  — picamera2 の土台。CMA バッファ確保の挙動はここが決める
+
+### QR デコード
+
+- [zxing-cpp](https://github.com/zxing-cpp/zxing-cpp)
+  — デコードエンジン本体。Python バインディング経由で使う
+
+### Bluetooth / ネットワーク
+
+- [BlueZ](https://github.com/bluez/bluez)
+  — `doc/` に D-Bus API の定義（Network1、Agent1、
+  NetworkServer1 など）。BT Tether の実装はここが正本
+- [NetworkManager D-Bus API リファレンス](https://networkmanager.dev/docs/api/latest/)
+  — NM が bnep をどう扱うかの確認に
+- [dhcpcd](https://github.com/NetworkConfiguration/dhcpcd)
+  — bnep の IPv4 取得に使う DHCP クライアント
+
+### 音声
+
+- [VOICEVOX エンジン](https://github.com/VOICEVOX/voicevox_engine)
+  — HTTP API（`/audio_query`、`/streaming_synthesis`）の仕様。
+  Zero へ音声を流す側の実装で参照する
