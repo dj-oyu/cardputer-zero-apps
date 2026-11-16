@@ -1,5 +1,5 @@
-//! zcode 本体（design.md §4）。イベントループ・スレッド構成・コマンド表と、
-//! 段階 1 の画面（キー確認・フォント比較・計測）。
+//! zcode 本体（design.md §4）。イベントループ・スレッド構成・コマンド表、エディタ画面
+//! （[`editor`]）と、段階 1 の画面（キー確認・フォント比較・計測）。
 //!
 //! 実行ファイル（`main.rs`）は引数を読んで [`app::run`] に画面を渡すだけ。
 //! 画面の描画は実機なしで試せる（[`render_screen`]、`tests/render.rs`）。
@@ -8,11 +8,15 @@ pub mod app;
 pub mod bench;
 pub mod commands;
 pub mod crash;
+pub mod doc;
+pub mod edbench;
+pub mod editor;
 pub mod fonttest;
 pub mod keylog;
 pub mod keytest;
 pub mod launcher_config;
 pub mod sample;
+pub mod save;
 pub mod stats;
 
 use zc_core::{Canvas, Theme};

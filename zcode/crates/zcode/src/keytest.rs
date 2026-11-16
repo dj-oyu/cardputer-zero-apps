@@ -515,7 +515,7 @@ impl Screen for KeyTest {
     }
 
     fn on_event(&mut self, ev: AppEvent, cx: &mut LoopCx<'_>) {
-        let AppEvent::Flushed(rec) = ev;
+        let AppEvent::Flushed(rec) = ev else { return };
         let mut filled = false;
         for r in self.rows.iter_mut() {
             if r.t_fsync_us.is_none() && r.frame.is_some_and(|f| f <= rec.seq) {
