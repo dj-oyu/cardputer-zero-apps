@@ -1,0 +1,224 @@
+# シェル（sh / bash）。色の付け方は VS Code の Dark+（shellscript）に寄せてある。
+#
+# 限界（DFA で書けないもの）:
+# - ヒアドキュメントの終端は後方参照が要るので、「大文字・数字・_ だけの行」を終端とみなす
+#   近似（<<EOF / <<'EOF' / <<-EOF）。小文字の終端語（<<end）は対応しない
+# - コマンド名の色は [words] の組み込み語だけ（行の最初の語かどうかは見ない）
+# - ${var:-$(cmd)} のような入れ子は、${...} を 1 つの変数として塗る（中は見ない）
+
+name = "Shell"
+extensions = ["sh", "bash"]
+filenames = [".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".bash_aliases", ".profile", ".zshrc"]
+first_line = '^#!.*\b(ba)?sh'
+line_comment = "#"
+indent = "    "
+run = "bash {file}"
+# bash -n の出力: `ファイル: line 5: 構文エラー...`（桁は無いので空の捕獲で 2 を飛ばす）
+check = "bash -n {file}"
+check_pattern = 'line (\d+)(): (.*)'
+keywords = [
+    "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac",
+    "in", "function", "select", "time", "local", "declare", "readonly", "export", "unset",
+    "echo", "printf", "read", "cd", "pwd", "test", "set", "shift", "source", "exit", "return",
+    "trap", "eval", "exec", "break", "continue", "true", "false",
+]
+
+[outline]
+items = { function = "function" }
+indent_width = 4
+
+[variables]
+ident = '[A-Za-z_][A-Za-z0-9_]*'
+
+[words]
+control = [
+    "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac",
+    "in", "select", "time", "break", "continue", "return", "exit",
+]
+keyword = ["function", "local", "declare", "typeset", "readonly", "export", "unset"]
+function = [
+    "echo", "printf", "read", "cd", "pwd", "test", "set", "shift", "source", "trap", "eval", "exec",
+    "alias", "unalias", "getopts", "wait", "kill", "type", "command", "builtin", "mapfile",
+    "true", "false", ".", ":",
+]
+
+[word_push]
+function = "funcname"
+
+[default_token]
+dq = "string"
+sq = "string"
+ansi = "string"
+heredoc = "string"
+
+[[contexts.main]]
+include = "cmd"
+
+# ---- コマンド ----
+
+[[contexts.cmd]]
+match = '#.*'
+token = "comment"
+# ヒアドキュメント: <<EOF と <<-'EOF'。同じ行の残りは普通に塗り、次の行から本文
+[[contexts.cmd]]
+match = '''<<-?[ \t]*["']?[A-Z_][A-Z0-9_]*["']?'''
+token = "operator"
+push = ["heredoc", "heredoc_head"]
+[[contexts.cmd]]
+match = '"'
+token = "string"
+push = "dq"
+[[contexts.cmd]]
+match = "'"
+token = "string"
+push = "sq"
+[[contexts.cmd]]
+match = '\$"'
+token = "string"
+push = "dq"
+[[contexts.cmd]]
+match = "\\$'"
+token = "string"
+push = "ansi"
+[[contexts.cmd]]
+match = '`'
+token = "punctuation"
+push = "backtick"
+[[contexts.cmd]]
+include = "dollar"
+# name() { ... }
+[[contexts.cmd]]
+match = '{{ident}}'
+followed_by = '[ \t]*\(\)'
+token = "function"
+# name=value / name+=value
+[[contexts.cmd]]
+match = '{{ident}}'
+followed_by = '\+?='
+token = "variable"
+[[contexts.cmd]]
+match = '[0-9]+'
+followed_by = '[ \t\n;&|)<>]'
+token = "number"
+# 語（コマンド・引数・フラグ）。組み込みとキーワードは [words] で引く
+[[contexts.cmd]]
+match = '''[A-Za-z0-9_./~+:@%,*?^{{nonascii}}-][^ \t\n"'$`;&|()<>\\{}={{nonascii}}]*'''
+token = "text"
+words = true
+[[contexts.cmd]]
+match = '\\(?:.|\n)'
+token = "escape"
+[[contexts.cmd]]
+match = '\+?='
+token = "operator"
+[[contexts.cmd]]
+match = '[<>&|!]+'
+token = "operator"
+[[contexts.cmd]]
+match = '[;()\[\]{}]+'
+token = "punctuation"
+[[contexts.cmd]]
+match = '[ \t]+'
+token = "text"
+
+# function name
+[[contexts.funcname]]
+match = '[ \t]+'
+token = "text"
+[[contexts.funcname]]
+match = '[^ \t\n(){};&|<>]+'
+token = "function"
+pop = true
+[[contexts.funcname]]
+match = ''
+pop = true
+
+# ---- $ の展開（コマンドの中と二重引用符の中で共通） ----
+
+[[contexts.dollar]]
+match = '\$\('
+token = "punctuation"
+push = "cmdsub"
+[[contexts.dollar]]
+match = '\$\{[^}\n]*\}'
+token = "variable"
+[[contexts.dollar]]
+match = '\$[A-Za-z_][A-Za-z0-9_]*'
+token = "variable"
+[[contexts.dollar]]
+match = '\$[0-9@*#?$!-]'
+token = "variable"
+
+# $( ... )  と  $(( ... ))
+[[contexts.cmdsub]]
+match = '\)'
+token = "punctuation"
+pop = true
+[[contexts.cmdsub]]
+match = '\('
+token = "punctuation"
+push = "cmdsub"
+[[contexts.cmdsub]]
+include = "cmd"
+
+[[contexts.backtick]]
+match = '`'
+token = "punctuation"
+pop = true
+[[contexts.backtick]]
+include = "cmd"
+
+# ---- 文字列 ----
+
+[[contexts.dq]]
+match = '"'
+pop = true
+[[contexts.dq]]
+match = '\\[$`"\\\n]'
+token = "escape"
+[[contexts.dq]]
+match = '`'
+token = "punctuation"
+push = "backtick"
+[[contexts.dq]]
+match = '[^"\\$`]+|\\'
+[[contexts.dq]]
+include = "dollar"
+
+[[contexts.sq]]
+match = "'"
+pop = true
+[[contexts.sq]]
+match = "[^']+"
+
+# $'...'（ANSI-C 引用）はバックスラッシュのエスケープが効く
+[[contexts.ansi]]
+match = "'"
+pop = true
+[[contexts.ansi]]
+match = '\\(?:[xX][0-9a-fA-F]{1,2}|[0-7]{1,3}|.)'
+token = "escape"
+[[contexts.ansi]]
+match = '''[^'\\]+'''
+
+# ---- ヒアドキュメント ----
+
+# <<EOF と同じ行の残り。行末で本文へ移る
+[[contexts.heredoc_head]]
+match = '\n'
+pop = true
+[[contexts.heredoc_head]]
+include = "cmd"
+
+# 本文。終端（大文字などだけの行）で終わる
+[[contexts.heredoc]]
+match = '^[ \t]*[A-Z_][A-Z0-9_]*\n'
+token = "operator"
+pop = true
+[[contexts.heredoc]]
+match = '\\[$`\\]'
+token = "escape"
+[[contexts.heredoc]]
+match = '[^\n$\\]+|\\|\n'
+[[contexts.heredoc]]
+include = "dollar"

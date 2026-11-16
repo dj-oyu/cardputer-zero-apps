@@ -1,0 +1,96 @@
+# C (c) — zc-highlight の見本の正解。ZCODE_UPDATE_GOLDEN=1 で作り直す
+   1| /* 見本: プリプロセッサ・型・文字列・数 */
+    : comment "/* 見本: プリプロセッサ・型・文字列・数 */"
+   2| #include <stdio.h>
+    : control "#include" · string "<stdio.h>"
+   3| #include "util.h"
+    : control "#include" · string "\"util.h\""
+   4| #define MAX_ITEMS 64
+    : control "#define" · constant "MAX_ITEMS" · number "64"
+   5| #define SQUARE(x) ((x) * (x)) /* 継続行 */ \
+    : control "#define" · function "SQUARE" · punctuation "(" · punctuation ")" · punctuation "((" · punctuation ")" · operator "*" · punctuation "(" · punctuation "))" · comment "/* 継続行 */" · punctuation "\\"
+   6|     + 0
+    : operator "+" · number "0"
+   7| #ifdef DEBUG
+    : control "#ifdef" · constant "DEBUG"
+   8| #  define LOG(fmt, ...) fprintf(stderr, fmt, __VA_ARGS__)
+    : control "#  define" · function "LOG" · punctuation "(" · punctuation "," · punctuation "...)" · function "fprintf" · punctuation "(" · constant "stderr" · punctuation "," · punctuation "," · punctuation ")"
+   9| #endif
+    : control "#endif"
+  10| 
+  11| typedef struct Node {
+    : keyword "typedef" · keyword "struct" · type "Node" · punctuation "{"
+  12|     int value;
+    : type "int" · punctuation ";"
+  13|     struct Node *next;
+    : keyword "struct" · type "Node" · operator "*" · punctuation ";"
+  14| } Node;
+    : punctuation "}" · type "Node" · punctuation ";"
+  15| 
+  16| typedef unsigned long long u64_t;
+    : keyword "typedef" · type "unsigned" · type "long" · type "long" · type "u64_t" · punctuation ";"
+  17| 
+  18| static const char *names[] = { "alpha", "beta\n", L"wide" };
+    : keyword "static" · keyword "const" · type "char" · operator "*" · punctuation "[]" · operator "=" · punctuation "{" · string "\"alpha\"" · punctuation "," · string "\"beta" · escape "\\n" · string "\"" · punctuation "," · string "L\"wide\"" · punctuation "};"
+  19| 
+  20| // 行コメント
+    : comment "// 行コメント"
+  21| int sum(const int *items, size_t n)
+    : type "int" · function "sum" · punctuation "(" · keyword "const" · type "int" · operator "*" · punctuation "," · type "size_t" · punctuation ")"
+  22| {
+    : punctuation "{"
+  23|     int total = 0;
+    : type "int" · operator "=" · number "0" · punctuation ";"
+  24|     for (size_t i = 0; i < n; i++) {
+    : control "for" · punctuation "(" · type "size_t" · operator "=" · number "0" · punctuation ";" · operator "<" · punctuation ";" · operator "++" · punctuation ")" · punctuation "{"
+  25|         total += items[i];
+    : operator "+=" · punctuation "[" · punctuation "];"
+  26|     }
+    : punctuation "}"
+  27|     return total;
+    : control "return" · punctuation ";"
+  28| }
+    : punctuation "}"
+  29| 
+  30| int main(int argc, char **argv)
+    : type "int" · function "main" · punctuation "(" · type "int" · punctuation "," · type "char" · operator "**" · punctuation ")"
+  31| {
+    : punctuation "{"
+  32|     unsigned flags = 0xFFu | 0b101 | 017;
+    : type "unsigned" · operator "=" · number "0xFFu" · operator "|" · number "0b101" · operator "|" · number "017" · punctuation ";"
+  33|     double ratio = 1.5e-3f + .25;
+    : type "double" · operator "=" · number "1.5e-3f" · operator "+" · number ".25" · punctuation ";"
+  34|     long big = 1000000UL;
+    : type "long" · operator "=" · number "1000000UL" · punctuation ";"
+  35|     char c = 'x', nl = '\n', q = '\'';
+    : type "char" · operator "=" · string "'x'" · punctuation "," · operator "=" · string "'\\n'" · punctuation "," · operator "=" · string "'\\''" · punctuation ";"
+  36|     Node head = { .value = 42, .next = NULL };
+    : type "Node" · operator "=" · punctuation "{" · punctuation "." · operator "=" · number "42" · punctuation "," · punctuation "." · operator "=" · constant "NULL" · punctuation "};"
+  37|     u64_t id = 7;
+    : type "u64_t" · operator "=" · number "7" · punctuation ";"
+  38|     if (argc > 1 && argv[1][0] != '-') {
+    : control "if" · punctuation "(" · operator ">" · number "1" · operator "&&" · punctuation "[" · number "1" · punctuation "][" · number "0" · punctuation "]" · operator "!=" · string "'-'" · punctuation ")" · punctuation "{"
+  39|         printf("%s has %d items, %5.2f%% done, %lu\n", argv[1], MAX_ITEMS, ratio * 100, big);
+    : function "printf" · punctuation "(" · string "\"" · constant "%s" · string " has " · constant "%d" · string " items, " · constant "%5.2f%%" · string " done, " · constant "%lu" · escape "\\n" · string "\"" · punctuation "," · punctuation "[" · number "1" · punctuation "]," · constant "MAX_ITEMS" · punctuation "," · operator "*" · number "100" · punctuation "," · punctuation ");"
+  40|     } else {
+    : punctuation "}" · control "else" · punctuation "{"
+  41|         puts("usage: prog \"file\" \
+    : function "puts" · punctuation "(" · string "\"usage: prog " · escape "\\\"" · string "file" · escape "\\\"" · escape "\\"
+  42| more text");
+    : string "more text\"" · punctuation ");"
+  43|     }
+    : punctuation "}"
+  44|     switch (c) {
+    : control "switch" · punctuation "(" · punctuation ")" · punctuation "{"
+  45|     case 'x': break;
+    : control "case" · string "'x'" · punctuation ":" · control "break" · punctuation ";"
+  46|     default:  goto done;
+    : control "default" · punctuation ":" · control "goto" · punctuation ";"
+  47|     }
+    : punctuation "}"
+  48| done:
+    : punctuation ":"
+  49|     return sizeof(Node) > 8 ? 0 : (int)id;
+    : control "return" · keyword "sizeof" · punctuation "(" · type "Node" · punctuation ")" · operator ">" · number "8" · operator "?" · number "0" · punctuation ":" · punctuation "(" · type "int" · punctuation ")" · punctuation ";"
+  50| }
+    : punctuation "}"

@@ -1,0 +1,39 @@
+# 設定ファイルの見本
+title = "zcode"
+enabled = true
+retries = 3
+ratio = 1.5e-3
+mask = 0xDEADBEEF
+big = 1_000_000
+limit = +inf
+released = 1979-05-27T07:32:00Z
+
+[package]
+name = "zcode"
+version.workspace = true
+"quoted key" = 'literal \n string'
+authors = ["A. Person", "B. Person"]
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+
+[[bin]]
+name = "main"
+path = "src/main.rs"
+
+[server]
+point = { x = 1, y = -2 }
+matrix = [
+    [1, 2],
+    [3, 4],
+]
+message = "tab\there \"quoted\" \u00e9"
+paragraph = """
+Roses are red,
+  line with a \
+continued part
+"""
+regex = '''
+\d+ and 'quotes' stay raw
+'''

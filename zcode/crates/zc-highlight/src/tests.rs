@@ -54,7 +54,9 @@ fn registry_detect() {
     assert_eq!(r.detect(Path::new("x/a.py"), ""), Some(p));
     assert_eq!(r.detect(Path::new("A.PYW"), ""), Some(p));
     assert_eq!(r.detect(Path::new("script"), "#!/usr/bin/env python3"), Some(p));
-    assert_eq!(r.detect(Path::new("script"), "#!/bin/sh"), None);
+    assert_eq!(r.detect(Path::new("script"), "#!/usr/bin/env perl"), None);
+    // shell が入ったので `#!/bin/sh` は Shell と判定される
+    assert_eq!(r.info(r.detect(Path::new("script"), "#!/bin/sh").expect("shell")).name, "Shell");
     assert_eq!(r.detect(Path::new("a.unknown"), ""), None);
     let o = r.info(p).outline.expect("outline");
     assert!(o.items.contains(&("def", OutlineKind::Function)));

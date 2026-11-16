@@ -1,0 +1,20 @@
+{
+  // JSONC 風のコメントも塗る
+  "name": "zcode",
+  "version": "0.1.0",
+  "private": true,
+  "license": null,
+  "port": 8080,
+  "ratio": -1.5e-3,
+  "tags": ["editor", "rust", "日本語"],
+  "escapes": "tab\t quote\" slash\/",
+  "nested": {
+    "empty": {},
+    "list": [1, 2, {"deep": [false, "x"]}],
+    "matrix": [
+      [0, 1],
+      [2, 3]
+    ] /* 末尾のコメント */
+  },
+  "last": "value"
+}

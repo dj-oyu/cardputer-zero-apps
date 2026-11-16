@@ -1,0 +1,249 @@
+# Rust。色の付け方は VS Code の Dark+（rust）に寄せてある。
+#
+# 限界（DFA で書けないもの）:
+# - 生文字列 r#"..."# は、`#` の数を覚えられない（後方参照が要る）。`r"..."` は `"` で、
+#   `r#"` `r##"` … は最初の `"#` で終わるものとして塗る（r##"a"#b"## のように本文に
+#   `"#` を含む形は途中で終わって見える）
+# - 入れ子のブロックコメント /* /* */ */ は、文脈のスタックで好きな深さまで追える
+# - 型の色は、先頭が大文字で小文字も含む名前（HashMap）と [words] の型名、1 文字の大文字（T）。
+#   全部大文字の名前（MAX_LEN）は定数の色になる
+# - ジェネリクスの `::<T>` 付きの呼び出し（collect::<Vec<_>>()）は関数の色にならない
+# - マクロ呼び出しは `名前!` の直後に ( [ { が続くものだけ（`vec![`、`println!(`）
+
+name = "Rust"
+extensions = ["rs"]
+line_comment = "//"
+indent = "    "
+# 1 ファイルだけのプログラム用（cargo のプロジェクトでは使えない）。シェルは通さないので bash -c で包む
+run = "bash -c 'rustc \"$0\" -o /tmp/zc-run && /tmp/zc-run' {file}"
+keywords = [
+    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
+    "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
+    "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true",
+    "type", "unsafe", "use", "where", "while", "Some", "None", "Ok", "Err", "String", "Vec",
+    "Option", "Result", "Box", "println", "print", "format", "vec", "assert", "assert_eq",
+]
+
+[outline]
+items = { fn = "function", struct = "class", enum = "class", trait = "class", impl = "class", mod = "class" }
+modifiers = ["pub", "async", "unsafe", "const", "extern"]
+indent_width = 4
+
+[variables]
+ident = '[A-Za-z_][A-Za-z0-9_]*'
+# 識別子の語は [words] で引く（小文字で始まる名前）
+lident = '[a-z_][A-Za-z0-9_]*'
+
+[words]
+keyword = [
+    "fn", "let", "mut", "const", "static", "struct", "enum", "trait", "impl", "type", "mod", "pub",
+    "unsafe", "extern", "dyn", "ref", "move", "where", "async", "macro_rules", "union",
+]
+control = [
+    "if", "else", "match", "for", "while", "loop", "break", "continue", "return", "use", "as",
+    "in", "await", "yield",
+]
+constant = ["true", "false", "self", "None", "crate", "super"]
+type = [
+    "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize",
+    "f32", "f64", "bool", "char", "str",
+]
+
+# fn の後ろは関数名、struct / enum / trait / type / mod の後ろは型名
+[word_push]
+fn = "funcname"
+struct = "typename"
+enum = "typename"
+trait = "typename"
+type = "typename"
+union = "typename"
+mod = "modname"
+
+[default_token]
+str = "string"
+raw_plain = "string"
+raw_hash = "string"
+block_comment = "comment"
+attr = "attribute"
+
+[[contexts.main]]
+include = "expr"
+
+[[contexts.expr]]
+match = '//.*'
+token = "comment"
+[[contexts.expr]]
+match = '/\*'
+token = "comment"
+push = "block_comment"
+# 属性 #[...] と #![...]
+[[contexts.expr]]
+match = '#!?\['
+token = "attribute"
+push = "attr"
+# 文字列。前置き（b / c）は引用符の手前で見る
+[[contexts.expr]]
+match = '[bc]'
+followed_by = '"'
+token = "string"
+[[contexts.expr]]
+match = 'b'
+followed_by = "'"
+token = "string"
+[[contexts.expr]]
+match = '"'
+token = "string"
+push = "str"
+# 生文字列: r / br の後ろに #* と " が続く（# の数は見ない）
+[[contexts.expr]]
+match = 'b?r'
+followed_by = '#*"'
+token = "string"
+push = "raw_open"
+# 文字リテラルを先に、残りの `'名前` はライフタイム（'static やラベル）
+[[contexts.expr]]
+match = '''\'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|[^\n])|[^'\\\n{{nonascii}}]|[{{nonascii}}]+)\''''
+token = "string"
+[[contexts.expr]]
+match = "'[A-Za-z_][A-Za-z0-9_]*"
+token = "keyword"
+# マクロ呼び出し
+[[contexts.expr]]
+match = '{{ident}}!'
+followed_by = '[(\[{]'
+token = "attribute"
+# 小文字で始まる名前（関数呼び出し・キーワード・型名）
+[[contexts.expr]]
+match = '{{lident}}'
+followed_by = '[ \t]*\('
+token = "function"
+words = true
+[[contexts.expr]]
+match = '{{lident}}'
+token = "text"
+words = true
+# 大文字で始まる名前: HashMap / T / MAX_LEN
+[[contexts.expr]]
+match = '[A-Z][A-Z0-9_]*[a-z][A-Za-z0-9_]*'
+token = "type"
+[[contexts.expr]]
+match = '[A-Z]'
+followed_by = '[^A-Za-z0-9_]'
+token = "type"
+[[contexts.expr]]
+match = '[A-Z][A-Z0-9_]*'
+token = "constant"
+[[contexts.expr]]
+match = '[0-9](?:[eE][+-]|[0-9A-Za-z_])*(?:\.[0-9](?:[eE][+-]|[0-9A-Za-z_])*)?'
+token = "number"
+[[contexts.expr]]
+match = '[-+*/%&|^~<>!=?@]+'
+token = "operator"
+[[contexts.expr]]
+match = '[(){}\[\],;:.#$]'
+token = "punctuation"
+[[contexts.expr]]
+match = '[ \t]+'
+token = "text"
+
+# ---- 名前 ----
+
+[[contexts.funcname]]
+match = '[ \t]+'
+token = "text"
+[[contexts.funcname]]
+match = '{{ident}}'
+token = "function"
+pop = true
+[[contexts.funcname]]
+match = ''
+pop = true
+
+[[contexts.typename]]
+match = '[ \t]+'
+token = "text"
+[[contexts.typename]]
+match = '{{ident}}'
+token = "type"
+pop = true
+[[contexts.typename]]
+match = ''
+pop = true
+
+[[contexts.modname]]
+match = '[ \t]+'
+token = "text"
+[[contexts.modname]]
+match = '{{ident}}'
+token = "type"
+pop = true
+[[contexts.modname]]
+match = ''
+pop = true
+
+# ---- コメント・属性 ----
+
+# 入れ子のブロックコメント（/* で積み、*/ で降ろす）
+[[contexts.block_comment]]
+match = '\*/'
+pop = true
+[[contexts.block_comment]]
+match = '/\*'
+push = "block_comment"
+[[contexts.block_comment]]
+match = '[^*/\n]+|[*/]'
+
+[[contexts.attr]]
+match = '\]'
+pop = true
+[[contexts.attr]]
+match = '\['
+push = "attr"
+[[contexts.attr]]
+match = '"(?:[^"\\\n]|\\.)*"'
+token = "string"
+[[contexts.attr]]
+match = '[^\]\[\n"]+|"'
+
+# ---- 文字列 ----
+
+[[contexts.raw_open]]
+match = '#+"'
+token = "string"
+set = "raw_hash"
+[[contexts.raw_open]]
+match = '"'
+token = "string"
+set = "raw_plain"
+[[contexts.raw_open]]
+match = ''
+pop = true
+
+# r"..." は " で終わる
+[[contexts.raw_plain]]
+match = '"'
+pop = true
+[[contexts.raw_plain]]
+match = '[^"]+'
+
+# r#"..."# は最初の "# で終わるものとして扱う
+[[contexts.raw_hash]]
+match = '"#+'
+pop = true
+[[contexts.raw_hash]]
+match = '[^"]+|"'
+
+[[contexts.str]]
+match = '"'
+pop = true
+[[contexts.str]]
+match = '\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|.|\n)'
+token = "escape"
+[[contexts.str]]
+match = '\{\{|\}\}'
+token = "escape"
+[[contexts.str]]
+match = '''\{[A-Za-z0-9_.:#?<>^+*$ -]*\}'''
+token = "constant"
+[[contexts.str]]
+match = '[^"\\{}]+|[{}]'

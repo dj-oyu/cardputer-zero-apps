@@ -1,0 +1,128 @@
+# JSON。オブジェクトの中で `:` より前の文字列は key、値の文字列は string。
+# JSONC 風の // と /* */ のコメントも塗る（settings.json など）。
+#
+# キーか値かは「オブジェクトの中で `:` の前か後か」を文脈（object / objval）で追って決める
+# （文字列を閉じるまで待つ先読みは使えない）。複数行にまたがる入れ子もスタックで追う。
+# 限界: 文字列は行末で閉じる（JSON では複数行の文字列は不正）。数は「数字か - + で始まる
+# 英数字の並び」としてまとめて塗る（厳密な検証はしない）。
+
+name = "JSON"
+extensions = ["json", "jsonc", "geojson", "webmanifest"]
+filenames = [".eslintrc", ".prettierrc"]
+line_comment = "//"
+indent = "  "
+
+[words]
+constant = ["true", "false", "null"]
+
+[default_token]
+kstr = "key"
+vstr = "string"
+block_comment = "comment"
+
+[[contexts.main]]
+include = "value"
+
+# 値（トップレベル・配列の要素・`:` の後ろ）
+[[contexts.value]]
+match = '//.*'
+token = "comment"
+[[contexts.value]]
+match = '/\*'
+token = "comment"
+push = "block_comment"
+[[contexts.value]]
+match = '"'
+token = "string"
+push = "vstr"
+[[contexts.value]]
+match = '\{'
+token = "punctuation"
+push = "object"
+[[contexts.value]]
+match = '\['
+token = "punctuation"
+push = "array"
+[[contexts.value]]
+match = '[A-Za-z_]+'
+token = "text"
+words = true
+[[contexts.value]]
+match = '[-+0-9][0-9A-Za-z.+-]*'
+token = "number"
+[[contexts.value]]
+match = '[\]},:]'
+token = "punctuation"
+
+[[contexts.array]]
+match = '\]'
+token = "punctuation"
+pop = true
+[[contexts.array]]
+include = "value"
+
+# オブジェクト: `:` の前が key
+[[contexts.object]]
+match = '\}'
+token = "punctuation"
+pop = true
+[[contexts.object]]
+match = '//.*'
+token = "comment"
+[[contexts.object]]
+match = '/\*'
+token = "comment"
+push = "block_comment"
+[[contexts.object]]
+match = '"'
+token = "key"
+push = "kstr"
+[[contexts.object]]
+match = ':'
+token = "punctuation"
+push = "objval"
+[[contexts.object]]
+match = ','
+token = "punctuation"
+
+# `:` の後ろの値。`,` で終わる（`}` は消費せず object に任せる）
+[[contexts.objval]]
+match = ','
+token = "punctuation"
+pop = true
+[[contexts.objval]]
+match = ''
+followed_by = '\}'
+pop = true
+[[contexts.objval]]
+include = "value"
+
+[[contexts.kstr]]
+match = '"'
+pop = true
+[[contexts.kstr]]
+match = '\n'
+pop = true
+[[contexts.kstr]]
+match = '\\(?:u[0-9a-fA-F]{4}|.)'
+token = "escape"
+[[contexts.kstr]]
+match = '[^"\\\n]+'
+
+[[contexts.vstr]]
+match = '"'
+pop = true
+[[contexts.vstr]]
+match = '\n'
+pop = true
+[[contexts.vstr]]
+match = '\\(?:u[0-9a-fA-F]{4}|.)'
+token = "escape"
+[[contexts.vstr]]
+match = '[^"\\\n]+'
+
+[[contexts.block_comment]]
+match = '\*/'
+pop = true
+[[contexts.block_comment]]
+match = '[^*\n]+|\*'

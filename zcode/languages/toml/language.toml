@@ -1,0 +1,118 @@
+# TOML。テーブル名は heading、キーは key、値は文字列・数・日時・true/false。
+#
+# 限界:
+# - テーブルの見出し `[a.b]` は「行頭の `[` + キーに使える文字だけ + `]`」の行。複数行の配列の
+#   中の行で `[1]` のように 1 要素だけの配列は、見出しと区別できず見出しに塗る
+#   （`[1, 2]` のように `,` があれば大丈夫）
+# - 日時は「数字で始まる英数字と - : . + の並び」を数として塗る。`1979-05-27 07:32:00`
+#   のように空白で区切った日時は、日付と時刻が別々の数になる（どちらも数の色）
+# - 文字列の閉じが `""""`（本文の最後が `"`）の形は、`"""` で閉じて残りの `"` を別に扱う
+
+name = "TOML"
+extensions = ["toml"]
+filenames = ["Cargo.lock", "Pipfile", "poetry.lock"]
+line_comment = "#"
+indent = "    "
+
+[variables]
+keychars = '-A-Za-z0-9_'
+
+[words]
+constant = ["true", "false", "inf", "nan"]
+
+[default_token]
+mlbasic = "string"
+mlliteral = "string"
+basic = "string"
+literal = "string"
+
+[[contexts.main]]
+match = '#.*'
+token = "comment"
+# [table] と [[array.of.tables]]
+[[contexts.main]]
+match = '''^[ \t]*\[\[?[{{keychars}}"'. \t]+\]\]?'''
+token = "heading"
+# キー（= か、続けて .名前 が付くもの）
+[[contexts.main]]
+match = '[{{keychars}}]+'
+followed_by = '''[ \t]*(?:=|\.[A-Za-z_"'])'''
+token = "key"
+[[contexts.main]]
+match = '"[^"\n]*"'
+followed_by = '''[ \t]*(?:=|\.[A-Za-z_"'])'''
+token = "key"
+[[contexts.main]]
+match = "'[^'\\n]*'"
+followed_by = '''[ \t]*(?:=|\.[A-Za-z_"'])'''
+token = "key"
+# 文字列（三重を先に）
+[[contexts.main]]
+match = '"""'
+token = "string"
+push = "mlbasic"
+[[contexts.main]]
+match = "'''"
+token = "string"
+push = "mlliteral"
+[[contexts.main]]
+match = '"'
+token = "string"
+push = "basic"
+[[contexts.main]]
+match = "'"
+token = "string"
+push = "literal"
+[[contexts.main]]
+match = '[A-Za-z_][A-Za-z0-9_-]*'
+token = "text"
+words = true
+[[contexts.main]]
+match = '[0-9+-][0-9A-Za-z_.:+-]*'
+token = "number"
+[[contexts.main]]
+match = '='
+token = "operator"
+[[contexts.main]]
+match = '[,.{}\[\]]'
+token = "punctuation"
+
+# ---- 文字列 ----
+
+[[contexts.str_escape]]
+match = '\\(?:u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.|\n)'
+token = "escape"
+
+[[contexts.basic]]
+match = '"'
+pop = true
+[[contexts.basic]]
+match = '\n'
+pop = true
+[[contexts.basic]]
+match = '[^"\\\n]+'
+[[contexts.basic]]
+include = "str_escape"
+
+[[contexts.mlbasic]]
+match = '"""'
+pop = true
+[[contexts.mlbasic]]
+match = '[^"\\]+|"'
+[[contexts.mlbasic]]
+include = "str_escape"
+
+[[contexts.literal]]
+match = "'"
+pop = true
+[[contexts.literal]]
+match = '\n'
+pop = true
+[[contexts.literal]]
+match = "[^'\\n]+"
+
+[[contexts.mlliteral]]
+match = "'''"
+pop = true
+[[contexts.mlliteral]]
+match = "[^']+|'"
