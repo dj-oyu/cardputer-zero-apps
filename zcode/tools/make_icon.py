@@ -80,14 +80,29 @@ def gloss(img, box, radius, strength=150):
     img.alpha_composite(white)
 
 
+# 文字の光（ブルーム）は弱めにして、明るさの段階を減らす（わずかに縞が出る程度）。
+# なめらかで強い光は文字の輪郭をぼかして読みにくくした
+GLOW_ALPHA = 120
+GLOW_LEVELS = 6
+
+
+def banded_glow(layer, blur):
+    """layer をぼかしてから、透明度を GLOW_LEVELS 段に減らす。"""
+    g = layer.filter(ImageFilter.GaussianBlur(blur))
+    step = 255 / GLOW_LEVELS
+    a = g.getchannel("A").point(lambda v: int(round(v / step) * step) if v >= step / 2 else 0)
+    g.putalpha(a)
+    return g
+
+
 def glow_text(img, xy, text, font, top, bottom, outline, glow=None, stroke=0):
     """光る（グロー）・縁取りつきの、縦グラデーションの文字。"""
     x, y = xy
     if glow:
         g = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        ImageDraw.Draw(g).text((x, y), text, font=font, fill=glow + (200,),
-                               stroke_width=stroke + 2 * S, stroke_fill=glow + (200,))
-        img.alpha_composite(g.filter(ImageFilter.GaussianBlur(3 * S)))
+        ImageDraw.Draw(g).text((x, y), text, font=font, fill=glow + (GLOW_ALPHA,),
+                               stroke_width=stroke + S, stroke_fill=glow + (GLOW_ALPHA,))
+        img.alpha_composite(banded_glow(g, 2 * S))
     if stroke:
         ImageDraw.Draw(img).text((x, y), text, font=font, fill=outline, stroke_width=stroke, stroke_fill=outline)
     # 中身のマスクも stroke_width を付けて描く（縁は 0、中身は 255）。Pillow は
@@ -192,8 +207,8 @@ def code_glyph(img, center, half_w, half_h, width, outline):
 
     # 光
     g = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    strokes(ImageDraw.Draw(g), width + 2 * outline + 6 * S, GREEN_GLOW + (170,))
-    img.alpha_composite(g.filter(ImageFilter.GaussianBlur(3 * S)))
+    strokes(ImageDraw.Draw(g), width + 2 * outline + 3 * S, GREEN_GLOW + (GLOW_ALPHA,))
+    img.alpha_composite(banded_glow(g, 2 * S))
     # 縁取り（一定の太さ）
     strokes(ImageDraw.Draw(img), width + 2 * outline, GREEN_DARK + (255,))
     # 中身（縦グラデーション）
@@ -278,10 +293,13 @@ def make(dev: bool) -> Image.Image:
     ny = screen[1] + 45 * S
     glow_text(img, (nx, ny), n, small, GREEN_TOP, GREEN_BOTTOM, GREEN_DARK, glow=GREEN_GLOW)
     cx0 = int(nx + nw + S)
-    cur = (cx0, int(ny + 3 * S), cx0 + cursor_w, int(ny + 17 * S))
+    # 文字の実際の上端（d の縦棒）とベースライン（z の下端）にそろえる
+    top = ny + small.getbbox("d")[1]
+    base = ny + small.getbbox("z")[3]
+    cur = (cx0, int(top), cx0 + cursor_w, int(base))
     gl = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    ImageDraw.Draw(gl).rectangle(cur, fill=GREEN_GLOW + (180,))
-    img.alpha_composite(gl.filter(ImageFilter.GaussianBlur(2 * S)))
+    ImageDraw.Draw(gl).rectangle(cur, fill=GREEN_GLOW + (GLOW_ALPHA,))
+    img.alpha_composite(banded_glow(gl, 2 * S))
     paste_grad(img, cur, GREEN_TOP, GREEN_BOTTOM, rounded_mask(img.size, cur, S))
 
     # タイトルバー: 本体の上に重ねるスモークガラス（下の黒と走査線が透ける）
