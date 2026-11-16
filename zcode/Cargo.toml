@@ -1,0 +1,37 @@
+# zcode のワークスペース (構成は docs/design.md §3)
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# ベンチマークは各自が [workspace] を持つ単独の crate
+exclude = ["bench"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+zc-core = { path = "crates/zc-core" }
+zc-display = { path = "crates/zc-display" }
+zc-font = { path = "crates/zc-font" }
+zc-input = { path = "crates/zc-input" }
+zc-buffer = { path = "crates/zc-buffer" }
+zc-highlight = { path = "crates/zc-highlight" }
+zc-markdown = { path = "crates/zc-markdown" }
+zc-skk = { path = "crates/zc-skk" }
+zc-term = { path = "crates/zc-term" }
+zc-intel = { path = "crates/zc-intel" }
+zc-ui = { path = "crates/zc-ui" }
+# 外部の crate は pure Rust だけ (C ライブラリに依存するものは使わない)
+libc = "0.2"
+swash = "0.2"
+png = "0.17"
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "debuginfo"

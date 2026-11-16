@@ -8,3 +8,7 @@ bt-tether/packaging/bt-tether.png
 # zcode のベンチマークのビルド成果物
 zcode/bench/out/
 target/
+
+# zcode: 実機用バイナリの置き場、render-test の不一致時の出力
+zcode/out/
+*.actual.png
