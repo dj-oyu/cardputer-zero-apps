@@ -116,11 +116,10 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 
 ## 次にやること
 
-- **モディファイアの送られ方と遅延を実機で確かめる**（`docs/stage1-notes.md` §6 の手順 2）:
-  Shift / Sym / Fn の押しっぱなし・ワンショット・ロックがどう届くか、読み取りと fsync
-  までの遅延。結果を `docs/measurements.md` に入れる。SSH から試すときは APPLaunch と
-  画面・キーボードを取り合うので、止めるか正式に起動するかをユーザーと決めてから
+- モディファイアの届き方と読み取りの遅延は確認済み（`docs/measurements.md` §8）。
+  打鍵 → fsync を呼ぶまで p50 1.4ms
 - フォント比較画面をユーザーに見てもらい、文字の大きさと行の高さを決める
   （`crates/zc-ui/src/layout.rs` の `CODE_PX` / `CODE_LINE_H`）
-- APPLaunch からアプリとして起動したときに、時計・電池の再描画が止まるか確かめる
+- 実機で試すときはランチャーの「zcode (dev)」から起動する（`dev/README.md`）。
+  SSH から直接起動すると APPLaunch と画面・キーボードを取り合う
 - `docs/stage1-notes.md` §3 の提案を design.md に取り込むか決めてから、段階 2 へ
