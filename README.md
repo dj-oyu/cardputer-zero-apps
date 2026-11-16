@@ -10,6 +10,7 @@ Linux マシン）向けに自作した APPLaunch アプリの monorepo。
 | `common/` | 本体 LCD アプリ共通の UI 部品 `zero_ui.py`（fb0 描画、キー入力、パネル等） |
 | `zcode/` | VS Code 風のコードエディタ（Rust、設計済み・実装前）。設計・実測値・UI モック・ベンチマーク |
 | `container/` | 開発コンテナ（.deb のビルド、描画確認、Rust の aarch64 クロスビルド。Windows では WSL コンテナー） |
+| `runtimes/` | 実機の CPU（Cortex-A53）向けに作り直す実行環境のビルド手順（LLRT） |
 
 ## 方針
 

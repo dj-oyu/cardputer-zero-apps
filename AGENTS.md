@@ -30,6 +30,7 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
 | `common/` | 液晶アプリ共通の UI 土台 `zero_ui.py` |
 | `zcode/` | VS Code 風コードエディタ（Rust。段階 1 の土台まで実装） |
 | `container/` | 開発コンテナ（Dockerfile と Windows 用ラッパー `dev.ps1`） |
+| `runtimes/` | 実機（Cortex-A53）向けにソースからビルドする実行環境の手順（`llrt/`: JS ランタイム）。CI の対象外 |
 
 新しいアプリは `<app>/` を切り、既存アプリと同じ形
 （`build.sh`、`packaging/`、`tools/make_icon.py`、`README.md`、
@@ -158,6 +159,56 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
   そこから拾う
 - 依存は C ライブラリを要求しない pure Rust の crate を優先する
   （クロスビルドで C の依存を足すと aarch64 用の開発パッケージが要る）
+
+## 他所で作られた実行ファイルを実機で使うとき（2026-11-16 調査）
+
+- **CPU は Cortex-A53（ARMv8.0）。LSE アトミック（ARMv8.1）も RCpc（ARMv8.3）も無い。**
+  サーバ向け（Graviton / Neoverse）に `target-cpu` を指定して作られた aarch64 の配布物は
+  SIGILL で落ちる。入れる前に開発コンテナで
+  `aarch64-linux-gnu-objdump -d <bin> | grep -cE '\s(ldadd|swp|cas|ldapr)[a-z]*\s'` を見る。
+  数千あれば無条件に使っている。数十〜数百は実行時に CPU を調べて切り替える作り
+  （Go のランタイム、Rust の outline-atomics）なので動く
+  - LLRT v0.10.0-beta の `llrt-linux-arm64`: neoverse-n1 + LSE でビルド（LSE 7,284・RCpc 1,135）。
+    実機で SIGILL（exit -4）。使うならソースから `cortex-a53` 向けに作り直す
+    （`runtimes/llrt/build.ps1`。版を上げるときはタグを渡すだけ）
+  - **LLRT を A53 向けにソースから作ると動く**（v0.10.0-beta、no-sdk、2026-11-16）。手順:
+    `.cargo/config.toml` の aarch64-musl の `+lse` を外し `target-cpu=neoverse-n1` →
+    `cortex-a53`、Makefile の zstd の `zig cc` に `-mcpu=cortex_a53`、
+    `CFLAGS_aarch64_unknown_linux_musl=-mcpu=cortex_a53` を付けて
+    `make libs-arm64 && make llrt-linux-arm64-no-sdk.zip`。要るもの: Makefile が指定する
+    nightly（`build-std` で std も A53 向けに作り直す）・cargo-zigbuild・zig（0.17.1 で可）・
+    Node（26 は corepack を同梱しないので `npm i -g corepack`）と yarn 1・`zstd` コマンド。
+    出来た実行ファイルは 10.8MB（静的リンク）で LSE は 34（実行時に CPU を見る補助関数）、RCpc 0
+  - 実機での LLRT（A53 版）: 起動 0.02 秒・約 11MB。200 万回のループが 0.70 秒（Python 3.13 は
+    3.84 秒）。`node:fs`・`node:os`・タイマー・ES モジュールは動く。**`Intl` は既定のビルドに
+    無い**（feature `intl402` を付けると入る。大きさは未確認）
+  - esbuild 0.28.2（Go）: 動く。TS → JS が 0.08 秒・約 11MB
+- **オーバーコミットは既定のヒューリスティック（`vm.overcommit_memory=0`）で、RAM + スワップより
+  大きい 1 回の確保は断られる。** スレッドのスタックを巨大に取るものは `pthread_create` が
+  EAGAIN（errno=11）で失敗する
+  - tsc-rs 0.8.0（TypeScript 7 の Rust 版）: スタックを 1 GiB 取ろうとして起動できない。
+    スタックはアドレス空間の上限（`ulimit -v`）の 1/64 になるので、`ulimit -v 2097152`
+    （2GB → スタック 32MB）を付けると動く
+  - TypeScript 7.0.2（公式の Go 版、npm `@typescript/typescript-linux-arm64`）はそのまま動く
+  - 両者の比較（実機、同じ入力と引数、3 回の中央値・最大 RSS。合成コード 6,000 行は
+    interface・ジェネリクス・判別共用体・クラス）:
+
+    | 入力 | TS 7.0.2（Go） | tsc-rs 0.8.0 |
+    |---|---|---|
+    | 1 行の型エラー（`--lib es2022`） | 0.32 秒・31MB | 0.40 秒・31MB |
+    | 3 行 + `--lib es2022,dom` | 3.78 秒・91MB | 1.73 秒・69MB |
+    | 6,000 行・`--noEmit` | 1.85 秒・57MB | 1.30 秒・52MB |
+    | 6,000 行・JS も出す | 2.25 秒・62MB | 1.74 秒・56MB |
+    | 6,000 行・`--singleThreaded` | 2.12 秒・56MB | 1.40 秒・46MB |
+
+    型エラーのときの終了コードが違う（Go 版 1、tsc-rs 2）。DOM の型定義を読むと Go 版は
+    空きメモリ（80〜110MB）の大半を使う
+- esbuild は型を外すだけで **型チェックをしない**。`tsc`（どちらの版も）は型チェックと JS の
+  出力を 1 回でできるので、npm の依存をまとめる必要が無ければ esbuild は要らない
+- 実機の `/tmp` は tmpfs（RAM）。大きな実行ファイルを試しに置くと、そのぶん RAM を食う
+  （空きは 80〜110MB 程度）。終わったらすぐ消す
+- GNU `time` は入っていない。最大 RSS は Python の
+  `resource.getrusage(RUSAGE_CHILDREN).ru_maxrss` で測る
 
 ## 進め方
 
