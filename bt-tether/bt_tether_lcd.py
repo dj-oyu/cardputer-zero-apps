@@ -214,6 +214,23 @@ def run_lcd() -> int:
                         state["connecting"] = False
                     else:
                         state["connected_since"] = None
+                # IPv4 の管理: PAN がつながっていて DHCP の
+                # アドレスが無ければ dhcpcd を起動し、切れたら
+                # 解放する (NM が bnep を見ないための手当て)
+                iface = (tgt or {}).get("interface")
+                if tgt and tgt["net_connected"] and iface:
+                    if bt.real_ipv4(iface) is None:
+                        last = state.get("dhcp_tried", {}).get(iface, 0)
+                        if time.time() - last > 30:
+                            state.setdefault("dhcp_tried", {})[iface] \
+                                = time.time()
+                            ok = bt.dhcp_start(iface)
+                            print(f"dhcp start {iface}: {ok}",
+                                  file=sys.stderr, flush=True)
+                    state["dhcp_iface"] = iface
+                elif state.get("dhcp_iface"):
+                    bt.dhcp_release(state["dhcp_iface"])
+                    state["dhcp_iface"] = None
                     if (state["connecting"]
                             and time.time() - state["connecting_since"]
                             > 30):
@@ -282,7 +299,7 @@ def run_lcd() -> int:
                 elapsed = f"{sec // 60:02d}:{sec % 60:02d}"
             view.update(mode="connected",
                         interface=tgt["interface"] or "bnep0",
-                        ip=bt.ipv4_of(tgt["interface"])
+                        ip=bt.real_ipv4(tgt["interface"])
                         if tgt["interface"] else None,
                         elapsed=elapsed)
         elif connecting:

@@ -17,6 +17,7 @@ from __future__ import annotations
 import fcntl
 import socket
 import struct
+import subprocess
 import threading
 
 import dbus
@@ -42,6 +43,42 @@ def ipv4_of(ifname: str) -> str | None:
         return None
     finally:
         s.close()
+
+
+def real_ipv4(ifname: str) -> str | None:
+    """DHCP で取れた IPv4 (リンクローカル 169.254 は未取得扱い)。"""
+    ip = ipv4_of(ifname)
+    if ip is None or ip.startswith("169.254."):
+        return None
+    return ip
+
+
+def dhcp_start(ifname: str) -> bool:
+    """bnep へ DHCP を取りに行く (dhcpcd を限定 sudo で起動)。
+
+    NetworkManager は bnep を自分のデバイスとして認識しない
+    ため DHCP が走らない。deb が /etc/sudoers.d/bt-tether に
+    置く許可 (このコマンド形式のみ) を使って dhcpcd を root で
+    起動する。メトリックを大きくして、自宅では Wi-Fi の
+    デフォルトルートを奪わないようにする。
+    """
+    try:
+        r = subprocess.run(
+            ["sudo", "-n", "/usr/sbin/dhcpcd", "--metric", "2048",
+             ifname],
+            timeout=25, capture_output=True)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def dhcp_release(ifname: str) -> None:
+    """dhcpcd にリースを解放させる (切断時)。"""
+    try:
+        subprocess.run(["sudo", "-n", "/usr/sbin/dhcpcd", "-k", ifname],
+                       timeout=15, capture_output=True)
+    except Exception:
+        pass
 
 
 class PairingAgent(dbus.service.Object):

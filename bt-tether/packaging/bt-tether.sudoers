@@ -1,0 +1,4 @@
+# bt-tether: PAN 接続時に bnep へ DHCP を取りに行くためだけの許可。
+# NetworkManager が bnep を管理しないため、アプリは dhcpcd を
+# この2形式のコマンドでだけ root 起動できる。
+jimmy ALL=(root) NOPASSWD: /usr/sbin/dhcpcd --metric 2048 bnep*, /usr/sbin/dhcpcd -k bnep*

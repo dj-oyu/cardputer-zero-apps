@@ -26,8 +26,14 @@ APPLaunch アプリ。外出先でも CardputerZero をオンラインに
 - ペアリングのエージェントは DisplayYesNo（数字照合）。
   GLib メインループを別スレッドで回して受け口にする
 - IP アドレスは bnep インターフェースから ioctl で読む。
-  DHCP は NetworkManager が bnep を自動で拾う前提
-  （ペアリング実地テストで要確認）
+  IPv6 は iPhone の RA で自動的に付く。一方 IPv4 は、
+  NetworkManager が外部から作られた bnep を自分のデバイス
+  として認識せず DHCP が走らない（実地確認）。そこで接続を
+  検知したら dhcpcd を起動して取りに行く。dhcpcd は root が
+  要るので、deb が /etc/sudoers.d/bt-tether に「dhcpcd の
+  bnep 向け2コマンドだけ」の限定許可を置き、アプリは
+  sudo -n で呼ぶ。ルートのメトリックは 2048 にして、自宅で
+  Wi-Fi のデフォルトルートを奪わないようにした
 - USB テザリングは不可（カーネルに ipheth が無い）。
   BT PAN は 1〜2 Mbps 程度の見込みで、Wi-Fi ホットスポット
   より両機とも省電力
