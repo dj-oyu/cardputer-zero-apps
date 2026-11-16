@@ -502,7 +502,9 @@ fn timeout_stops_the_job() {
     let f = collect(&w);
     assert_eq!(done_of(&f).0, Status::Timeout);
     assert!(matches!(msgs(&f)[msgs(&f).len() - 2], ServerMsg::Diagnostics { complete: false, .. }));
-    assert!(!group_alive(pgid.lock().unwrap().unwrap()));
+    // 殺した直後は、刈り取られるまで zombie として残りうる（kill(-pg, 0) は zombie にも成功する）
+    let pg = pgid.lock().unwrap().unwrap();
+    wait_until("グループが消える", || !group_alive(pg));
     // 時間切れの結果は使い回さない。でも attach には本当の終わり方を返す。
     assert_eq!(done_of(&collect(&r.attach(&jid(1), 0, 0).unwrap())).0, Status::Timeout);
     assert_eq!(accepted_of(&[next(&r.submit(spec(1), true).unwrap())]), (false, 0));
@@ -777,7 +779,15 @@ fn results_are_forwarded_in_order() {
         ServerMsg::Done { status: Status::Failed, exit: 101, .. } => {}
         other => panic!("{other:?}"),
     }
-    assert!(!tmp.0.join("out").join(jid(1)).exists(), "成果物の無いジョブのフォルダは残さない");
+    // フォルダは `done` を送った後に消すので、少し待つ（31 回に 1 回、消す前に見て落ちた）
+    let gone = (0..200).any(|_| {
+        let g = !tmp.0.join("out").join(jid(1)).exists();
+        if !g {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        g
+    });
+    assert!(gone, "成果物の無いジョブのフォルダは残さない");
 }
 
 #[test]
@@ -901,7 +911,9 @@ fn shutdown_stops_running_jobs_and_refuses_new_ones() {
     let b = r.submit(spec(2), true).unwrap();
     wait_until("道具が起動する", || pgid.lock().unwrap().is_some());
     r.shutdown();
-    assert!(!group_alive(pgid.lock().unwrap().unwrap()), "戻ったときには道具は死んでいる");
+    // 戻ったときには殺してある（刈り取られるまで zombie として残りうるので、消えるのを待つ）
+    let pg = pgid.lock().unwrap().unwrap();
+    wait_until("道具のグループが消える", || !group_alive(pg));
     assert_eq!(done_of(&collect(&a)).0, Status::Cancelled);
     assert_eq!(done_of(&collect(&b)).0, Status::Cancelled);
     assert_eq!(r.submit(spec(3), true).err(), Some(SubmitError::QueueFull));

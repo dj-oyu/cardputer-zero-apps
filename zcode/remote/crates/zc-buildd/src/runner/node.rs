@@ -447,7 +447,9 @@ mod tests {
         let (_t, src, proj, out_dir) = job(&[
             ("package.json", PKG),
             ("main.ts", "import { two } from './lib.js';\nconsole.log(two());\n"),
-            ("lib.ts", "export function two(): number {\n  return /* 日本 */ \"2\";\n}\n"),
+            // TS 7 は戻り値の型の誤りを `return` の位置で報告するので、誤りは日本語の後ろの引数に置く
+            // （桁が UTF-8 のバイト数で数えられているかを確かめる）
+            ("lib.ts", "export function two(): number {\n  return /* 日本 */ half(\"4\");\n}\nfunction half(n: number): number { return n / 2; }\n"),
             ("test.mjs", "process.exit(0);\n"),
         ]);
         let (r, log) = run_job(&src, &proj, &out_dir, Kind::Check, Some("main.ts"));
@@ -455,7 +457,7 @@ mod tests {
         assert_ne!(r.exit, 0, "{}", log.text());
         let d = r.diagnostics.iter().find(|f| f.path == "lib.ts").expect("lib.ts の診断");
         assert_eq!(d.diags[0].line, 1);
-        assert_eq!(d.diags[0].col, Some("  return /* 日本 */ ".len() as u32));
+        assert_eq!(d.diags[0].col, Some("  return /* 日本 */ half(".len() as u32));
         // lock が無かった → 作って書き戻す
         assert!(r.write_back.iter().any(|(p, t)| p == "package-lock.json" && t.contains("\"name\": \"t\"")));
         assert!(proj.join("node_modules").is_dir() || proj.join(STAMP).is_file());
