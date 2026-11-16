@@ -1,0 +1,448 @@
+# Python（参照用の言語。書き方は ../README.md）
+# 色の付け方は VS Code の Dark+（MagicPython）に寄せてある。
+
+name = "Python"
+extensions = ["py", "pyw", "pyi"]
+first_line = '^#!.*\bpython[0-9.]*\b'
+line_comment = "#"
+indent = "    "
+run = "python3 {file}"
+check = "python3 -I -S -c 'import ast,sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' {file}"
+# 括弧の組 1 = 行（1 始まり）、2 = 桁、3 = メッセージ（2 と 3 は省略可）
+check_pattern = 'line (\d+)'
+# 単語補完に出すキーワードと組み込みの名前
+keywords = [
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
+    "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global",
+    "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise",
+    "return", "try", "while", "with", "yield", "match", "case",
+    "print", "len", "range", "enumerate", "zip", "open", "isinstance", "sorted", "reversed",
+    "int", "float", "str", "bytes", "bool", "list", "tuple", "dict", "set", "super", "self",
+]
+
+[outline]
+items = { def = "function", class = "class" }
+modifiers = ["async"]
+
+[variables]
+# 識別子。非 ASCII のバイトは識別子の一部として扱う（Unicode の文字クラスは使わない）
+ident = '[A-Za-z_{{nonascii}}][A-Za-z0-9_{{nonascii}}]*'
+idchar = 'A-Za-z0-9_{{nonascii}}'
+# 文字列の前置き
+raw = '(?i:rb|br|r)'
+fmt = '(?i:f|fr|rf)'
+plain = '(?i:b|u)?'
+
+# 識別子の規則（words = true）に一致した語の種類。キーワードを正規表現の選択で書くと
+# DFA が大きくなるので、識別子を 1 つの規則で取ってから、この表で引く
+[words]
+keyword = ["def", "class", "and", "or", "not", "in", "is", "lambda", "global", "nonlocal", "del"]
+control = [
+    "if", "elif", "else", "for", "while", "break", "continue", "return", "try", "except",
+    "finally", "raise", "with", "yield", "import", "from", "as", "pass", "assert", "async", "await",
+]
+constant = ["True", "False", "None", "NotImplemented", "Ellipsis", "__debug__", "self", "cls"]
+type = [
+    "int", "float", "complex", "str", "bytes", "bytearray", "bool", "list", "tuple", "dict", "set",
+    "frozenset", "object", "type", "range", "memoryview", "slice", "property", "staticmethod",
+    "classmethod", "super",
+    "BaseException", "Exception", "ArithmeticError", "AssertionError", "AttributeError", "EOFError",
+    "FileExistsError", "FileNotFoundError", "ImportError", "IndexError", "KeyError",
+    "KeyboardInterrupt", "LookupError", "ModuleNotFoundError", "NameError", "NotImplementedError",
+    "OSError", "IOError", "OverflowError", "PermissionError", "RecursionError", "RuntimeError",
+    "StopIteration", "SyntaxError", "SystemExit", "TimeoutError", "TypeError", "UnicodeDecodeError",
+    "UnicodeEncodeError", "ValueError", "ZeroDivisionError", "Warning", "DeprecationWarning",
+    "UserWarning",
+]
+
+# 語のあとに積む文脈（def の後ろは関数名、class の後ろはクラス名）
+[word_push]
+def = "funcname"
+class = "classname"
+
+[default_token]
+tdq = "string"
+tsq = "string"
+sdq = "string"
+ssq = "string"
+raw_tdq = "string"
+raw_tsq = "string"
+raw_sdq = "string"
+raw_ssq = "string"
+f_tdq = "string"
+f_tsq = "string"
+f_sdq = "string"
+f_ssq = "string"
+
+[[contexts.main]]
+include = "expr"
+
+# ---- 式（ほとんどの文脈がこれを取り込む） ----
+
+[[contexts.expr]]
+match = '#.*'
+token = "comment"
+# 文字列。前置き（r / f / b など。無くてもよい）は引用符の手前で 1 度だけ見て、
+# 引用符の種類は *_open の文脈で振り分ける（前置き × 引用符の組み合わせを 1 つの
+# DFA に入れると表が大きくなる）
+[[contexts.expr]]
+match = '{{raw}}'
+followed_by = "[\"']"
+token = "string"
+push = "raw_open"
+[[contexts.expr]]
+match = '{{fmt}}'
+followed_by = "[\"']"
+token = "string"
+push = "f_open"
+[[contexts.expr]]
+match = '{{plain}}'
+followed_by = "[\"']"
+token = "string"
+push = "plain_open"
+# デコレータ（行頭だけ。`a @ b` の行列積と区別する）
+[[contexts.expr]]
+match = '^[ \t]*@[ \t]*{{ident}}(?:[ \t]*\.[ \t]*{{ident}})*'
+token = "attribute"
+# 識別子。キーワード・組み込みの型などは [words] で引く（非 ASCII の文字も識別子の
+# 一部なので `if文` はキーワードにならない）。名前の後ろに `(` が続けば呼び出し（関数の色）
+[[contexts.expr]]
+match = '{{ident}}'
+followed_by = '[ \t]*\('
+token = "function"
+words = true
+[[contexts.expr]]
+match = '__[A-Za-z0-9_]+__'
+token = "variable"
+words = true
+[[contexts.expr]]
+match = '{{ident}}'
+token = "text"
+words = true
+# 数
+# 数字で始まる英数字の並びをまとめて数とする（0x1F・1_000・1.5e-3j など。厳密に
+# 書くと文字の種類が増えて DFA が数十 KB 大きくなる）
+[[contexts.expr]]
+match = '(?:[0-9]|\.[0-9])(?:[eE][+-]|[0-9A-Za-z_.])*'
+token = "number"
+# 演算子と区切り（演算子は記号の並びをまとめて 1 つにする。`**=` などを個別に書くと
+# 文字の種類が増えて DFA の表の幅が 2 倍になる）
+[[contexts.expr]]
+match = '[-+*/%@&|^~<>!=]+'
+token = "operator"
+[[contexts.expr]]
+match = '[()\[\]{},:;.]'
+token = "punctuation"
+[[contexts.expr]]
+match = '[ \t]+'
+token = "text"
+
+# ---- def の名前と引数 ----
+
+[[contexts.funcname]]
+match = '[ \t]+'
+token = "text"
+[[contexts.funcname]]
+match = '{{ident}}'
+token = "function"
+set = "def_params"
+[[contexts.funcname]]
+match = ''
+pop = true
+
+[[contexts.def_params]]
+match = '[ \t]+'
+token = "text"
+[[contexts.def_params]]
+match = '\('
+token = "punctuation"
+set = "params"
+[[contexts.def_params]]
+match = ''
+pop = true
+
+# 引数の並び（複数行にまたがってよい）
+[[contexts.params]]
+match = '\)'
+token = "punctuation"
+pop = true
+[[contexts.params]]
+match = '#.*'
+token = "comment"
+[[contexts.params]]
+match = '[ \t]+'
+token = "text"
+[[contexts.params]]
+match = ','
+token = "punctuation"
+[[contexts.params]]
+match = '\*\*|\*|/'
+token = "operator"
+# 引数の名前（self / cls は [words] で定数の色になる）
+[[contexts.params]]
+match = '{{ident}}'
+token = "variable"
+words = true
+[[contexts.params]]
+match = ':'
+token = "punctuation"
+push = "param_expr"
+[[contexts.params]]
+match = '='
+token = "operator"
+push = "param_expr"
+
+# 型注釈と既定値: 括弧の外の `,` か `)` で終わる（それは消費しない）
+[[contexts.param_expr]]
+match = ''
+followed_by = '[,)]'
+pop = true
+[[contexts.param_expr]]
+match = '[(\[{]'
+token = "punctuation"
+push = "bracket"
+[[contexts.param_expr]]
+match = '='
+token = "operator"
+[[contexts.param_expr]]
+include = "expr"
+
+# 括弧の中（閉じるまで）
+[[contexts.bracket]]
+match = '[)\]}]'
+token = "punctuation"
+pop = true
+[[contexts.bracket]]
+match = '[(\[{]'
+token = "punctuation"
+push = "bracket"
+[[contexts.bracket]]
+include = "expr"
+
+[[contexts.classname]]
+match = '[ \t]+'
+token = "text"
+[[contexts.classname]]
+match = '{{ident}}'
+token = "type"
+pop = true
+[[contexts.classname]]
+match = ''
+pop = true
+
+# ---- 文字列の部品 ----
+# 文字列の文脈は「閉じ記号・本文」を自分で持ち、エスケープと書式は最後の include で
+# 引く（最後の include は DFA を共有するので、文字列の種類が多くても表が小さい）
+
+# 引用符の種類で文字列の文脈を決める（三重引用符を先に）
+[[contexts.plain_open]]
+match = '"""'
+token = "string"
+set = "tdq"
+[[contexts.plain_open]]
+match = "'''"
+token = "string"
+set = "tsq"
+[[contexts.plain_open]]
+match = '"'
+token = "string"
+set = "sdq"
+[[contexts.plain_open]]
+match = "'"
+token = "string"
+set = "ssq"
+[[contexts.plain_open]]
+match = ''
+pop = true
+
+[[contexts.raw_open]]
+match = '"""'
+token = "string"
+set = "raw_tdq"
+[[contexts.raw_open]]
+match = "'''"
+token = "string"
+set = "raw_tsq"
+[[contexts.raw_open]]
+match = '"'
+token = "string"
+set = "raw_sdq"
+[[contexts.raw_open]]
+match = "'"
+token = "string"
+set = "raw_ssq"
+[[contexts.raw_open]]
+match = ''
+pop = true
+
+[[contexts.f_open]]
+match = '"""'
+token = "string"
+set = "f_tdq"
+[[contexts.f_open]]
+match = "'''"
+token = "string"
+set = "f_tsq"
+[[contexts.f_open]]
+match = '"'
+token = "string"
+set = "f_sdq"
+[[contexts.f_open]]
+match = "'"
+token = "string"
+set = "f_ssq"
+[[contexts.f_open]]
+match = ''
+pop = true
+
+# エスケープ（\x・\u・\U の桁数は見ない。`\` の次の 1 文字もエスケープとして色を付ける）
+[[contexts.str_escape]]
+match = '''\\(?:[xuU][0-9a-fA-F]+|N\{[^}\n]*\}|[0-7]{1,3}|.|\n)'''
+token = "escape"
+
+# エスケープと書式の置き場所（`{}` と `%d`）
+[[contexts.str_parts]]
+include = "str_escape"
+[[contexts.str_parts]]
+match = '\{\{|\}\}'
+token = "escape"
+[[contexts.str_parts]]
+match = '''\{[A-Za-z0-9_.\[\]]*(?:![A-Za-z])?(?::[^{}"'\n]*)?\}'''
+token = "constant"
+[[contexts.str_parts]]
+match = '%(?:\([A-Za-z0-9_]+\))?[-#0-9 +.*]*[A-Za-z%]'
+token = "constant"
+
+# ---- 文字列（三重引用符は複数行、一重は行末で終わる） ----
+
+[[contexts.tdq]]
+match = '"""'
+pop = true
+[[contexts.tdq]]
+match = '[^"\\{}%]+'
+[[contexts.tdq]]
+include = "str_parts"
+
+[[contexts.tsq]]
+match = "'''"
+pop = true
+[[contexts.tsq]]
+match = '''[^'\\{}%]+'''
+[[contexts.tsq]]
+include = "str_parts"
+
+[[contexts.sdq]]
+match = '"'
+pop = true
+[[contexts.sdq]]
+match = '\n'
+pop = true
+[[contexts.sdq]]
+match = '[^"\\{}%\n]+'
+[[contexts.sdq]]
+include = "str_parts"
+
+[[contexts.ssq]]
+match = "'"
+pop = true
+[[contexts.ssq]]
+match = '\n'
+pop = true
+[[contexts.ssq]]
+match = '''[^'\\{}%\n]+'''
+[[contexts.ssq]]
+include = "str_parts"
+
+# raw: エスケープは無いが、`\"` で文字列は終わらない
+[[contexts.raw_tdq]]
+match = '"""'
+pop = true
+[[contexts.raw_tdq]]
+match = '\\.|[^"\\]+'
+
+[[contexts.raw_tsq]]
+match = "'''"
+pop = true
+[[contexts.raw_tsq]]
+match = '''\\.|[^'\\]+'''
+
+[[contexts.raw_sdq]]
+match = '"'
+pop = true
+[[contexts.raw_sdq]]
+match = '\n'
+pop = true
+[[contexts.raw_sdq]]
+match = '\\.|[^"\\\n]+'
+
+[[contexts.raw_ssq]]
+match = "'"
+pop = true
+[[contexts.raw_ssq]]
+match = '\n'
+pop = true
+[[contexts.raw_ssq]]
+match = '''\\.|[^'\\\n]+'''
+
+# f 文字列: `{式}` の中は式として色を付ける
+[[contexts.f_parts]]
+match = '\{\{|\}\}'
+token = "escape"
+[[contexts.f_parts]]
+match = '\{'
+token = "constant"
+push = "fexpr"
+[[contexts.f_parts]]
+include = "str_escape"
+
+[[contexts.f_tdq]]
+match = '"""'
+pop = true
+[[contexts.f_tdq]]
+match = '[^"\\{}]+'
+[[contexts.f_tdq]]
+include = "f_parts"
+
+[[contexts.f_tsq]]
+match = "'''"
+pop = true
+[[contexts.f_tsq]]
+match = '''[^'\\{}]+'''
+[[contexts.f_tsq]]
+include = "f_parts"
+
+[[contexts.f_sdq]]
+match = '"'
+pop = true
+[[contexts.f_sdq]]
+match = '\n'
+pop = true
+[[contexts.f_sdq]]
+match = '[^"\\{}\n]+'
+[[contexts.f_sdq]]
+include = "f_parts"
+
+[[contexts.f_ssq]]
+match = "'"
+pop = true
+[[contexts.f_ssq]]
+match = '\n'
+pop = true
+[[contexts.f_ssq]]
+match = '''[^'\\{}\n]+'''
+[[contexts.f_ssq]]
+include = "f_parts"
+
+[[contexts.fexpr]]
+match = '\}'
+token = "constant"
+pop = true
+[[contexts.fexpr]]
+match = '[(\[{]'
+token = "punctuation"
+push = "bracket"
+[[contexts.fexpr]]
+match = '''![rsa](?::[^{}"'\n]*)?|:[^{}"'\n]*'''
+token = "constant"
+[[contexts.fexpr]]
+include = "expr"

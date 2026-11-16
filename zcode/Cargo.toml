@@ -29,6 +29,11 @@ swash = "0.2"
 png = "0.17"
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 serde = { version = "1", features = ["derive"] }
+# ハイライトの DFA (zc-highlight)。実行時は dfa-search だけ、作るのは build.rs と道具
+regex-automata = { version = "0.4", default-features = false, features = ["std"] }
+# zc-store: CRC32 つきの独自形式、SKK 個人辞書 (EUC-JP)
+crc32fast = "1"
+encoding_rs = "0.8"
 
 [profile.release]
 opt-level = 3

@@ -1,0 +1,13 @@
+[package]
+name = "zc-store"
+description = "zcode の SD 前提の書き込み層: 原子的な保存・CRC 付きの独自形式・2 段の控え・SKK 個人辞書"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zc-core.workspace = true
+libc.workspace = true
+crc32fast.workspace = true
+encoding_rs.workspace = true

@@ -5,6 +5,26 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+build = "build.rs"
+
+[features]
+# 規則 → DFA の変換と language.toml の読み込みを、ライブラリからも使えるようにする
+# (道具 zcode-langc とテスト用)。実機の実行ファイルには入れない。
+compile = ["dep:toml", "dep:serde", "regex-automata/dfa-build", "regex-automata/syntax"]
 
 [dependencies]
 zc-core.workspace = true
+libc.workspace = true
+# 実行時は DFA を読むだけ (作るコードは入れない)
+regex-automata = { workspace = true, features = ["dfa-search"] }
+toml = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+
+[build-dependencies]
+zc-core.workspace = true
+regex-automata = { workspace = true, features = ["std", "syntax", "dfa-build"] }
+toml.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+zc-highlight = { path = ".", features = ["compile"] }
