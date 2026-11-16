@@ -12,6 +12,7 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 | `docs/stage1-notes.md` | 段階 1 の作業メモ: API の決定と理由、design.md への提案、実機の計測、未解決の点、**キー確認の進め方** |
 | `docs/ui-mock.html` | 画面のモック（320×170 実寸を拡大表示）。画面 1〜11 とショートカットの全項目 |
 | `docs/remote-build.html` | 外でビルド・試験・型検査する仕組みの設計（Cloudflare Containers / PC、認証、送る形・返す形、実機側の別プロセス `zc-remote`）。却下した案の理由つき。未実装。ユーザーの決定（2026-11-16）: Cloudflare が前提、`zc-remote` の TLS の暗号は ring（「pure Rust だけ」の例外。zcode 本体には入れない）、最後に成功した実行ファイルをプロジェクトごとに 1 つ SD（`~/.cache/zcode/bin/`）に残す（「再計算できるキャッシュは SD に書かない」の例外。オフラインでは作り直せないため） |
+| `docs/stage3-design.md` | 段階 3 の残りの設計: 外部ビルド（受付 `zc-buildd`・実機側 `zc-remote`・Cloudflare の Worker / DO / コンテナ・約束）、zcode へのつなぎ込み、診断の持ち方、JS / TS の F5、人がやる準備、**課題の表（持ち物・順番・担当）**。雛形は入っているが中身は未実装。`remote-build.html` と食い違うところはこちらが優先 |
 | `bench/` | 実測に使ったベンチマーク（`bench/README.md`）。測り直すときはこれを使う |
 
 ## 守ること（設計の要点）
@@ -198,6 +199,22 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - 正解画像はモック 3（実行中）だけ。モック 4（エラー終了）はシェルのプロンプトが環境で変わる
   ので、`cargo test -p zcode --test terminal -- --ignored` で `out/terminal-error.png` に描いて
   目で見る
+
+## 段階 3 の残りの設計で決めたこと（2026-11-17、`docs/stage3-design.md`）
+
+- 外部ビルドは **別のワークスペース `remote/`**（`zc-wire`・`zc-remote`・`zc-buildd`、Worker、
+  イメージ）。ring・rustls・serde_json を zcode 本体の `Cargo.lock` に入れないため。回し方は
+  `cd zcode\remote; ..\..\container\dev.ps1 cargo test --locked --workspace` と `./build.sh`
+  （`out/zc-remote` = 実機用、`out/zc-buildd` = ビルド係用）
+- zcode 本体に足したのは、診断の型（`zc_core::diag`。`zc-intel` からも同じ名前）、診断の置き場
+  （`zc_intel::DiagStore`・`ShiftLog`）、UNIX ソケットの約束（`zc-remote-ipc`）、専用スレッドの
+  口（`zcode/src/remote.rs`）、`AppEvent::Remote`、`check` ワーカー、`language.toml` の `remote`。
+  どれも雛形（`todo!()`）で、まだどこからも呼んでいない
+- **雛形の公開の形（型・関数の名前と引数）は、課題の担当が勝手に変えない。** 課題は
+  `docs/stage3-design.md` §13 の表のとおりに分け、課題どうしで同じファイルに触らない
+- F5（Rust / C）は、ターミナルで `zc-remote run <file>` を動かす形にする（zcode の F5 の
+  仕組みは変えない）。保存時の check と「試験を実行」は専用スレッド経由
+- ring は開発コンテナのクロスの gcc だけで aarch64 にビルドできた（LSE / RCpc の命令は 12 個）
 
 ## 次にやること
 

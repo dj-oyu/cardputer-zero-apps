@@ -1,0 +1,20 @@
+{
+  "name": "zcode-build-worker",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "zcode のビルド係の Cloudflare 側: Worker (Access の JWT の確認・回数制限) と Durable Object (ジョブの持ち主・コンテナの寿命)",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "TODO(C3): 版を固定する",
+    "@cloudflare/workers-types": "TODO(C3): 版を固定する",
+    "typescript": "TODO(C3): 版を固定する",
+    "vitest": "TODO(C3): 版を固定する",
+    "wrangler": "TODO(C3): 版を固定する"
+  }
+}

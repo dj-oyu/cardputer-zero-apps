@@ -11,6 +11,12 @@ target/
 
 # zcode: 実機用バイナリの置き場、render-test の不一致時の出力
 zcode/out/
+zcode/remote/out/
+# zcode/remote/worker: npm の依存と wrangler の作業フォルダ、手元だけの設定
+node_modules/
+.wrangler/
+.dev.vars
+wrangler.local.jsonc
 *.actual.png
 *.actual.txt
 

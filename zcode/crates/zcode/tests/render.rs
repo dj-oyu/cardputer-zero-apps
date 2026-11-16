@@ -200,7 +200,7 @@ fn editor_check_error_screen() {
     // 5 行目（0 始まり）の `:` を消して、チェックの結果が届いたことにする
     type_keys(&mut ed, &[KeyEvent::new(Key::Up, Mods::NONE), KeyEvent::new(Key::End, Mods::NONE), KeyEvent::new(Key::Backspace, Mods::NONE), KeyEvent::new(Key::Down, Mods::NONE)]);
     let doc = ed.active_doc_id().unwrap();
-    let diag = zc_intel::Diagnostic { line: 5, col: None, severity: zc_intel::Severity::Error, message: "SyntaxError: expected ':'".into() };
+    let diag = zc_intel::Diagnostic::at_line(5, zc_intel::Severity::Error, "SyntaxError: expected ':'");
     drive(&mut ed, |ed, cx| ed.on_event(zcode::app::AppEvent::Checked { doc, result: Ok(vec![diag]) }, cx));
     check(&mut ed, "editor-check.png");
     let _ = fs::remove_dir_all(&root);

@@ -163,7 +163,7 @@ pub fn parse_diagnostics(output: &str, pattern: &str, file: &str) -> Result<Vec<
             .unwrap_or_else(|| lines[*i].trim().to_string());
         let is_warning = message.to_ascii_lowercase().contains("warning") || lines[*i].to_ascii_lowercase().contains("warning");
         let severity = if is_warning { Severity::Warning } else { Severity::Error };
-        let d = Diagnostic { line: line_no.saturating_sub(1), col, severity, message };
+        let d = Diagnostic { line: line_no.saturating_sub(1), col, end: None, severity, code: None, message };
         if !out.contains(&d) {
             out.push(d);
         }
@@ -318,7 +318,7 @@ SyntaxError: invalid syntax
     #[test]
     fn parses_python_traceback() {
         let d = parse_diagnostics(PY_TRACE, r"line (\d+)", "/tmp/bad.py").unwrap();
-        assert_eq!(d, vec![Diagnostic { line: 2, col: None, severity: Severity::Error, message: "SyntaxError: invalid syntax".into() }]);
+        assert_eq!(d, vec![Diagnostic::at_line(2, Severity::Error, "SyntaxError: invalid syntax")]);
         // ファイル名を含む行が無ければ、全部拾う
         let d = parse_diagnostics(PY_TRACE, r"line (\d+)", "/other.py").unwrap();
         assert_eq!(d.len(), 3);

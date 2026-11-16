@@ -1,0 +1,10 @@
+# `wrangler dev` 用の見本。本番は `wrangler secret put <名前>` で入れる（どちらも git に入れない）。
+# 値の出どころは docs/stage3-design.md §12.1。
+#
+# Zero Trust のチームのドメイン（https:// は付けない）
+ACCESS_TEAM_DOMAIN=<team-name>.cloudflareaccess.com
+# Access のアプリケーションの AUD タグ（Application Audience）
+ACCESS_AUD=<64 桁の 16 進>
+# 受け付けるサービストークンと、それに付ける名前（JSON。鍵 = トークンの Client ID）。
+# ここに無いトークンは、Access を通っても断る。
+DEVICES={"<client-id>.access":"cz-1"}

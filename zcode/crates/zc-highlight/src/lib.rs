@@ -87,6 +87,8 @@ pub struct LanguageInfo {
     pub indent: &'static str,
     /// F5 で実行するコマンド（`{file}` をパスに置き換える）。
     pub run: Option<&'static str>,
+    /// ビルド係での扱い（`rust` / `c` / `node`。docs/stage3-design.md §10.1）。
+    pub remote: Option<&'static str>,
     /// 保存時の構文チェックのコマンド（§10.2）。
     pub check: Option<&'static str>,
     /// チェックの出力からエラー行を拾う正規表現（zc-intel が使う）。

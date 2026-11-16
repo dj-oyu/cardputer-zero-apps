@@ -1,0 +1,10 @@
+[package]
+name = "zc-remote-ipc"
+description = "zcode と zc-remote (別プロセス) の間の UNIX ソケットの約束: 長さつき・固定の並びのメッセージ"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zc-core.workspace = true
