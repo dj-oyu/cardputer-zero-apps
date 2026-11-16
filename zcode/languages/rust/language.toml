@@ -14,8 +14,11 @@ name = "Rust"
 extensions = ["rs"]
 line_comment = "//"
 indent = "    "
-# 1 ファイルだけのプログラム用（cargo のプロジェクトでは使えない）。シェルは通さないので bash -c で包む
-run = "bash -c 'rustc \"$0\" -o /tmp/zc-run && /tmp/zc-run' {file}"
+# ビルド係での扱い（docs/stage3-design.md §10.1）。保存時の check と「試験を実行」はビルド係で
+remote = "rust"
+# F5: ビルド係で aarch64 向けにビルドして、その場で実行する（§8.4。cargo のプロジェクトでも
+# 1 ファイルだけでもよい）。実機には rustc を置かないので、実機の check は無い
+run = "zc-remote run {file}"
 keywords = [
     "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
     "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",

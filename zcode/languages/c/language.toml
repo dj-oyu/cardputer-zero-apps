@@ -13,7 +13,11 @@ name = "C"
 extensions = ["c", "h"]
 line_comment = "//"
 indent = "    "
-run = "bash -c 'gcc \"$0\" -o /tmp/zc-run && /tmp/zc-run' {file}"
+# ビルド係での扱い（docs/stage3-design.md §10.1）。保存時の check はビルド係で
+remote = "c"
+# F5: ビルド係で aarch64（Cortex-A53）向けにビルドして、その場で実行する（§8.4）
+run = "zc-remote run {file}"
+# 実機の check（ビルド係に頼めないとき）。実機に gcc が無ければ効かない（未確認。§15）
 check = "gcc -fsyntax-only {file}"
 # gcc の出力: `ファイル:行:桁: error: メッセージ`
 check_pattern = '^(?:.*?):(\d+):(\d+): (?:fatal error|error|warning): (.*)$'
