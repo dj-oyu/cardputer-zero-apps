@@ -784,8 +784,11 @@ Worker 単位の Access（「Protect this Worker」）は WebSocket の Upgrade 
    npx wrangler login
    npx wrangler deploy
    ```
-   （`--domain` が使えない版では、手元だけの設定ファイル `wrangler.local.jsonc` に `routes` を
-   書いて `-c` で渡す。git には入れない）
+   （2026-11-17 更新: 実際の手順は `docs/setup-remote-build.md` §2 が正。この PC には docker が
+   無いので `remote\container\deploy.ps1` が wrangler の docker を wslc に読み替える。Access は
+   deploy の後に Worker → Settings → Domains & Routes → workers.dev → Enable Cloudflare Access で
+   掛け、ポリシーを Service Auth にして AUD を読む。上の手順 5 のように self-hosted の
+   アプリケーションへ workers.dev のホスト名を入れる形は、Zero Trust に断られる）
 8. 値を入れる（聞かれたら貼る）:
    ```sh
    npx wrangler secret put ACCESS_TEAM_DOMAIN   # <team-name>.cloudflareaccess.com

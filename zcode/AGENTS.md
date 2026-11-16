@@ -13,7 +13,7 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 | `docs/ui-mock.html` | 画面のモック（320×170 実寸を拡大表示）。画面 1〜11 とショートカットの全項目 |
 | `docs/setup-remote-build.md` | **人向け**の導入手順: Cloudflare（プラン・Zero Trust・サービストークン・Access・deploy・秘密の値）、Tailscale と PC（ACL・ファイアウォール）、実機ごとの設定、トークンを失くしたとき |
 | `docs/remote-build.html` | 外でビルド・試験・型検査する仕組みの設計（Cloudflare Containers / PC、認証、送る形・返す形、実機側の別プロセス `zc-remote`）。却下した案の理由つき。未実装。ユーザーの決定（2026-11-16）: Cloudflare が前提、`zc-remote` の TLS の暗号は ring（「pure Rust だけ」の例外。zcode 本体には入れない）、最後に成功した実行ファイルをプロジェクトごとに 1 つ SD（`~/.cache/zcode/bin/`）に残す（「再計算できるキャッシュは SD に書かない」の例外。オフラインでは作り直せないため） |
-| `docs/stage3-design.md` | 段階 3 の残りの設計: 外部ビルド（受付 `zc-buildd`・実機側 `zc-remote`・Cloudflare の Worker / DO / コンテナ・約束）、zcode へのつなぎ込み、診断の持ち方、JS / TS の F5、人がやる準備、**課題の表（持ち物・順番・担当）**。雛形は入っているが中身は未実装。`remote-build.html` と食い違うところはこちらが優先 |
+| `docs/stage3-design.md` | 段階 3 の残りの設計: 外部ビルド（受付 `zc-buildd`・実機側 `zc-remote`・Cloudflare の Worker / DO / コンテナ・約束）、zcode へのつなぎ込み、診断の持ち方、JS / TS の F5、人がやる準備、**課題の表（持ち物・順番・担当）**。課題は D5・C3・C4 以外実装済み（2026-11-17）。`remote-build.html` と食い違うところはこちらが優先 |
 | `bench/` | 実測に使ったベンチマーク（`bench/README.md`）。測り直すときはこれを使う |
 
 ## 守ること（設計の要点）
@@ -138,7 +138,8 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - 保存は `zc-store` 経由（`save.rs` の `StoreSaver`）。内容が前回と同じでディスクも
   変わっていなければ書かない（「変更なし」）。開いた後にほかのプログラムが変えた
   ファイルを上書きしたら、ステータスバーで知らせる
-- 保存できたら、`language.toml` の `check` を batch で使い捨てで走らせる（`intel.rs`）。
+- 保存できたら、`language.toml` の `check` を **`check` ワーカー**で使い捨てで走らせる（`intel.rs`。段階 3 で batch から移した）。
+  `remote` のある言語はまずビルド係で check し、届かなければ手元の `check` に戻す。
   エラーは赤い波線・赤いタブ名・ステータスバーの件数 `⊗ n` と右のメッセージ（モック 13）。
   波線は編集に合わせて行をずらす
 - 単語補完（モック 12）: 単語を 2 文字打つと自動で出す。Tab で確定（↑↓ で選ぶ、Esc で
@@ -210,12 +211,65 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - zcode 本体に足したのは、診断の型（`zc_core::diag`。`zc-intel` からも同じ名前）、診断の置き場
   （`zc_intel::DiagStore`・`ShiftLog`）、UNIX ソケットの約束（`zc-remote-ipc`）、専用スレッドの
   口（`zcode/src/remote.rs`）、`AppEvent::Remote`、`check` ワーカー、`language.toml` の `remote`。
-  どれも雛形（`todo!()`）で、まだどこからも呼んでいない
+  2026-11-17 時点で W1・W2・B1〜B4・D1〜D4・I1・Z1〜Z3・C1・C2・H1・R1・M1 は実装済み・統合済み
+  （`zcode-stage3-remote`）。zcode 側は `DiagStore`（ソースごとの置き換え・遅れた結果のずらし）、
+  保存時のビルド係の check、F6（Fn+6）の「試験を実行」（モック 15）、起動時に `~/.local/bin` を PATH の先頭へ
 - **雛形の公開の形（型・関数の名前と引数）は、課題の担当が勝手に変えない。** 課題は
   `docs/stage3-design.md` §13 の表のとおりに分け、課題どうしで同じファイルに触らない
 - F5（Rust / C）は、ターミナルで `zc-remote run <file>` を動かす形にする（zcode の F5 の
   仕組みは変えない）。保存時の check と「試験を実行」は専用スレッド経由
 - ring は開発コンテナのクロスの gcc だけで aarch64 にビルドできた（LSE / RCpc の命令は 12 個）
+
+## ビルド係のイメージ・deploy・CI（課題 C3、2026-11-17）
+
+- イメージ `remote/container/Dockerfile`（文脈は zcode/、`zcode/.dockerignore` で絞る）。版は ARG で固定:
+  ベース `debian:trixie-20261104-slim@sha256:…`、rustup 1.29.3（rustup-init の SHA-256）、Rust 1.100.0、
+  Node 26.13.1（SHASUMS256 の値）、esbuild 0.28.2・TypeScript 7.0.2（`remote/container/tools/package-lock.json`
+  の integrity、`npm ci --ignore-scripts`）。git・Python・フォントは入れない。実行は uid 1000 の builder。
+  `CARGO_HOME` と `npm_config_cache` は置き場（`/var/lib/zc-buildd`）の中（PC ではボリュームに残る）
+- 大きさ: 展開後 1.52GB、送る形（gzip の層の合計）約 500MB（Rust 263・apt 140・Node 52・ベース 29・
+  tsc / esbuild 15・受付 0.4MB）。`/opt/rustup` が 762MB で大半
+- 版を上げるとき: ARG の値（と `tools/` の lock）を書き換え → `run-pc.ps1 -Build` → 中で試験:
+  `wslc run --rm -v "<zcode>:/work:ro" -w /work/remote -e CARGO_TARGET_DIR=/var/lib/zc-buildd/t --entrypoint bash cz-builder:latest -c "cargo test --locked -p zc-buildd"`。
+  `bash tools/test-install-runtimes.sh` もイメージの中で通る（60 件）
+- イメージの中では zc-buildd の試験が 1 つも飛ばない（zstd・node・tsc・esbuild がある）。2026-11-17 時点で
+  **`runner::node::tests::e2e_check_build_test_and_lock` だけ落ちる**: TypeScript 7 の tsc は
+  `return /* 日本 */ "2";` の型の誤りを `return` の位置（2,3）に出すので、試験の期待（CJK の後ろ）が違う。
+  誤りの位置を CJK の後ろに置く形（`return /* 日本 */ half("4");` + `function half(n: number)`、期待は
+  `"  return /* 日本 */ half(".len()`）に直すと、通し（check → lock の書き戻し → build → npm test）まで通る
+  （仮の写しで確かめた。`runner/node.rs` は課題 B4 の持ち物なので直していない）
+- Worker の依存は `remote/worker/package-lock.json`（wrangler 4.163.0・vitest 3.2.7・TypeScript 7.0.2・
+  workers-types 5.20261116.1）。`.npmrc` で `ignore-scripts=true`（esbuild・workerd は OS ごとの
+  optionalDependencies で動く）。試験は Node の上（`vitest.config.ts`、`node:sqlite` で Node 22.13 以上）。
+  `@cloudflare/vitest-pool-workers` は使っていない
+- `wrangler.jsonc` の項目名は wrangler 4.163.0 の `config-schema.json` と公式の文書で確かめた
+  （`containers[].scheduling_policy: "durable_object"`・`images.<名前>.{dockerfile,build_context}`。
+  この方式では `instance_type`・`max_instances` は書けず、大きさは DO が `start({instance})` で渡す →
+  `vars.INSTANCE_TYPE`）。DO は `migrations` ではなく `exports`（公式の例の形。両方は書けない）。
+  実物での deploy は未確認
+- `wrangler deploy --dry-run` は、Dockerfile のイメージがあると **dry-run でも docker を呼ぶ**。
+  `--containers-rollout=none` を付けるとイメージを飛ばす（CI はこれで設定と束ね方だけ確かめる）
+- **deploy は Windows から `remote\container\deploy.ps1`（docker なし）**。wrangler の呼ぶ docker を
+  `wrangler-docker/docker-shim.mjs` が wslc に読み替える。Windows の Node は `.cmd` / `.ps1` を shell なしで
+  起動できない（EINVAL）ので、`WRANGLER_DOCKER_BIN` には `.mjs` のパスを入れ、`NODE_OPTIONS=--require
+  spawn-hook.cjs` がその起動だけを `node docker-shim.mjs` に差し替える。wrangler 4.163.0 が deploy で呼ぶ
+  docker: `info`・`build --load -t T --platform linux/amd64 --provenance=false -f - <文脈>`（Dockerfile は
+  標準入力）・`image inspect T --format <Go の書式>`・`login --password-stdin`・`tag`・`push`・
+  `manifest inspect -v`・`image rm`。確かめたこと: `deploy.ps1 -DryRun` が通る（wslc でイメージを作り、
+  後で消す）、ローカルのレジストリ（`registry:3.0.0`）への tag・login・push・RepoDigests・manifest の読み替え。
+  未確認: `registry.cloudflare.com` への login・push（最初の本番の deploy で）
+- wslc（3.0.5）で分かったこと: `-p 7411:7411` は **127.0.0.1 だけ**で待つ（docker と違う）。
+  `-p <アドレス>:7411:7411` はそのアドレスだけ。Windows 側で待つのは `dllhost.exe`。名前付きボリュームは
+  初回にイメージの中身と持ち主で作られる。`.dockerignore` と `build -f -` は効く。`build` に
+  `--platform`・`--load`・`--provenance` は無い。`image inspect --format` は json だけ（Go の書式は無い）。
+  `manifest` コマンドは無い。push のあと RepoDigests は埋まる。`localhost:<公開したポート>` のレジストリへ
+  push できる
+- `run-pc.ps1`: Tailscale のインターフェースの IPv4 だけに公開（無ければ止まる）、`-Bind 127.0.0.1` で手元だけ、
+  `-Detach` / `-Stop`。実機（tailnet の別の機体）から届くかは、ACL とファイアウォールを入れてから確かめる
+- CI: `zcode-remote`（開発コンテナで remote の `cargo test`・`build.sh` の aarch64 と LSE の数・
+  `test-install-runtimes.sh`）、`zcode-worker`（tsc・vitest・`wrangler deploy --dry-run --containers-rollout=none`）、
+  `zcode-builder`（イメージを作って中で `cargo test -p zc-buildd` と `/healthz`。イメージか受付が変わったときだけ。
+  層は GitHub Actions のキャッシュ scope=cz-builder）。zcode 本体の `zcode` ジョブは `zcode/remote/` だけの変更では回らない
 
 ## 次にやること
 

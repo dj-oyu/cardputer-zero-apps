@@ -84,6 +84,8 @@ pub const BINDINGS: &[Binding] = &[
     b("表示", "ツリーで選んだファイルを開く", "", Command::TreeOpen),
     b("表示", "アウトライン", "Ctrl+O", Command::ShowOutline),
     b("実行", "保存して実行", "F5", Command::Run),
+    // F6（Fn+6）は案。実機で押しやすいかは未確認（docs/ui-mock.html のモック 15）
+    b("実行", "試験を実行", "F6", Command::RunTests),
     b("実行", "ターミナル開閉", "F12", Command::ToggleTerminal),
     b("実行", "ターミナル全画面", "F11", Command::ToggleTerminalFullscreen),
     b("Markdown", "プレビュー ⇔ ソース", "Ctrl+Shift+V", Command::TogglePreview),
@@ -130,6 +132,7 @@ mod tests {
     fn lookup_bindings_and_text() {
         assert_eq!(lookup(&KeyEvent::new(Key::Char('s'), Mods::CTRL)), Some(Command::Save));
         assert_eq!(lookup(&KeyEvent::new(Key::F(5), Mods::NONE)), Some(Command::Run));
+        assert_eq!(lookup(&KeyEvent::new(Key::F(6), Mods::FN)), Some(Command::RunTests));
         assert_eq!(lookup(&KeyEvent::new(Key::Left, Mods::SHIFT)), Some(mv(Motion::Left, true)));
         assert_eq!(lookup(&KeyEvent::char('A')), Some(Command::InsertChar('A')));
         assert_eq!(lookup(&KeyEvent::char(' ')), Some(Command::InsertChar(' ')));
