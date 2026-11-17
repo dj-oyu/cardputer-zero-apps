@@ -1,0 +1,152 @@
+# Zig（.zig .zon）。色の付け方は VS Code の Dark+ に寄せてある（Zig 専用の定義は標準に無いので
+# C / Rust に合わせた）。
+#
+# 限界:
+# - アウトラインは `fn 名前`（`pub fn` `export fn` `inline fn` も）だけ。`const Foo = struct {…}` は
+#   「行の最初の語がキーワード、次が名前」の形式では型の宣言かただの定数か見分けられず、
+#   `const std = @import("std")` まで並んでしまうので入れない
+# - 型の色は [words] の型名・`u8` `i32` `f64` のような幅つき整数・大文字で始まり小文字を含む名前
+#   （ArrayList）だけ。全部大文字の名前は定数の色
+# - 複数行文字列は行頭の `\\` から行末まで（zig の形）。その行は文字列の色になる
+# - `@"名前"`（引用符つき識別子）と、ラベル（`outer:`）・`.{` `.name` の区別は塗り分けない
+# - 実機に zig が無いので `check` / `run` は付けない
+
+name = "Zig"
+extensions = ["zig", "zon"]
+line_comment = "//"
+indent = "    "
+keywords = [
+    "addrspace", "align", "allowzero", "and", "anyframe", "anytype", "asm", "async", "await",
+    "break", "callconv", "catch", "comptime", "const", "continue", "defer", "else", "enum",
+    "errdefer", "error", "export", "extern", "fn", "for", "if", "inline", "linksection",
+    "noalias", "noinline", "nosuspend", "opaque", "or", "orelse", "packed", "pub", "resume",
+    "return", "struct", "suspend", "switch", "test", "threadlocal", "try", "union",
+    "unreachable", "usingnamespace", "var", "volatile", "while",
+    "true", "false", "null", "undefined", "bool", "void", "type", "usize", "isize", "u8", "u16",
+    "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "anyerror", "noreturn",
+    "std", "main", "print",
+]
+
+[outline]
+items = { fn = "function" }
+modifiers = ["pub", "export", "extern", "inline", "noinline"]
+indent_width = 4
+
+[variables]
+ident = '[A-Za-z_][A-Za-z0-9_]*'
+
+[words]
+keyword = [
+    "fn", "const", "var", "struct", "enum", "union", "opaque", "error", "pub", "comptime",
+    "extern", "export", "inline", "noinline", "packed", "test", "usingnamespace", "threadlocal",
+    "align", "allowzero", "volatile", "addrspace", "linksection", "callconv", "noalias", "asm",
+    "anytype", "anyframe",
+]
+control = [
+    "if", "else", "switch", "while", "for", "break", "continue", "return", "defer", "errdefer",
+    "try", "catch", "orelse", "unreachable", "suspend", "resume", "nosuspend", "await", "async",
+    "and", "or",
+]
+constant = ["true", "false", "null", "undefined"]
+type = [
+    "bool", "void", "type", "noreturn", "anyerror", "usize", "isize", "f16", "f32", "f64", "f80",
+    "f128", "c_char", "c_short", "c_ushort", "c_int", "c_uint", "c_long", "c_ulong",
+    "c_longlong", "c_ulonglong", "c_longdouble", "comptime_int", "comptime_float",
+]
+
+# fn の後ろは関数名
+[word_push]
+fn = "funcname"
+
+[default_token]
+str = "string"
+
+[[contexts.main]]
+include = "expr"
+
+[[contexts.expr]]
+# コメント `//`（`///` ドキュメント・`//!` モジュールの説明も）
+match = '//.*'
+token = "comment"
+# 複数行文字列の 1 行: `\\` から行末まで
+[[contexts.expr]]
+match = '\\\\[^\n]*'
+token = "string"
+[[contexts.expr]]
+match = '"'
+token = "string"
+push = "str"
+# 文字 'a' '\n' '\x41' '\u{1F600}' と、非 ASCII 1 文字
+[[contexts.expr]]
+match = '''\'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]+\}|[^\n])|[^'\\\n{{nonascii}}]|[{{nonascii}}]+)\''''
+token = "string"
+# 組み込み関数 @import @as @intCast …
+[[contexts.expr]]
+match = '@[A-Za-z_][A-Za-z0-9_]*'
+token = "attribute"
+# 幅つき整数 u8 i32 u128（任意の幅）
+[[contexts.expr]]
+match = '[ui][0-9]+'
+followed_by = '[^A-Za-z0-9_]'
+token = "type"
+[[contexts.expr]]
+match = '{{ident}}'
+followed_by = '[ \t]*\('
+token = "function"
+words = true
+[[contexts.expr]]
+match = '[A-Z]'
+followed_by = '[^A-Za-z0-9_]'
+token = "type"
+[[contexts.expr]]
+match = '[A-Z][A-Z0-9_]*'
+followed_by = '[^A-Za-z0-9_]'
+token = "constant"
+[[contexts.expr]]
+match = '[A-Z][A-Za-z0-9_]*'
+token = "type"
+[[contexts.expr]]
+match = '[a-z_][A-Za-z0-9_]*'
+token = "text"
+words = true
+# 数（0x1F・0b101・0o17・1_000・1.5e-3・0x1.8p3）
+[[contexts.expr]]
+match = '[0-9](?:[eEpP][+-]|[0-9A-Za-z_])*(?:\.[0-9](?:[eEpP][+-]|[0-9A-Za-z_])*)?'
+token = "number"
+[[contexts.expr]]
+match = '[-+*/%&|^~<>!=?]+'
+token = "operator"
+[[contexts.expr]]
+match = '[(){}\[\],;:.]'
+token = "punctuation"
+[[contexts.expr]]
+match = '[ \t]+'
+token = "text"
+
+[[contexts.funcname]]
+match = '[ \t]+'
+token = "text"
+[[contexts.funcname]]
+match = '{{ident}}'
+token = "function"
+pop = true
+[[contexts.funcname]]
+match = ''
+pop = true
+
+# "..." は行をまたがない。閉じていなければ行末で終わる
+[[contexts.str]]
+match = '"'
+pop = true
+[[contexts.str]]
+match = '\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]+\}|.)'
+token = "escape"
+[[contexts.str]]
+match = '\n'
+pop = true
+# std.debug.print の書式（{} {d} {s} {x:0>4} {any}）
+[[contexts.str]]
+match = '\{[A-Za-z0-9_:.<>^* -]*\}'
+token = "constant"
+[[contexts.str]]
+match = '[^"\\{\n]+|\{'

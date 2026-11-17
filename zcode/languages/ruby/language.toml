@@ -1,0 +1,401 @@
+# Ruby（.rb .rake .gemspec .ru ほか）。色の付け方は VS Code の Dark+（ruby）に寄せてある。
+#
+# 限界:
+# - ヒアドキュメント（<<~EOS / <<-EOS / <<EOS）は後方参照が要るので、「大文字・数字・_ だけの行」を
+#   終端とみなす近似（シェルと同じ）。小文字の終端語や、`<<EOS` の語が 1 文字のものは対応しない
+#   （`x <<A` のような左シフトと見分けられないため。`<<~` と `<<-` は 1 文字でも可）
+# - 正規表現リテラル /.../ は割り算と見分けられない。`=~` `!~` `(` `,` と
+#   when / if / unless / and / or / not / return のすぐ後ろの `/` だけ正規表現として塗る。1 行で終わる
+# - `%w[]` `%i[]` `%W()` `%I{}` などは、`%` の次に w W i I があるものだけ（`%q` `%Q` `%(...)` は
+#   剰余と区別できない・表を小さくするため塗らない）。区切りは [] () {} <>。入れ子の同じ括弧は覚えない
+# - `?a` の文字リテラルと、記号のグローバル変数（`$!` `$;` など。`$0` と `$名前` は塗る）は塗らない。
+#   `__END__` 以降も普通のコードとして塗る
+# - 文字列の `#{...}` は入れ子の {} を追えるが、中の式は普通のコードの色で塗る
+# - アウトラインは def / class / module。`def self.foo` は名前が `self` になる
+#   （「行の最初の語、次が名前」の形式のため）
+# - 実機に ruby が無いので `check` / `run` は付けない
+
+name = "Ruby"
+extensions = ["rb", "rake", "gemspec", "ru", "rbw"]
+filenames = ["Rakefile", "Gemfile", "Guardfile", "Capfile", "Vagrantfile", "Podfile"]
+first_line = '^#!.*\bruby'
+line_comment = "#"
+indent = "  "
+keywords = [
+    "alias", "and", "begin", "break", "case", "class", "def", "defined?", "do", "else", "elsif",
+    "end", "ensure", "false", "for", "if", "in", "module", "next", "nil", "not", "or", "redo",
+    "rescue", "retry", "return", "self", "super", "then", "true", "undef", "unless", "until",
+    "when", "while", "yield", "require", "require_relative", "attr_accessor", "attr_reader",
+    "attr_writer", "puts", "print", "raise", "lambda", "proc", "include", "extend", "private",
+    "protected", "public", "initialize", "each", "map", "select", "inject",
+]
+
+[outline]
+items = { def = "function", class = "class", module = "class" }
+modifiers = ["private", "protected", "public", "module_function"]
+indent_width = 2
+
+[variables]
+ident = '[A-Za-z_{{nonascii}}][A-Za-z0-9_{{nonascii}}]*'
+lident = '[a-z_{{nonascii}}][A-Za-z0-9_{{nonascii}}]*'
+idchars = 'A-Za-z0-9_{{nonascii}}'
+
+[words]
+keyword = ["def", "class", "module", "alias", "undef", "defined?"]
+control = [
+    "begin", "end", "do", "then",
+    "if", "elsif", "else", "unless", "while", "until", "for", "in", "case", "when", "return",
+    "yield", "break", "next", "redo", "retry", "rescue", "ensure", "and", "or", "not", "super",
+    "raise", "require", "require_relative", "load",
+]
+constant = ["true", "false", "nil", "self", "__FILE__", "__LINE__", "__method__", "__dir__"]
+function = [
+    "puts", "print", "p", "pp", "attr_accessor", "attr_reader", "attr_writer", "include", "extend",
+    "prepend", "private", "protected", "public", "lambda", "proc", "loop", "format", "sprintf",
+    "printf", "gets", "freeze", "block_given?", "module_function",
+]
+
+# def の後ろはメソッド名、class / module の後ろは名前、正規表現が来うる語の後ろは正規表現の前置き
+[word_push]
+def = "defname"
+class = "classname"
+module = "classname"
+when = "rx_pre"
+if = "rx_pre"
+unless = "rx_pre"
+and = "rx_pre"
+or = "rx_pre"
+not = "rx_pre"
+return = "rx_pre"
+
+[default_token]
+dstr = "string"
+sstr = "string"
+heredoc = "string"
+regex = "string"
+pct_sq = "string"
+pct_par = "string"
+pct_cur = "string"
+pct_ang = "string"
+block_comment = "comment"
+interp = "text"
+
+[[contexts.main]]
+include = "expr"
+
+[[contexts.expr]]
+# =begin ... =end（行頭のみ）
+match = '^=begin.*'
+token = "comment"
+push = "block_comment"
+[[contexts.expr]]
+match = '#.*'
+token = "comment"
+[[contexts.expr]]
+match = '"'
+token = "string"
+push = "dstr"
+[[contexts.expr]]
+match = "'"
+token = "string"
+push = "sstr"
+# バッククォート（コマンド）も文字列として塗る（"..." と同じ）
+[[contexts.expr]]
+match = '`'
+token = "string"
+push = "dstr_bq"
+# ヒアドキュメント: <<~EOS <<-'EOS' <<EOS。同じ行の残りは普通に塗り、次の行から本文
+[[contexts.expr]]
+match = '''<<[~-]["']?[A-Z_][A-Z0-9_]*["']?'''
+token = "operator"
+push = ["heredoc", "heredoc_head"]
+[[contexts.expr]]
+match = '''<<["']?[A-Z_][A-Z0-9_]+["']?'''
+token = "operator"
+push = ["heredoc", "heredoc_head"]
+# %w[] %i[] %q() %Q{} %W<> など
+[[contexts.expr]]
+match = '%[wWiI]\['
+token = "string"
+push = "pct_sq"
+[[contexts.expr]]
+match = '%[wWiI]\('
+token = "string"
+push = "pct_par"
+[[contexts.expr]]
+match = '%[wWiI]\{'
+token = "string"
+push = "pct_cur"
+[[contexts.expr]]
+match = '%[wWiI]<'
+token = "string"
+push = "pct_ang"
+# 正規表現: =~ のあと、`(` `,` の直後
+[[contexts.expr]]
+match = '[=!]~'
+token = "operator"
+push = "rx_pre"
+[[contexts.expr]]
+match = '[(,]'
+followed_by = '[ \t]*/'
+token = "punctuation"
+push = "rx_pre"
+# インスタンス変数・クラス変数・グローバル変数
+[[contexts.expr]]
+match = '@@?{{ident}}'
+token = "variable"
+[[contexts.expr]]
+match = '\$(?:{{ident}}|[0-9]+)'
+token = "variable"
+# 名前空間の `::`。`Foo::Bar` の Foo は型の色
+[[contexts.expr]]
+match = '::'
+token = "punctuation"
+# シンボル :name :name? :"..." と、ハッシュのキー name:
+[[contexts.expr]]
+match = ':[A-Za-z_][A-Za-z0-9_]*[?!]?'
+token = "constant"
+[[contexts.expr]]
+match = '[A-Za-z_][A-Za-z0-9_]*[?!]?:'
+followed_by = '[^:]'
+token = "constant"
+# 識別子
+[[contexts.expr]]
+match = '{{lident}}[?!]?'
+followed_by = '[ \t]*\('
+token = "function"
+words = true
+[[contexts.expr]]
+match = '{{lident}}[?!]'
+followed_by = '[^=A-Za-z0-9_]'
+token = "text"
+words = true
+[[contexts.expr]]
+match = '{{lident}}'
+token = "text"
+words = true
+[[contexts.expr]]
+match = '[A-Z][A-Z0-9_]*'
+followed_by = '[^A-Za-z0-9_{{nonascii}}(]'
+token = "constant"
+[[contexts.expr]]
+match = '[A-Z][A-Za-z0-9_{{nonascii}}]*'
+followed_by = '[ \t]*\('
+token = "function"
+[[contexts.expr]]
+match = '[A-Z][A-Za-z0-9_{{nonascii}}]*'
+token = "type"
+# 数（0x1F・1e-3・0b101・1_000・1.5r・10i）
+[[contexts.expr]]
+match = '[0-9](?:[eE][+-]|[0-9A-Za-z_])*(?:\.[0-9](?:[eE][+-]|[0-9A-Za-z_])*)?'
+token = "number"
+[[contexts.expr]]
+match = '[-+*/%&|^~<>!=?]+'
+token = "operator"
+[[contexts.expr]]
+match = '[(){}\[\],;:.\\]'
+token = "punctuation"
+[[contexts.expr]]
+match = '[ \t]+'
+token = "text"
+
+# ---- 名前 ----
+
+# def のあと: `def foo` `def self.foo` `def obj.foo` `def foo=(v)` `def ==(o)` `def <=>(o)`
+[[contexts.defname]]
+match = '[ \t]+'
+token = "text"
+[[contexts.defname]]
+match = '{{ident}}'
+followed_by = '\.'
+token = "constant"
+[[contexts.defname]]
+match = '\.'
+token = "punctuation"
+[[contexts.defname]]
+match = '{{ident}}[?!=]?'
+followed_by = '[^=~>]'
+token = "function"
+pop = true
+[[contexts.defname]]
+match = '{{ident}}[?!]?'
+token = "function"
+pop = true
+[[contexts.defname]]
+match = '(?:\[\]=?|[-+*/%<>=!~^&|]+)'
+token = "function"
+pop = true
+[[contexts.defname]]
+match = ''
+pop = true
+
+# class / module のあと: `class Foo < Bar` `class A::B` `class << self`
+[[contexts.classname]]
+match = '[ \t]+'
+token = "text"
+[[contexts.classname]]
+match = '<<'
+token = "operator"
+pop = true
+[[contexts.classname]]
+match = '{{ident}}'
+followed_by = '::'
+token = "type"
+[[contexts.classname]]
+match = '::'
+token = "punctuation"
+[[contexts.classname]]
+match = '{{ident}}'
+token = "type"
+pop = true
+[[contexts.classname]]
+match = ''
+pop = true
+
+# 正規表現がこの先に来うる位置。`/` が無ければ何もせず抜ける
+[[contexts.rx_pre]]
+match = '[ \t]+'
+token = "text"
+[[contexts.rx_pre]]
+match = '/'
+token = "string"
+set = "regex"
+[[contexts.rx_pre]]
+match = ''
+pop = true
+
+# ---- コメント ----
+
+[[contexts.block_comment]]
+match = '^=end.*'
+pop = true
+[[contexts.block_comment]]
+match = '[^\n]+|\n'
+
+# ---- 文字列 ----
+
+# "..." は行をまたげる。#{...} は式（入れ子の {} を追う）
+[[contexts.dstr]]
+match = '"'
+pop = true
+[[contexts.dstr]]
+include = "dstr_body"
+
+[[contexts.dstr_bq]]
+match = '`'
+pop = true
+[[contexts.dstr_bq]]
+include = "dstr_body"
+
+[[contexts.dstr_body]]
+match = '#\{'
+token = "punctuation"
+push = "interp"
+[[contexts.dstr_body]]
+match = '#[@$]{{ident}}'
+token = "variable"
+[[contexts.dstr_body]]
+match = '\\(?:x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{4}|u\{[0-9a-fA-F ]+\}|[0-7]{1,3}|.|\n)'
+token = "escape"
+[[contexts.dstr_body]]
+match = '[^"`\\#]+|#'
+token = "string"
+
+[[contexts.interp]]
+match = '\}'
+token = "punctuation"
+pop = true
+[[contexts.interp]]
+match = '\{'
+token = "punctuation"
+push = "interp"
+[[contexts.interp]]
+include = "expr"
+
+[[contexts.sstr]]
+match = "'"
+pop = true
+[[contexts.sstr]]
+match = '''\\['\\]'''
+token = "escape"
+[[contexts.sstr]]
+match = '''[^'\\]+|\\'''
+
+[[contexts.regex]]
+match = '/[a-z]*'
+token = "string"
+pop = true
+[[contexts.regex]]
+match = '\n'
+pop = true
+[[contexts.regex]]
+match = '#\{'
+token = "punctuation"
+push = "interp"
+[[contexts.regex]]
+match = '\\.'
+token = "escape"
+[[contexts.regex]]
+match = '[^/\\#\n]+|#'
+
+# %w[a b] など。同じ種類の括弧の入れ子は覚えない
+[[contexts.pct_sq]]
+match = '\]'
+token = "string"
+pop = true
+[[contexts.pct_sq]]
+match = '\\.'
+token = "escape"
+[[contexts.pct_sq]]
+match = '[^\]\\]+|\\'
+[[contexts.pct_par]]
+match = '\)'
+token = "string"
+pop = true
+[[contexts.pct_par]]
+match = '\\.'
+token = "escape"
+[[contexts.pct_par]]
+match = '[^)\\]+|\\'
+[[contexts.pct_cur]]
+match = '\}'
+token = "string"
+pop = true
+[[contexts.pct_cur]]
+match = '\\.'
+token = "escape"
+[[contexts.pct_cur]]
+match = '[^}\\]+|\\'
+[[contexts.pct_ang]]
+match = '>'
+token = "string"
+pop = true
+[[contexts.pct_ang]]
+match = '\\.'
+token = "escape"
+[[contexts.pct_ang]]
+match = '[^>\\]+|\\'
+
+# ---- ヒアドキュメント ----
+
+# <<~EOS と同じ行の残り。行末で本文へ移る
+[[contexts.heredoc_head]]
+match = '\n'
+pop = true
+[[contexts.heredoc_head]]
+include = "expr"
+
+# 本文。終端（大文字などだけの行）で終わる
+[[contexts.heredoc]]
+match = '^[ \t]*[A-Z_][A-Z0-9_]*\n'
+token = "operator"
+pop = true
+[[contexts.heredoc]]
+match = '#\{'
+token = "punctuation"
+push = "interp"
+[[contexts.heredoc]]
+match = '\\.'
+token = "escape"
+[[contexts.heredoc]]
+match = '[^\n\\#]+|\\|#|\n'
