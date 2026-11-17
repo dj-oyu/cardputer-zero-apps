@@ -400,7 +400,9 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   中身は RAM から送る。ハッシュの覚えはディスクのまま。目録に無いファイル（除外・まだ無い）と根の
   外のものは捨てる。依頼は `MAX_REQUEST_FRAME`（256KiB + 1MiB）まで読む
 - Worker: 1 日の上限（400）は `check` を数えない（build / test だけ）。deploy し直すまで効かない
-- 実機では未確認: 打鍵中の遅延・Wi-Fi での往復・`idle` での電池
+- 実機（2 号機・Wi-Fi、2026-11-17）: 保存せずに未定義の名前を打つと、打ち終えて 3 秒後の画面に赤い波線と
+  ステータスバーの誤り（`cannot find value ...`）が出ていた。消すと波線も消える。未確認: 打鍵中の遅延・
+  `idle` での電池
 
 ## ビルド係の費用の上限（2026-11-17、ブランチ `zcode-cost-cap`）
 
@@ -413,8 +415,23 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - 数字（料金表からの計算）: 1 vCPU・3GiB はメモリ 0.027 ドル / 時（`standard-4` は 0.108）。含まれる
   25GiB 時間（約 8 時間）の後、超過 5 ドルまでで約 190 時間（メモリだけ）・約 175 時間（ディスク 12GB 込み）。
   CPU はジョブが走っている 1 時間で 0.072 ドル
-- **ビルドは `standard-4` より遅い**: 実機で測った regex の初回の `run` 8.6 秒（`standard-4`）は 20 秒前後の
-  見込み。**未計測**（deploy したら 1 vCPU で測り直し、上の表の行を足す）
+- **ビルドは `standard-4` より遅い**（deploy 後に 2 号機・Wi-Fi で測った。2026-11-17）:
+
+  | 場面 | 1 vCPU・3GiB | `standard-4`（前の表） |
+  |---|---|---|
+  | Rust の hello、冷えたコンテナからの `run` | 2.21 秒（DO が止めた後。起動・ビルド・受け取り込み） | 14.1 秒（deploy 直後の最初の起動） |
+  | 1 行変えて `run` | 0.42 秒 | 0.42 秒 |
+  | 型エラーの `check` | 0.19 秒 | 0.13 秒 |
+  | regex の初回の `run` | **22.8 秒** | 8.6 秒 |
+  | regex を変更なしで `run` | 1.15 秒（583KB を受け取る） | — |
+
+  小さな差分のビルドと check は変わらず、依存の多い初回だけ約 2.7 倍。`/v1/usage` はメモリ 0.039GiB 時間
+  （約 47 秒 × 3GiB）で、3GiB の割り当てと合う
+- deploy 後に確かめた（2026-11-17）: custom の `instance` は受け付けられた。最後のジョブから約 5 分で DO が
+  `destroy()` し、`/v1/usage` の `running` が false になった。その後の `run` で次の `start()` も通った。
+  `BudgetLedger` は `exports` で作られた（deploy の出力に「Created: BudgetLedger」）。`vcpu_min_est` は
+  ジョブ中に読むと仮の延長込みの値で、後で読むと減ることがある（0.7 → 0.42）。未確認: ダッシュボードの
+  Containers の使用量との突き合わせ、上限に達したときの実機の表示
 - 守りの形（`remote/worker/src/budget.ts`）: 実機ごとの DO が自分の使用量を SQLite で計り（`Meter`。
   メモリ・ディスク = 動いている時間 × 割り当て、CPU = ジョブが走っていた時間 × vCPU の多めの見積もり）、
   アカウントに 1 つの台帳の DO（`BudgetLedger`、名前 `budget`）へ**合計の写し**を送る（差分ではないので
@@ -431,7 +448,4 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   左右されないため。setInactivityTimeout は守りとして残す
 - 見込みは `GET /v1/usage`（Access の内側、JSON。`month`・`usage.memory_gib_h`・`usage.vcpu_min_est`・
   `overage_usd.total`・`devices` など）。`zc-remote status` はまだ表示しない
-- deploy 後に確かめること: `destroy()` の後に `running` が false になり次の `start()` が通るか、custom の
-  `instance` が受け付けられるか（ログにエラーが出ないか）、`/v1/usage` の数字がダッシュボードの Containers の
-  使用量と大きく違わないか、1 vCPU でのビルド時間
 
