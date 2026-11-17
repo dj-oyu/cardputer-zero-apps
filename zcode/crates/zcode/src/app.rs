@@ -41,6 +41,8 @@ pub enum AppEvent {
     /// batch がファイルを読み終えた（[`crate::editor::EditorScreen::open_path`]）。
     /// 単語補完の索引も batch で作っておく。
     Opened { doc: DocId, result: Result<(Box<dyn crate::doc::TextDoc + Send>, zc_intel::WordIndex), String> },
+    /// assist が SKK の辞書を引き終えた（版つき。古ければ `Skk` が捨てる）。
+    SkkCandidates(Versioned<Vec<zc_skk::Candidate>>),
     /// `check` ワーカーが実機の構文チェックを終えた（docs/stage3-design.md §8.3・§9）。
     /// 結果は出どころ `Syntax` の [`zc_core::DiagnosticSet`]: ファイルは 1 つ、パスは
     /// チェックしたファイルの絶対パス、`base` は保存した版。画面が置き場の鍵に直し、
@@ -62,6 +64,7 @@ impl std::fmt::Debug for AppEvent {
             AppEvent::Flushed(r) => f.debug_tuple("Flushed").field(r).finish(),
             AppEvent::Opened { doc, result } => write!(f, "Opened({doc:?}, {:?})", result.as_ref().map(|_| "..")),
             AppEvent::Saved { doc, version, result } => write!(f, "Saved({doc:?}, {version:?}, {result:?})"),
+            AppEvent::SkkCandidates(v) => write!(f, "SkkCandidates({:?}, {} 件)", v.version, v.value.len()),
             AppEvent::Checked { doc, result } => write!(f, "Checked({doc:?}, {result:?})"),
             AppEvent::Store(r) => f.debug_tuple("Store").field(r).finish(),
             AppEvent::Remote(r) => f.debug_tuple("Remote").field(r).finish(),
@@ -85,6 +88,8 @@ pub enum TimerId {
     CursorBlink,
     /// 控えの保存（§8.4）。
     Backup,
+    /// SKK の個人辞書の書き戻し（学習した語を 5 分ためてまとめて書く。§8.3）。
+    SkkFlush,
     /// 無操作での画面スリープ（最後の打鍵から `dark_time` 後に 1 回だけ鳴る。
     /// イベントループが受け持ち、画面には渡さない）。
     Sleep,

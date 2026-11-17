@@ -36,7 +36,10 @@ use zc_intel::{Completion, CompletionKind, DiagStore, Diagnostic, Severity, Shif
 use zc_remote_ipc::{DoneStatus, FileDiags, JobKind, JobTag, Phase, RemoteLang, SubmitFlags, TestReport};
 use zc_input::{Keyboard, RawRecord};
 use zc_ui::layout::{Regions, SIDE_W, UI_PX};
+use std::sync::OnceLock;
+use zc_skk::{InputMode, LearnedWord, Preedit, PreeditState, Skk, SystemDict, UserDict};
 use zc_term::{ReadBudget, Term, TermCommand, TermEvent};
+use zc_ui::{CandidatePopup, CandidateRow, MiniBuffer, PreeditStyle, PreeditView, MINI_H};
 use zc_ui::{CompletionPopup, EditorStatus, EditorView, FileTree, ImeMode, PickerList, PopupItem, RenderCx, SpanSource, StatusBar, Tab, TabBar, TerminalPanel, Widget, TERM_PANEL_H};
 
 /// ステータスバーを遅らせる時間（§5.2）。
@@ -51,6 +54,54 @@ const HL_BUDGET: u32 = 2000;
 const STATUS_ERROR: Color = Color::hex(0xa1260d);
 /// 実行が終了コード 0 で終わったときのステータスバーの色（モック 4 の「緑系」）。
 const STATUS_OK: Color = Color::hex(0x16825d);
+/// SKK のシステム辞書（Debian の skkdic。uim-skk と同じもの）。
+const SKK_SYSTEM_DICT: &str = "/usr/share/skk/SKK-JISYO.L";
+/// システム辞書の場所（環境変数 `ZCODE_SKK_DICT` があればそちら。試験で小さな辞書を使う）。
+fn skk_system_dict_path() -> std::path::PathBuf {
+    std::env::var_os("ZCODE_SKK_DICT").map(std::path::PathBuf::from).unwrap_or_else(|| SKK_SYSTEM_DICT.into())
+}
+
+/// 学習した語をためてから個人辞書に書くまでの時間（SD の書き込みを減らす。§8.3）。
+const SKK_FLUSH: Duration = Duration::from_secs(300);
+/// 候補一覧で直接選ぶキー（1 ページ 7 件）。
+const SKK_KEYS: [char; 7] = ['a', 's', 'd', 'f', 'j', 'k', 'l'];
+
+/// 個人辞書 `~/.skk-uim-jisyo` を読む（数 KB なので起動時にそのまま読む。無ければ空）。
+fn load_skk_user_dict() -> UserDict {
+    std::env::var_os("HOME")
+        .and_then(|h| std::fs::read(Path::new(&h).join(".skk-uim-jisyo")).ok())
+        .map(|b| UserDict::parse(&b))
+        .unwrap_or_default()
+}
+
+/// SKK の未確定 → 行に差し込んで見せる形（モック 7・8）。▽ の送り仮名は `*` の後ろに薄く。
+fn preedit_view(p: &Preedit) -> Option<PreeditView> {
+    match p.state {
+        PreeditState::Direct if p.text.is_empty() => None,
+        // ローマ字の途中だけ
+        PreeditState::Direct => Some(PreeditView::new().with(PreeditStyle::Pending, p.text.clone())),
+        PreeditState::Reading => {
+            let (reading, okuri) = match p.okuri_at {
+                Some(i) if i <= p.text.len() => p.text.split_at(i),
+                _ => (p.text.as_str(), ""),
+            };
+            let v = PreeditView::reading(format!("▽{reading}"));
+            Some(if okuri.is_empty() && p.okuri_at.is_none() { v } else { v.with(PreeditStyle::Pending, format!("*{okuri}")) })
+        }
+        PreeditState::Converting => Some(PreeditView::converting(format!("▼{}", p.text))),
+    }
+}
+
+/// 未確定を 1 行の文字にする（ターミナル・登録欄に出すとき）。
+fn preedit_text(p: &Preedit) -> Option<(String, bool)> {
+    match p.state {
+        PreeditState::Direct if p.text.is_empty() => None,
+        PreeditState::Direct => Some((p.text.clone(), false)),
+        PreeditState::Reading => Some((format!("▽{}", p.text), false)),
+        PreeditState::Converting => Some((format!("▼{}", p.text), true)),
+    }
+}
+
 /// 実行中の経過時間の表示を更新する間隔。
 const RUN_TICK: Duration = Duration::from_secs(1);
 /// 控えておく「ジョブ → 保存済みの版」の数の上限（終わったジョブの分は消す。これは、
@@ -442,6 +493,22 @@ pub struct EditorScreen {
     /// アウトライン（開いているあいだは本文の全体を覆う）。
     outline: Option<OutlineState>,
     picker: PickerList,
+    /// SKK（段階 4。モック 7〜9）。エディタとターミナルの打鍵は、まずここを通る。
+    skk: Skk,
+    /// システム辞書（assist スレッドで最初に引くときに開く。開けなければ `None`）。
+    skk_dict: Arc<OnceLock<Option<SystemDict>>>,
+    /// 結果を待っている辞書引きの数。待っている間の打鍵は `skk_held` に取っておく。
+    skk_waiting: u32,
+    skk_held: Vec<KeyEvent>,
+    /// まだ個人辞書に書いていない学習。
+    skk_learned: Vec<LearnedWord>,
+    /// 前回見た入力モード（英数 → かなで辞書を先読みする）。
+    skk_mode: InputMode,
+    cand_popup: CandidatePopup,
+    cand_stale: bool,
+    mini: MiniBuffer,
+    /// 登録欄を出していた（開閉で領域が変わる）。
+    mini_open: bool,
     /// 統合ターミナル（段階 3）。
     term: Option<TermState>,
     panel: TerminalPanel,
@@ -516,6 +583,16 @@ impl EditorScreen {
             popup_stale: false,
             outline: None,
             picker: PickerList::new("アウトライン"),
+            skk: Skk::new(load_skk_user_dict()),
+            skk_dict: Arc::new(OnceLock::new()),
+            skk_waiting: 0,
+            skk_held: Vec::new(),
+            skk_learned: Vec::new(),
+            skk_mode: InputMode::Ascii,
+            cand_popup: CandidatePopup::new(),
+            cand_stale: false,
+            mini: MiniBuffer::new(),
+            mini_open: false,
             term: None,
             panel: TerminalPanel::new(),
             panel_open: false,
@@ -638,6 +715,16 @@ impl EditorScreen {
     pub fn run_state(&self) -> (bool, Option<&str>) {
         (self.term.as_ref().is_some_and(|t| t.running.is_some()), self.run_status.as_ref().map(|s| s.0.as_str()))
     }
+    /// SKK（テスト用）: 入力モード、本文の未確定、候補（いまのページ）、登録欄の読み。
+    pub fn skk_state(&self) -> (InputMode, String, Vec<String>, Option<String>) {
+        let p = self.skk.preedit();
+        let cands = self.skk_candidate_rows().map(|(r, _, _)| r.into_iter().map(|c| c.text).collect()).unwrap_or_default();
+        (self.skk.mode(), p.text.clone(), cands, self.skk.registration().map(|r| r.reading.clone()))
+    }
+    /// まだ個人辞書に書いていない学習の数（テスト用）。
+    pub fn skk_pending_learned(&self) -> usize {
+        self.skk_learned.len()
+    }
     /// 選択中の文書の診断（全部の出どころを合わせたもの。テスト用）。
     pub fn diagnostics(&self) -> &[Diagnostic] {
         self.tabs.get(self.active).map_or(&[], |t| &t.diags)
@@ -656,6 +743,7 @@ impl EditorScreen {
             return;
         }
         self.focus = focus;
+        self.skk.reset();
         self.tree.set_focused(focus == Focus::Tree);
         self.panel.set_focused(focus == Focus::Terminal);
         if let Some(t) = self.tabs.get_mut(self.active) {
@@ -703,6 +791,8 @@ impl EditorScreen {
         // 別の文書の上に出ていた小窓は消す（ビューは全部描き直す）
         self.completion = None;
         self.popup.forget();
+        self.skk.reset();
+        self.cand_popup.forget();
     }
 
     /// 読み込み済みの文書をタブに足して、選ぶ（render-test・計測・テスト用。実行中に
@@ -791,9 +881,7 @@ impl EditorScreen {
         if keys.is_empty() {
             return;
         }
-        for k in keys {
-            self.handle_key(k, cx);
-        }
+        self.feed_keys(keys.to_vec(), cx);
         self.pump_highlight(Some(cx));
         // 打鍵の直後はカーソルを点けたままにして、点滅をやり直す
         self.cursor_on = true;
@@ -810,12 +898,39 @@ impl EditorScreen {
         }
     }
 
+    /// 打鍵を順に処理する。SKK の辞書引きの結果を待っている間に来た打鍵は取っておき、
+    /// 結果が届いてから流す（「Space の直後の a」を正しく扱うため。zc-skk の使い方 3）。
+    fn feed_keys(&mut self, keys: Vec<KeyEvent>, cx: &mut LoopCx<'_>) {
+        let mut it = keys.into_iter();
+        for k in it.by_ref() {
+            if self.skk_waiting > 0 {
+                self.skk_held.push(k);
+                break;
+            }
+            self.handle_key(&k, cx);
+        }
+        self.skk_held.extend(it);
+    }
+
     fn handle_key(&mut self, ev: &KeyEvent, cx: &mut LoopCx<'_>) {
         if self.message.take().is_some() {
             self.status_due = true;
         }
         // 打鍵があったら、試験の結果が届いても一覧で打鍵を奪わない（F6 は exec で立て直す）
         self.test_waiting = false;
+        // SKK: エディタとターミナルの打鍵はまず SKK へ（入力欄・アウトラインは英数のまま）
+        if matches!(self.focus, Focus::Editor | Focus::Terminal) && self.prompt.is_none() && self.outline.is_none() {
+            let out = self.skk.handle_key(ev);
+            if self.cand_popup.drawn().is_some() {
+                self.cand_stale = true;
+            }
+            self.after_skk(out.commit, out.lookup, out.learned, cx);
+            if out.consumed {
+                self.completion = None;
+                self.status_due = true;
+                return;
+            }
+        }
         if self.focus == Focus::Terminal {
             self.terminal_key(ev, cx);
             return;
@@ -869,6 +984,90 @@ impl EditorScreen {
             Command::Complete => self.update_completion(true),
             _ => self.completion = None,
         }
+    }
+
+    // --- SKK（段階 4。モック 7〜9） ---
+
+    /// SKK の 1 打鍵の後始末: 確定した文字を入れる、辞書を引く、学習をためる、先読み。
+    fn after_skk(&mut self, commit: String, lookup: Option<zc_skk::LookupRequest>, learned: bool, cx: &mut LoopCx<'_>) {
+        if !commit.is_empty() {
+            self.commit_text(&commit);
+        }
+        if let Some(req) = lookup {
+            self.skk_waiting += 1;
+            let (dict, tx) = (self.skk_dict.clone(), cx.results.clone());
+            cx.workers.assist.submit(move || {
+                let d = dict.get_or_init(|| SystemDict::open(&skk_system_dict_path()).ok());
+                let cands = d.as_ref().map(|d| d.lookup(&req.reading, req.okuri)).unwrap_or_default();
+                tx.send(AppEvent::SkkCandidates(zc_core::Versioned::new(req.version, cands)));
+            });
+        }
+        if learned {
+            self.skk_learned.extend(self.skk.take_changes());
+            if cx.timers.deadline(TimerId::SkkFlush).is_none() {
+                cx.timers.set_after(TimerId::SkkFlush, SKK_FLUSH);
+            }
+        }
+        let mode = self.skk.mode();
+        if mode != self.skk_mode {
+            if self.skk_mode == InputMode::Ascii {
+                // かなモードに入った: 辞書を先読みしておく（最初の変換を待たせない）
+                let dict = self.skk_dict.clone();
+                cx.workers.assist.submit(move || {
+                    if let Some(d) = dict.get_or_init(|| SystemDict::open(&skk_system_dict_path()).ok()) {
+                        d.prefetch();
+                    }
+                });
+            }
+            self.skk_mode = mode;
+            self.status_due = true;
+        }
+    }
+
+    /// 確定した文字列を、入力が向いている所（文書かターミナル）に入れる。
+    fn commit_text(&mut self, text: &str) {
+        if self.focus == Focus::Terminal {
+            if let Some(t) = self.term.as_mut() {
+                if let Err(e) = t.term.send_text(text) {
+                    self.say(format!("ターミナルに送れない: {e}"), true);
+                }
+            }
+            return;
+        }
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        if tab.loading {
+            return;
+        }
+        if let Some(c) = tab.doc.insert(text) {
+            tab.edited(c, &mut self.diag_store);
+        }
+        tab.sync_cursor();
+    }
+
+    /// 学習した語を個人辞書に書き戻す（storage スレッドで）。
+    fn flush_skk(&mut self, cx: &mut LoopCx<'_>) {
+        if self.skk_learned.is_empty() {
+            return;
+        }
+        let changes = self.skk_learned.drain(..).map(|w| zc_store::DictChange::Learn { reading: w.reading, candidate: w.word }).collect();
+        self.saver.skk_sync(changes, cx);
+    }
+
+    /// 候補一覧の中身（いまのページ）。
+    fn skk_candidate_rows(&self) -> Option<(Vec<CandidateRow>, usize, String)> {
+        let list = self.skk.candidates()?;
+        if list.items.is_empty() {
+            return None;
+        }
+        let start = list.page_start.min(list.items.len());
+        let rows = list.items[start..(start + SKK_KEYS.len()).min(list.items.len())]
+            .iter()
+            .zip(SKK_KEYS)
+            .map(|(c, key)| CandidateRow { key, text: c.text.clone(), annotation: c.annotation.clone() })
+            .collect();
+        let pages = list.items.len().div_ceil(SKK_KEYS.len());
+        let page = format!("{}/{}", start / SKK_KEYS.len() + 1, pages);
+        Some((rows, list.selected.saturating_sub(start), page))
     }
 
     // --- ターミナル（段階 3。モック 3・4） ---
@@ -1223,6 +1422,7 @@ impl EditorScreen {
                     let what = if running { "実行中のプログラムがある" } else { "未保存のファイルがある" };
                     self.say(format!("{what}。もう一度 Ctrl+Q で終了"), true);
                 } else {
+                    self.flush_skk(cx);
                     cx.quit = true;
                 }
             }
@@ -2018,8 +2218,11 @@ impl EditorScreen {
                         language: &t.lang.name,
                         extra: "UTF-8",
                         mods: self.mods,
-                        // 段階 4（SKK）までは英数のまま
-                        ime: Some(ImeMode::Ascii),
+                        ime: Some(match self.skk.mode() {
+                            InputMode::Ascii => ImeMode::Ascii,
+                            InputMode::Hiragana => ImeMode::Kana,
+                            InputMode::Katakana => ImeMode::Kata,
+                        }),
                     };
                     st.apply(&mut self.status);
                     // 件数は今のタブの分（重なりは 1 つに数える。§8.6）
@@ -2044,6 +2247,10 @@ impl EditorScreen {
             if let Some(p) = &self.progress {
                 let secs = now_us().saturating_sub(p.started_us) / 1_000_000;
                 self.status.set_right(&intel::progress_text(p.kind, p.phase, p.done, p.total, secs));
+            }
+            // 辞書登録中（モック 9）・ターミナルでの未確定
+            if self.skk.registration().is_some() {
+                self.status.set_left("Enter 登録  Ctrl+G やめる");
             }
             // 実行中は橙、終わったら終了コード（モック 3・4）
             if let Some(run) = self.term.as_ref().and_then(|t| t.running.as_ref()) {
@@ -2171,6 +2378,21 @@ impl Screen for EditorScreen {
                     }
                 }
             }
+            AppEvent::SkkCandidates(v) => {
+                self.skk_waiting = self.skk_waiting.saturating_sub(1);
+                self.skk.candidates_ready(v);
+                if self.cand_popup.drawn().is_some() {
+                    self.cand_stale = true;
+                }
+                self.status_due = true;
+                // 待っていた間の打鍵を流す
+                let held = std::mem::take(&mut self.skk_held);
+                if self.skk_waiting == 0 && !held.is_empty() {
+                    self.feed_keys(held, cx);
+                } else {
+                    self.skk_held = held;
+                }
+            }
             AppEvent::Checked { doc, result } => match result {
                 Ok(set) => self.apply_syntax(doc, set),
                 // チェックの道具が無い: 波線はそのまま。同じ言語では 1 回だけ知らせる
@@ -2203,6 +2425,7 @@ impl Screen for EditorScreen {
     fn on_timer(&mut self, id: TimerId, cx: &mut LoopCx<'_>) {
         match id {
             TimerId::StatusDelay => self.status_due = true,
+            TimerId::SkkFlush => self.flush_skk(cx),
             TimerId::Tick => {
                 // 実行中の経過時間と、ビルド係の「実行中 n 秒」
                 if self.term.as_ref().is_some_and(|t| t.running.is_some()) || self.progress.is_some() {
@@ -2247,7 +2470,27 @@ impl Screen for EditorScreen {
             (true, false) => TERM_PANEL_H,
             (true, true) => u16::MAX,
         };
-        let regions = Regions::compute(self.tree_open, panel_h);
+        let mut regions = Regions::compute(self.tree_open, panel_h);
+        // SKK の辞書登録欄（モック 9）: ステータスバーの上に 1 行。その分ほかを縮める
+        let mini_area = self.skk.registration().map(|_| Rect::new(0, (regions.status.y as i32 - MINI_H as i32) as i16, Rect::SCREEN.w, MINI_H));
+        if let Some(m) = mini_area {
+            for r in [&mut regions.editor, &mut regions.side, &mut regions.panel] {
+                if r.bottom() > m.y as i32 {
+                    r.h = (m.y as i32 - r.y as i32).max(0) as u16;
+                }
+            }
+        }
+        if self.mini_open != mini_area.is_some() {
+            self.mini_open = mini_area.is_some();
+            self.tree.invalidate();
+            self.panel.invalidate();
+            self.mini.invalidate();
+            self.cand_popup.forget();
+            self.status_due = true;
+        }
+        let cand = if matches!(self.focus, Focus::Editor | Focus::Terminal) { self.skk_candidate_rows() } else { None };
+        // ターミナルに入力があるときの候補一覧は、パネルを描いた後に、端末のカーソルの所へ置く
+        let cand_on_panel = self.focus == Focus::Terminal && mini_area.is_none() && self.panel_open;
         let mut damage = Damage::none();
         // タブバー（未保存の印が変わったときも作り直す）
         let changed = self.tabs_dirty || self.tabs.len() != self.tabs_shown.len() || self.tabs.iter().zip(&self.tabs_shown).any(|(t, s)| (t.id, t.doc.is_modified(), t.has_error()) != *s);
@@ -2284,6 +2527,22 @@ impl Screen for EditorScreen {
                         self.popup.forget();
                     }
                 }
+                if let Some(old) = self.cand_popup.drawn() {
+                    if cand.is_none() || std::mem::take(&mut self.cand_stale) {
+                        t.view.invalidate_rows(old.y as i32, old.bottom());
+                        if old.bottom() > regions.panel.y as i32 {
+                            self.panel.invalidate();
+                        }
+                        self.cand_popup.forget();
+                    }
+                }
+                // SKK の未確定は、カーソルの位置に差し込んで見せる（文書は変えない。モック 7・8）
+                let pre = if self.focus == Focus::Editor && mini_area.is_none() { preedit_view(self.skk.preedit()) } else { None };
+                let pre = pre.or_else(|| {
+                    // 登録欄を開いている間、本文には変換しようとしていた読みを ▼ で残す（モック 9）
+                    (self.focus == Focus::Editor && mini_area.is_some()).then(|| PreeditView::converting(format!("▼{}", self.skk.registration().map_or("", |r| r.reading.as_str()))))
+                });
+                t.view.set_preedit(pre);
                 let mut spans = TabSpans { custom: t.custom_spans.as_deref_mut(), hl: t.hl.as_ref().map(|h| &h.hl) };
                 let view_damage = t.view.render(cx, regions.editor, t.doc.as_lines(), &mut spans);
                 damage |= view_damage;
@@ -2306,6 +2565,19 @@ impl Screen for EditorScreen {
                     let rect = self.popup.place(cx, caret, word_x, regions.editor);
                     damage |= self.popup.render_at(cx, rect, !view_damage.is_empty());
                 }
+                // SKK の候補一覧（モック 8）。▼ の語の下（登録欄の中の変換なら登録欄の上）
+                if let (false, Some((rows, sel, page))) = (cand_on_panel, cand.clone()) {
+                    let anchor = match mini_area {
+                        Some(m) => Some(Rect::new(m.x + 4, m.y, 1, m.h)),
+                        None => t.view.preedit_rect().or_else(|| t.view.caret_rect()),
+                    };
+                    if let Some(anchor) = anchor {
+                        self.cand_popup.set(rows, sel, &page);
+                        let bounds = Rect::new(regions.editor.x, regions.editor.y, regions.editor.w, (mini_area.map_or(regions.editor.bottom(), |m| m.y as i32) - regions.editor.y as i32).max(0) as u16);
+                        let rect = self.cand_popup.place(cx, anchor, bounds);
+                        damage |= self.cand_popup.render_at(cx, rect, !view_damage.is_empty());
+                    }
+                }
             }
             None => {
                 if self.empty_drawn != Some(regions.editor) {
@@ -2327,15 +2599,40 @@ impl Screen for EditorScreen {
             self.panel.set_header(&title, hint);
             let grid = TerminalPanel::grid_size(cx, regions.panel);
             self.term_grid = grid;
+            // SKK の未確定はカーソルの位置に重ねて見せる（端末にはまだ送っていない）
+            let pre = if self.focus == Focus::Terminal && mini_area.is_none() { preedit_text(self.skk.preedit()) } else { None };
+            self.panel.set_preedit(pre);
+            let mut panel_damage = Damage::none();
             match self.term.as_mut() {
                 Some(t) => {
                     if t.term.size() != grid {
                         let _ = t.term.resize(grid.0, grid.1);
                     }
-                    damage |= self.panel.render_term(cx, regions.panel, &t.term);
+                    panel_damage |= self.panel.render_term(cx, regions.panel, &t.term);
                 }
-                None => damage |= self.panel.render_empty(cx, regions.panel, ""),
+                None => panel_damage |= self.panel.render_empty(cx, regions.panel, ""),
             }
+            damage |= panel_damage;
+            // 候補一覧（ターミナル）。パネルの行が描き直されたら重ね直す
+            if let (true, Some((rows, sel, page)), Some(anchor)) = (cand_on_panel, cand.clone(), self.panel.preedit_rect()) {
+                // 文書が無いとき（上の描き直しを通らない）は、ここで置き直しの前にパネルを描き直させる
+                if self.tabs.is_empty() && self.cand_popup.drawn().is_some() && std::mem::take(&mut self.cand_stale) {
+                    self.panel.invalidate();
+                    self.empty_drawn = None;
+                    self.cand_popup.forget();
+                }
+                self.cand_popup.set(rows, sel, &page);
+                let bounds = Rect::new(0, regions.tabs.bottom() as i16, Rect::SCREEN.w, (regions.status.y as i32 - regions.tabs.bottom()) as u16);
+                let rect = self.cand_popup.place(cx, anchor, bounds);
+                damage |= self.cand_popup.render_at(cx, rect, !panel_damage.is_empty());
+            }
+        }
+        // 辞書登録欄（モック 9）
+        if let (Some(area), Some(reg)) = (mini_area, self.skk.registration()) {
+            let label = format!("[辞書登録] {}：", reg.reading);
+            let pre = self.skk.registration_preedit().and_then(preedit_text);
+            self.mini.set(&label, &reg.text, pre.as_ref().map(|(s, c)| (s.as_str(), *c)));
+            damage |= self.mini.render(cx, area);
         }
         if self.status_due {
             self.update_status();

@@ -232,12 +232,10 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - 版を上げるとき: ARG の値（と `tools/` の lock）を書き換え → `run-pc.ps1 -Build` → 中で試験:
   `wslc run --rm -v "<zcode>:/work:ro" -w /work/remote -e CARGO_TARGET_DIR=/var/lib/zc-buildd/t --entrypoint bash cz-builder:latest -c "cargo test --locked -p zc-buildd"`。
   `bash tools/test-install-runtimes.sh` もイメージの中で通る（60 件）
-- イメージの中では zc-buildd の試験が 1 つも飛ばない（zstd・node・tsc・esbuild がある）。2026-11-17 時点で
-  **`runner::node::tests::e2e_check_build_test_and_lock` だけ落ちる**: TypeScript 7 の tsc は
-  `return /* 日本 */ "2";` の型の誤りを `return` の位置（2,3）に出すので、試験の期待（CJK の後ろ）が違う。
-  誤りの位置を CJK の後ろに置く形（`return /* 日本 */ half("4");` + `function half(n: number)`、期待は
-  `"  return /* 日本 */ half(".len()`）に直すと、通し（check → lock の書き戻し → build → npm test）まで通る
-  （仮の写しで確かめた。`runner/node.rs` は課題 B4 の持ち物なので直していない）
+- イメージの中では zc-buildd の試験が 1 つも飛ばない（zstd・node・tsc・esbuild がある）。TypeScript 7 の tsc は
+  `return /* 日本 */ "2";` の型の誤りを `return` の位置に出すので、Node の試験は誤りを CJK の後ろの引数に置く形に
+  直した（2026-11-17）。`tests/jobs.rs` の、殺した直後のプロセスグループ（zombie）とフォルダの消え方を
+  すぐに見る 3 つの試験も、消えるまで待つ形に直した（60 回続けて通る）
 - Worker の依存は `remote/worker/package-lock.json`（wrangler 4.163.0・vitest 3.2.7・TypeScript 7.0.2・
   workers-types 5.20261116.1）。`.npmrc` で `ignore-scripts=true`（esbuild・workerd は OS ごとの
   optionalDependencies で動く）。試験は Node の上（`vitest.config.ts`、`node:sqlite` で Node 22.13 以上）。
@@ -270,6 +268,35 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   `test-install-runtimes.sh`）、`zcode-worker`（tsc・vitest・`wrangler deploy --dry-run --containers-rollout=none`）、
   `zcode-builder`（イメージを作って中で `cargo test -p zc-buildd` と `/healthz`。イメージか受付が変わったときだけ。
   層は GitHub Actions のキャッシュ scope=cz-builder）。zcode 本体の `zcode` ジョブは `zcode/remote/` だけの変更では回らない
+
+## 段階 4 の zc-skk で分かったこと（2026-11-17）
+
+- 使い方（打鍵 → `lookup` を assist で引く → `candidates_ready`、`take_changes` を zc-store の
+  `DictChange::Learn` に、フォーカスが移ったら `reset`）とキーの表・本物の SKK との違いは
+  `crates/zc-skk/src/lib.rs` の先頭。試験は辞書を EUC-JP で作って回る（`cargo test -p zc-skk`）
+- **探索の結果を渡すまで、続く打鍵はエディタが取っておく**（「Space の直後の a」を正しく扱う
+  ため）。取っておかなくても Skk が取っておくが、その打鍵で確定した文字列は次の打鍵まで遅れる
+- ▼ では `asdfjkl` と `x` が候補の操作なので、`k` などは確定しない（SKK と同じ）。続けて
+  打つなら Enter で確定する
+- 実機の SKK-JISYO.L: 冷えた状態の `open` 約 19ms・1 回目の探索約 35ms、温まれば 1 回 0.01ms。
+  全 175,786 項目が二分探索で見つかる（並びの前提は正しい）。`docs/measurements.md` §11
+
+## 段階 4 の組み込みで決めたこと（2026-11-17、モック 7〜9）
+
+- エディタとターミナルの打鍵は、まず `zc_skk::Skk` を通す（ツリー・入力欄・アウトラインでは通さない）。
+  確定した文字は文書（ターミナルなら `send_text`）へ入れ、SKK が使わなかった打鍵はふつうに処理する。
+  英数モードで SKK が使うのは Ctrl+J だけ
+- 辞書引きは assist スレッド。システム辞書は最初に引くとき（またはかなモードに入ったとき、先読み
+  つきで）開く。結果を待つ間の打鍵は取っておき、結果の後に流す（「Space の直後の a」）。
+  試験では `ZCODE_SKK_DICT` で小さな辞書を指す
+- 学習した語は 5 分ためて（`TimerId::SkkFlush`）と Ctrl+Q での終了時に、zc-store の
+  `SkkSync`（uim-skk と同じロック → 読み直し → 重ねて書く）で書く。SD に毎回書かないため。
+  **Esc の長押し（ランチャーの強制終了）や電源断では、ためていた分は書かれない**
+- 個人辞書 `~/.skk-uim-jisyo` は起動時にメインで読む（数 KB）。2 号機には無い（最初の学習で作られる）
+- 表示: 本文の未確定は `EditorView::set_preedit`（▽ は下線、▼ は青地、送り仮名は `*` の後ろに薄く）。
+  候補一覧は ▼ の語の下（下に入らなければ上）、登録欄はステータスバーの上に 1 行で、その分エディタ・
+  ツリー・ターミナルを縮める。登録中は本文に ▼ 読みを残す。ターミナルでの未確定はステータスバーの左に出す
+- 正解画像: `skk-reading.png` / `skk-converting.png` / `skk-registration.png`（`cargo test -p zcode --test skk`）
 
 ## 次にやること
 

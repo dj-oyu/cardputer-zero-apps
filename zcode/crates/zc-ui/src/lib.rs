@@ -22,6 +22,7 @@ use zc_skk as _;
 pub mod editor;
 pub mod layout;
 pub mod picker;
+pub mod skkui;
 pub mod status;
 pub mod tabs;
 pub mod terminal;
@@ -29,8 +30,9 @@ pub mod textlayout;
 pub mod tree;
 pub mod widgets;
 
-pub use editor::{EditorView, LineMark, NoSpans, RenderStats, SpanSource, Viewport};
+pub use editor::{EditorView, LineMark, NoSpans, PreeditSeg, PreeditStyle, PreeditView, RenderStats, SpanSource, Viewport};
 pub use picker::{CompletionPopup, PickRow, PickerList, PopupItem};
+pub use skkui::{CandidatePopup, CandidateRow, MiniBuffer, MINI_H};
 pub use status::{Chip, EditorStatus, ImeMode, StatusBar, TitleBar};
 pub use tabs::{Tab, TabBar};
 pub use terminal::{TermScreen, TerminalPanel, TERM_PANEL_H};
