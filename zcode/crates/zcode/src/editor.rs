@@ -1463,8 +1463,9 @@ impl EditorScreen {
             self.set_focus(Focus::Editor);
             return;
         };
-        // Shift+PgUp / PgDn でスクロールバックを見る
-        if ev.mods.shift() && matches!(ev.key, Key::PageUp | Key::PageDown) {
+        // PgUp / PgDn（Fn+L / Fn+M。Shift を付けても同じ）でスクロールバックを見る。2 つ押しで
+        // 済ませるため。代替画面（less・vim など）では、そのプログラムへ送る
+        if matches!(ev.key, Key::PageUp | Key::PageDown) && !ev.mods.ctrl() && !ev.mods.alt() && !t.term.alt_screen() {
             let (_, rows) = t.term.size();
             let page = rows.saturating_sub(1).max(1) as i32;
             t.term.scroll_view(if ev.key == Key::PageUp { page } else { -page });

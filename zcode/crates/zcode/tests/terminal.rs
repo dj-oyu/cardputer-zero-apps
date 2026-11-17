@@ -202,6 +202,35 @@ fn ctrl_backtick_opens_a_shell_and_toggles_focus() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// PgUp / PgDn（Fn+L / Fn+M の 2 つ押し）でスクロールバックを見る。代替画面ではプログラムへ送る。
+#[test]
+fn page_keys_scroll_back_and_go_to_alt_screen_programs() {
+    if !has_tools() {
+        return;
+    }
+    let dir = tmp_dir("scroll");
+    fs::write(dir.join("a.py"), "x = 1\n").unwrap();
+    let mut lp = Loop::new();
+    let mut ed = open(&mut lp, &dir, "a.py");
+    lp.keys(&mut ed, &[f12()]);
+    lp.type_str(&mut ed, "seq -f 'line-%g' 1 60\n");
+    lp.until(&mut ed, "60 行の出力", |ed| screen_has(ed, "line-60"));
+    let (pgup, pgdn) = (KeyEvent::new(Key::PageUp, Mods::NONE), KeyEvent::new(Key::PageDown, Mods::NONE));
+    lp.keys(&mut ed, &[pgup]);
+    assert!(!screen_has(&ed, "line-60"), "さかのぼっていない: {:#?}", ed.terminal_text());
+    assert!(screen_has(&ed, "line-5"));
+    // Shift を付けても同じ（前の割り当て）
+    lp.keys(&mut ed, &[KeyEvent::new(Key::PageUp, Mods::SHIFT)]);
+    lp.keys(&mut ed, &[pgdn, pgdn]);
+    assert!(screen_has(&ed, "line-60"), "戻っていない: {:#?}", ed.terminal_text());
+    // 代替画面のプログラムには PgUp を送る（cat -v は ^[[5~ と表示する）
+    lp.type_str(&mut ed, "printf '\\033[?1049h'; cat -v\n");
+    lp.until(&mut ed, "代替画面", |ed| !screen_has(ed, "line-60"));
+    lp.keys(&mut ed, &[pgup, KeyEvent::new(Key::Enter, Mods::NONE)]);
+    lp.until(&mut ed, "cat に届いた PgUp", |ed| screen_has(ed, "^[[5~"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// 決まった名前のフォルダ（正解画像に出るパスを、どの環境でも同じにする）。
 fn fixed_dir(name: &str) -> PathBuf {
     let d = PathBuf::from("/tmp").join(name);
