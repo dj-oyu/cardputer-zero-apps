@@ -42,6 +42,13 @@
 //! - 同じ job id の依頼をまとめたとき、[`Event::ArtifactData`] は**先頭の依頼にだけ**出す
 //!   （中身を 2 回書かせない）。ほかの知らせは全員に出す。serve は [`Session::job_of`] で
 //!   同じジョブの依頼を見分ける
+//! - **LSP**（docs/lsp-design.md）: 問い合わせ（[`Session::lsp`]）もジョブと同じく、目録の木が
+//!   `ready` になってから `lsp` / `lsp_warm` を送る（木の確認はジョブより先に回す。打鍵の返事なので）。
+//!   wire の `id` は [`Ticket`] の番号。答え（`lsp_result`）は [`Event::LspDone`]、状態
+//!   （`lsp_state`）は [`Event::LspState`]。同じプロジェクト・同じ種類の、まだ送っていない前の
+//!   問い合わせは `Cancelled` にする。やり直さない（切れた・時間切れ（[`LSP_WAIT_US`]）は
+//!   `GaveUp` / `Failed`。温まっていた接続が死んでいただけなら 1 回だけ送り直す）。`lsp_warm` は
+//!   送ったところで終わる（答えは状態で届く）
 //! - [`Action::Reconnect`] を出した時点で、状態機械は「切れた」ものとして先へ進んでいる。
 //!   serve は接続を閉じてつなぎ直すだけでよく、その閉じたことを [`Session::on_closed`] で
 //!   知らせない（知らせると、失敗が 1 回余分に数えられる）。つなぎ直しに失敗したら
@@ -51,7 +58,7 @@ use zc_wire as wire;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use wire::msg::{decode, ArtifactKind, BinHeader, BinKind, ClientMsg, ErrorCode, FileDiags, FileEntry, JobOpts, Kind, Lang, ServerMsg, Status, TestCase};
+use wire::msg::{decode, ArtifactKind, BinHeader, BinKind, ClientMsg, ErrorCode, FileDiags, FileEntry, JobOpts, Kind, Lang, LspItem, LspPhase, LspQuery, ServerMsg, Status, TestCase};
 use wire::tree::{job_id, Manifest};
 
 /// 通信の失敗で、続けてやり直す回数（build / test）。
@@ -64,6 +71,8 @@ const CANCEL_WAIT_US: u64 = 5_000_000;
 const READY_KEEP: usize = 8;
 /// 切れている間に取り消したジョブ（つながったら `cancel` を送る）を覚えておく数。
 const ORPHAN_KEEP: usize = 8;
+/// LSP の問い合わせを送ってから答えを待つ時間（µs）。受付は 25 秒で自分から時間切れを返す。
+pub const LSP_WAIT_US: u64 = 30_000_000;
 
 /// 状態機械が振る、依頼の番号（[`crate::serve`] が IPC の依頼と結び付ける）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -80,6 +89,34 @@ pub struct JobRequest {
     pub opts: JobOpts,
     /// ログも受け取るか。
     pub want_log: bool,
+}
+
+/// LSP の問い合わせ（[`Session::lsp`]）。
+#[derive(Clone, Debug)]
+pub struct LspRequest {
+    pub project: String,
+    /// 未保存の中身を重ねた目録。
+    pub manifest: Arc<Manifest>,
+    /// `None` は `lsp_warm`（先に起こすだけ）。
+    pub query: Option<LspQuery>,
+    /// 木の根からの相対。
+    pub path: String,
+    pub line: u32,
+    pub col: u32,
+    pub text: String,
+}
+
+/// LSP の問い合わせの終わり方（[`Event::LspDone`]）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LspOutcome {
+    /// 答え（何も無ければ両方空）。`lsp_warm` は送ったところで空の答え。
+    Answer { text: String, items: Vec<LspItem> },
+    /// 受付・DO が断った（準備中・上限・木がそろっていない・時間切れ）。
+    Failed { code: ErrorCode, message: String },
+    /// 通信の失敗（理由は serve が付ける）。
+    GaveUp,
+    /// 新しい問い合わせに替わった・取り消した。
+    Cancelled,
 }
 
 /// 依頼の終わり方（[`Event::Done`]）。
@@ -113,6 +150,10 @@ pub enum Event {
     /// 先頭の依頼にだけ出る。
     ArtifactData { ticket: Ticket, offset: u64, data: core::ops::Range<usize>, last: bool },
     Done { ticket: Ticket, outcome: Outcome },
+    /// LSP の問い合わせの終わり（必ず 1 回）。
+    LspDone { ticket: Ticket, outcome: LspOutcome },
+    /// rust-analyzer の状態（受付の `lsp_state`。どの依頼のものでもない）。
+    LspState { project: String, state: LspPhase, message: String, error: Option<ErrorCode> },
 }
 
 /// 状態機械が「やってほしい」こと。
@@ -197,6 +238,19 @@ enum Phase {
     WaitReady,
 }
 
+/// LSP の問い合わせ 1 つ。
+struct LspWork {
+    ticket: Ticket,
+    req: LspRequest,
+    tree: String,
+    /// 今の接続に送った。
+    sent: bool,
+    /// 送ったときに温まっていた接続（その接続が死んでいたら、数えずに 1 回送り直す）。
+    on_warm: bool,
+    /// 送ってから答えを待つ締め切り。
+    deadline: u64,
+}
+
 /// 木の確認（1 本の接続で 1 つずつ）。
 struct Sync {
     project: String,
@@ -225,6 +279,9 @@ pub struct Session {
     /// 今の接続は版が合わない（新しい依頼もすぐ断る）。
     bad_version: bool,
     jobs: Vec<Job>,
+    lsps: Vec<LspWork>,
+    /// 最後に受けた時刻（送った LSP の締め切りを決める）。
+    now: u64,
     cur: Option<Sync>,
     /// 今の接続でそろった木（project, tree）。
     ready: Vec<(String, String)>,
@@ -240,11 +297,12 @@ pub struct Session {
 
 impl Session {
     pub fn new() -> Session {
-        Session { link: Link::Down, hello_rx: false, bad_version: false, jobs: Vec::new(), cur: None, ready: Vec::new(), orphans: Vec::new(), conn_err: None, actions: VecDeque::new(), next_ticket: 1, check_idle: false }
+        Session { link: Link::Down, hello_rx: false, bad_version: false, jobs: Vec::new(), lsps: Vec::new(), now: 0, cur: None, ready: Vec::new(), orphans: Vec::new(), conn_err: None, actions: VecDeque::new(), next_ticket: 1, check_idle: false }
     }
 
     /// 依頼を足す。同じプロジェクト・同じ種類の前の依頼は取り消す。
     pub fn submit(&mut self, now_us: u64, req: JobRequest) -> Ticket {
+        self.now = now_us;
         let ticket = Ticket(self.next_ticket);
         self.next_ticket = self.next_ticket.wrapping_add(1).max(1);
         let tree = req.manifest.tree_id();
@@ -306,10 +364,44 @@ impl Session {
         ticket
     }
 
+    /// LSP の問い合わせを足す（答えは [`Event::LspDone`]）。同じプロジェクト・同じ種類の、まだ送って
+    /// いない前の問い合わせは取り消す。
+    pub fn lsp(&mut self, now_us: u64, req: LspRequest) -> Ticket {
+        self.now = now_us;
+        let ticket = Ticket(self.next_ticket);
+        self.next_ticket = self.next_ticket.wrapping_add(1).max(1);
+        let mut i = 0;
+        while i < self.lsps.len() {
+            let w = &self.lsps[i];
+            if !w.sent && w.req.project == req.project && w.req.query == req.query {
+                self.finish_lsp(i, LspOutcome::Cancelled);
+            } else {
+                i += 1;
+            }
+        }
+        let tree = req.manifest.tree_id();
+        self.lsps.push(LspWork { ticket, req, tree, sent: false, on_warm: false, deadline: 0 });
+        if self.link == Link::Down {
+            self.link = Link::Dialing;
+            self.actions.push_back(Action::Connect);
+        }
+        self.settle();
+        ticket
+    }
+
+    /// LSP の問い合わせを取り消す（送ってあれば、答えは届いても捨てる）。
+    pub fn lsp_cancel(&mut self, ticket: Ticket) {
+        if let Some(i) = self.lsps.iter().position(|w| w.ticket == ticket) {
+            self.finish_lsp(i, LspOutcome::Cancelled);
+        }
+        self.settle();
+    }
+
     /// 依頼を取り消す（受付に `cancel` を送り、`done` を待つ。まだ送っていなければその場で
     /// [`Outcome::Finished`]（cancelled）を出す）。同じジョブをほかの依頼も待っていれば、
     /// この依頼だけ外す（ジョブは続く）。
     pub fn cancel(&mut self, now_us: u64, ticket: Ticket) {
+        self.now = now_us;
         let Some(i) = self.jobs.iter().position(|j| j.subs.iter().any(|s| s.ticket == ticket)) else { return };
         if self.jobs[i].subs.len() > 1 {
             self.jobs[i].subs.retain(|s| s.ticket != ticket);
@@ -322,7 +414,10 @@ impl Session {
 
     /// WebSocket が開いた（`hello` を送るところから）。
     pub fn on_open(&mut self, now_us: u64) {
-        let _ = now_us;
+        self.now = now_us;
+        for w in &mut self.lsps {
+            w.sent = false;
+        }
         self.link = Link::Up;
         self.hello_rx = false;
         self.bad_version = false;
@@ -343,6 +438,7 @@ impl Session {
 
     /// テキストフレームが届いた。
     pub fn on_text(&mut self, now_us: u64, text: &str) {
+        self.now = now_us;
         // 読めないもの・知らない type は無視する（版を上げずに足せるように）。
         if let Ok(Some(msg)) = decode::<ServerMsg>(text) {
             self.on_msg(now_us, msg);
@@ -352,7 +448,7 @@ impl Session {
 
     /// バイナリフレームが届いた（成果物）。
     pub fn on_binary(&mut self, now_us: u64, frame: &[u8]) {
-        let _ = now_us;
+        self.now = now_us;
         let Some((h, body)) = BinHeader::split(frame) else { return };
         if h.kind != BinKind::Artifact {
             return;
@@ -379,10 +475,13 @@ impl Session {
     /// 接続が切れた・つなげなかった。`fatal` は、やり直しても同じ失敗
     /// （認証・時計・オフライン）のとき: 走っている依頼を全部 [`Outcome::GaveUp`] にする。
     pub fn on_closed(&mut self, now_us: u64, fatal: bool) {
-        let _ = now_us;
+        self.now = now_us;
         if fatal {
             self.reset_link();
             self.conn_err = None;
+            while !self.lsps.is_empty() {
+                self.finish_lsp(0, LspOutcome::GaveUp);
+            }
             while let Some(j) = self.jobs.last() {
                 let out = if j.st == St::Cancelling { CANCELLED } else { Outcome::GaveUp };
                 self.finish(self.jobs.len() - 1, out);
@@ -395,7 +494,7 @@ impl Session {
 
     /// [`Action::SendBlob`] を送り終えた。
     pub fn blob_sent(&mut self, now_us: u64, id: u32) {
-        let _ = now_us;
+        self.now = now_us;
         let Some(cur) = &mut self.cur else { return };
         let Phase::Upload { need, next, done, total } = &mut cur.phase else { return };
         if *next != id as usize {
@@ -422,7 +521,7 @@ impl Session {
     /// 受付は中身の続きを待ったままなので、接続は作り直す（[`Action::Reconnect`] が出る。
     /// ほかのジョブは `attach` で続く。失敗には数えない）。
     pub fn blob_failed(&mut self, now_us: u64, id: u32) -> Vec<Ticket> {
-        let _ = now_us;
+        self.now = now_us;
         let Some(cur) = &self.cur else { return Vec::new() };
         match &cur.phase {
             Phase::Upload { next, .. } if *next == id as usize => {}
@@ -437,6 +536,14 @@ impl Session {
             }
             !gone
         });
+        // LSP の問い合わせも serve が作り直す（Done も LspDone も出さない）
+        self.lsps.retain(|w| {
+            let gone = !w.sent && w.req.project == project && w.tree == tree;
+            if gone {
+                hit.push(w.ticket);
+            }
+            !gone
+        });
         self.check_idle = true;
         self.link_lost(false, true);
         self.settle();
@@ -445,6 +552,15 @@ impl Session {
 
     /// 時間が来た（[`Session::deadline_us`]）。
     pub fn on_tick(&mut self, now_us: u64) {
+        self.now = now_us;
+        let mut i = 0;
+        while i < self.lsps.len() {
+            if self.lsps[i].sent && self.lsps[i].deadline <= now_us {
+                self.finish_lsp(i, LspOutcome::Failed { code: ErrorCode::Internal, message: "ビルド係が答えない（時間切れ）".into() });
+            } else {
+                i += 1;
+            }
+        }
         let mut i = 0;
         while i < self.jobs.len() {
             if self.jobs[i].st == St::Cancelling && self.jobs[i].cancel_deadline <= now_us {
@@ -458,7 +574,9 @@ impl Session {
 
     /// 次に [`Session::on_tick`] を呼んでほしい時刻（µs）。無ければ `None`。
     pub fn deadline_us(&self) -> Option<u64> {
-        self.jobs.iter().filter(|j| j.st == St::Cancelling).map(|j| j.cancel_deadline).min()
+        let jobs = self.jobs.iter().filter(|j| j.st == St::Cancelling).map(|j| j.cancel_deadline);
+        let lsps = self.lsps.iter().filter(|w| w.sent).map(|w| w.deadline);
+        jobs.chain(lsps).min()
     }
 
     /// 溜まった「やってほしいこと」を 1 つ取り出す。入力を 1 つ与えるたびに、`None` に
@@ -467,9 +585,9 @@ impl Session {
         self.actions.pop_front()
     }
 
-    /// 走っている・待っている依頼の数。
+    /// 走っている・待っている依頼の数（LSP の問い合わせも含む）。
     pub fn active(&self) -> usize {
-        self.jobs.len()
+        self.jobs.len() + self.lsps.len()
     }
 
     /// 依頼が乗っているジョブの job id（終わった依頼は `None`）。同じ job id の依頼は
@@ -509,10 +627,16 @@ impl Session {
         self.check_idle = true;
     }
 
+    fn finish_lsp(&mut self, i: usize, outcome: LspOutcome) {
+        let w = self.lsps.remove(i);
+        self.actions.push_back(Action::Emit(Event::LspDone { ticket: w.ticket, outcome }));
+        self.check_idle = true;
+    }
+
     /// 入力 1 つの終わりに呼ぶ: 送れるものを送り、空になっていたら知らせる。
     fn settle(&mut self) {
         self.pump();
-        if std::mem::take(&mut self.check_idle) && self.jobs.is_empty() {
+        if std::mem::take(&mut self.check_idle) && self.jobs.is_empty() && self.lsps.is_empty() {
             self.actions.push_back(Action::Idle);
         }
     }
@@ -561,6 +685,22 @@ impl Session {
             Some((code, message)) => Outcome::Rejected { code: *code, message: message.clone() },
             None => Outcome::GaveUp,
         };
+        // 送ってあった LSP の問い合わせは、やり直さない（温まっていた接続が死んでいただけなら送り直す）
+        let mut i = 0;
+        while i < self.lsps.len() {
+            let w = &mut self.lsps[i];
+            let stale = std::mem::take(&mut w.on_warm);
+            if w.sent && count && !stale {
+                let out = match &err {
+                    Some((code, message)) => LspOutcome::Failed { code: *code, message: message.clone() },
+                    None => LspOutcome::GaveUp,
+                };
+                self.finish_lsp(i, out);
+                continue;
+            }
+            w.sent = false;
+            i += 1;
+        }
         let mut i = 0;
         while i < self.jobs.len() {
             let j = &mut self.jobs[i];
@@ -585,7 +725,7 @@ impl Session {
             j.st = if j.accepted { St::Attach } else { St::Pending };
             i += 1;
         }
-        if force || !self.jobs.is_empty() {
+        if force || !self.jobs.is_empty() || !self.lsps.is_empty() {
             let worst = self.jobs.iter().map(|j| j.fails).max().unwrap_or(0);
             let after_ms = if worst == 0 { 0 } else { BACKOFF_MS << (worst - 1) };
             self.link = Link::Dialing;
@@ -618,6 +758,9 @@ impl Session {
             return;
         }
         if self.bad_version {
+            while !self.lsps.is_empty() {
+                self.finish_lsp(0, LspOutcome::Failed { code: ErrorCode::Version, message: "約束の版が合わない".to_owned() });
+            }
             while !self.jobs.is_empty() {
                 let out = if self.jobs[0].st == St::Cancelling { CANCELLED } else { Outcome::Rejected { code: ErrorCode::Version, message: "約束の版が合わない".to_owned() } };
                 self.finish(0, out);
@@ -644,6 +787,43 @@ impl Session {
                     }
                 }
                 St::Live | St::Cancelling => {}
+            }
+        }
+        // LSP: 木がそろっていれば送る
+        let warm = self.hello_rx;
+        let mut i = 0;
+        while i < self.lsps.len() {
+            let w = &self.lsps[i];
+            if w.sent || !self.is_ready(&w.req.project, &w.tree) {
+                i += 1;
+                continue;
+            }
+            let r = &w.req;
+            let msg = match r.query {
+                Some(query) => ClientMsg::Lsp { id: w.ticket.0, project: r.project.clone(), tree: w.tree.clone(), query, path: r.path.clone(), line: r.line, col: r.col, text: r.text.clone() },
+                None => ClientMsg::LspWarm { project: r.project.clone(), tree: w.tree.clone(), path: r.path.clone() },
+            };
+            let is_warm = r.query.is_none();
+            self.send(&msg);
+            if is_warm {
+                // 答えは状態（lsp_state）で届く。ここで終わり
+                self.finish_lsp(i, LspOutcome::Answer { text: String::new(), items: Vec::new() });
+                continue;
+            }
+            let now = self.now;
+            let w = &mut self.lsps[i];
+            w.sent = true;
+            w.on_warm = warm;
+            w.deadline = now + LSP_WAIT_US;
+            i += 1;
+        }
+        // 木の確認は、LSP の問い合わせを先に（打鍵の返事なので）
+        if self.cur.is_none() {
+            let next = self.lsps.iter().find(|w| !w.sent && !self.is_ready(&w.req.project, &w.tree)).map(|w| (w.req.project.clone(), w.tree.clone(), w.req.manifest.clone()));
+            if let Some((project, tree, manifest)) = next {
+                let sync = Sync { project, tree, manifest, phase: Phase::Sent };
+                self.send(&ManifestMsg { ty: "manifest", project: &sync.project, tree: &sync.tree, files: sync.manifest.files() });
+                self.cur = Some(sync);
             }
         }
         if self.cur.is_none() {
@@ -727,7 +907,7 @@ impl Session {
     }
 
     fn on_msg(&mut self, now_us: u64, msg: ServerMsg) {
-        let _ = now_us;
+        self.now = now_us;
         match msg {
             ServerMsg::Hello { v, .. } => {
                 self.hello_rx = true;
@@ -737,6 +917,17 @@ impl Session {
                 }
             }
             ServerMsg::Need { tree, blobs } => self.on_need(tree, blobs),
+            ServerMsg::LspResult { id, error, message, text, items, retry_after_s, .. } => {
+                let Some(i) = self.lsps.iter().position(|w| w.sent && w.ticket.0 == id) else { return };
+                let out = match error {
+                    Some(code) => LspOutcome::Failed { code, message: match retry_after_s { Some(s) => format!("{message}（あと {s} 秒）"), None => message } },
+                    None => LspOutcome::Answer { text, items },
+                };
+                self.finish_lsp(i, out);
+            }
+            ServerMsg::LspState { project, state, message, error, .. } => {
+                self.actions.push_back(Action::Emit(Event::LspState { project, state, message, error }));
+            }
             ServerMsg::Ready { tree } => {
                 if let Some(cur) = self.cur.take_if(|c| c.tree == tree) {
                     if self.ready.len() == READY_KEEP {
@@ -849,6 +1040,15 @@ impl Session {
                     ErrorCode::TooLarge | ErrorCode::BadTree | ErrorCode::BadBlob if self.cur.is_some() => {
                         let cur = self.cur.take().unwrap();
                         let mut i = 0;
+                        while i < self.lsps.len() {
+                            let w = &self.lsps[i];
+                            if !w.sent && w.req.project == cur.project && w.tree == cur.tree {
+                                self.finish_lsp(i, LspOutcome::Failed { code, message: message.clone() });
+                            } else {
+                                i += 1;
+                            }
+                        }
+                        let mut i = 0;
                         while i < self.jobs.len() {
                             let j = &self.jobs[i];
                             if j.st == St::Pending && j.project == cur.project && j.tree == cur.tree {
@@ -860,6 +1060,9 @@ impl Session {
                     }
                     // 上限・約束の間違いは、やり直しても同じ。
                     _ => {
+                        while !self.lsps.is_empty() {
+                            self.finish_lsp(0, LspOutcome::Failed { code, message: message.clone() });
+                        }
                         while !self.jobs.is_empty() {
                             let out = if self.jobs[0].st == St::Cancelling { CANCELLED } else { Outcome::Rejected { code, message: message.clone() } };
                             self.finish(0, out);

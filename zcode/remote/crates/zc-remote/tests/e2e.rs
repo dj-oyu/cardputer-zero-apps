@@ -462,3 +462,56 @@ fn a_dropped_connection_is_resumed_with_attach() {
     assert_eq!(direct.file_name(), placed.file_name());
     assert!(std::fs::read(&direct).unwrap() == first, "つなぎ直して受け取ったものと、切れずに受け取ったものが同じ");
 }
+
+/// LSP の通し（docs/lsp-design.md）: 本物の serve → 本物の受付 → 本物の rust-analyzer。
+/// `Warm` で起こし、未保存の中身を重ねた hover が新しい型を返し、定義の場所が実機の絶対パスに
+/// 直って届く。rust-analyzer はビルド係のイメージ（cz-builder）にだけある。
+#[test]
+fn rust_analyzer_answers_through_serve() {
+    if skip_without(&["cargo", "rust-analyzer"]) {
+        return;
+    }
+    let sb = Sandbox::new("lsp");
+    let buildd = Buildd::start(&sb);
+    let _serve = sb.serve(&pc(buildd.port), &[]);
+    sb.write("code/la/Cargo.toml", HELLO_TOML);
+    let util = sb.write("code/la/src/util.rs", "pub fn helper(a: i32) -> i32 {\n    a\n}\n");
+    let main_text = "mod util;\nfn main() {\n    let s = \"日本\"; let n = util::helper(1);\n    println!(\"{s}{n}\");\n}\n";
+    let main = sb.write("code/la/src/main.rs", main_text);
+    let mut c = sb.client(ipc::ClientKind::Editor);
+    c.send(&ipc::Request::Warm { file: main.clone() });
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        match c.recv(deadline.saturating_duration_since(std::time::Instant::now())) {
+            Some(ipc::Response::LspState { state: ipc::LspState::Ready, root, .. }) => {
+                assert_eq!(root, sb.home().join("code/la"));
+                break;
+            }
+            Some(ipc::Response::LspState { state: ipc::LspState::Failed, message, .. }) => panic!("{message}"),
+            Some(_) => {}
+            None => panic!("rust-analyzer が準備できない"),
+        }
+    }
+    let col = main_text.split('\n').nth(2).unwrap().find("helper").unwrap() as u32 + 2;
+    let ask = |c: &mut Client, req: u32, kind: ipc::LspKind, overlay: Vec<ipc::OverlayFile>| {
+        c.send(&ipc::Request::Lsp { req: ipc::ReqId(req), kind, file: main.clone(), line: 2, col, text: String::new(), overlay });
+        loop {
+            match c.recv(WAIT) {
+                Some(ipc::Response::LspResult { req: r, status, message, text, items }) if r == ipc::ReqId(req) => return (status, message, text, items),
+                Some(_) => {}
+                None => panic!("答えが来ない"),
+            }
+        }
+    };
+    let (status, message, text, _) = ask(&mut c, 1, ipc::LspKind::Hover, vec![]);
+    assert_eq!(status, ipc::DoneStatus::Ok, "{message}");
+    assert!(text.contains("pub fn helper(a: i32) -> i32"), "{text}");
+    // 未保存の util.rs を重ねる（ディスクは i32 のまま）
+    let unsaved = ipc::OverlayFile { path: util.clone(), bytes: b"pub fn helper(a: u16) -> u16 {\n    a\n}\n".to_vec() };
+    let (status, _, text, _) = ask(&mut c, 2, ipc::LspKind::Hover, vec![unsaved]);
+    assert_eq!(status, ipc::DoneStatus::Ok);
+    assert!(text.contains("pub fn helper(a: u16) -> u16"), "{text}");
+    let (status, _, _, items) = ask(&mut c, 3, ipc::LspKind::Definition, vec![]);
+    assert_eq!(status, ipc::DoneStatus::Ok);
+    assert_eq!(items.iter().map(|i| (i.path.clone(), i.line, i.col)).collect::<Vec<_>>(), [(util.clone(), 0, 7)]);
+}

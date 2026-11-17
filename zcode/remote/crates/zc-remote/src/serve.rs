@@ -56,13 +56,18 @@
 //!   すぐ「対象ではない」。設定を読み直しても効く）
 //! - 相手の版は [`zc_remote_ipc::MIN_IPC_VERSION`] から受ける（返事の `Hello` は相手の版。
 //!   版 1 の zcode も、重ね無しでそのまま使える）
+//! - **LSP**（版 3。docs/lsp-design.md）: `Lsp` は Rust のプロジェクトだけ（ほかは「対象ではない」）。
+//!   走査して重ねを当てた目録を状態機械に渡し（`Session::lsp`）、答えを `LspResult` で返す。
+//!   場所は根からの相対を絶対パスに直す（外の場所は `label` だけ）。`Warm` が `.rs` のファイルなら、
+//!   同じく `lsp_warm` も頼む（rust-analyzer を先に起こす）。状態（`lsp_state`）は zcode の相手
+//!   みんなへ `LspState` で流す
 
 use crate::artifact::{self, ArtifactError, Dirs, LastGood, Meta, Placed, Receiver};
 use crate::auth::{AccessServiceToken, AuthError, Credential, NoCredential, Retry};
 use crate::config::{BackendChoice, CheckOnSave, Config};
 use crate::net::{self, Conn, Dial, DialStats, DialStep, Incoming, NetError, Stage, Timeouts};
 use crate::scan::{self, HashCache, Overlaid, Project, ProjectError, ScanError, Shape};
-use crate::session::{Action, Event, JobRequest, Outcome, Session, Ticket};
+use crate::session::{Action, Event, JobRequest, LspOutcome, LspRequest, Outcome, Session, Ticket};
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::IpAddr;
@@ -488,11 +493,45 @@ fn describe_auth(e: &AuthError, path: &Path) -> String {
     }
 }
 
+/// LSP の問い合わせ 1 つ（[`Ticket`] 1 つ）ぶんの持ち物。
+struct LspCtx {
+    ticket: Ticket,
+    /// 頼んだ相手（`Warm` から頼んだものは `None`）。
+    client: Option<u32>,
+    req: ipc::ReqId,
+    project: Project,
+    request: LspRequest,
+    overlay: Vec<Overlaid>,
+}
+
+/// LSP の問い合わせ（[`ipc::Request::Lsp`]）の中身。
+struct LspAsk {
+    req: ipc::ReqId,
+    /// `None` は `Warm` から（`lsp_warm`）。
+    kind: Option<ipc::LspKind>,
+    file: PathBuf,
+    line: u32,
+    col: u32,
+    text: String,
+    overlay: Vec<ipc::OverlayFile>,
+}
+
+/// `file` の根からの相対パス（根の外なら `None`）。
+fn rel_of(project: &Project, file: &Path) -> Option<String> {
+    let parent = std::fs::canonicalize(file.parent()?).ok()?;
+    let p = parent.join(file.file_name()?);
+    let rel = p.strip_prefix(&project.root).ok()?.to_str()?.to_owned();
+    zc_wire::tree::is_canonical_path(&rel).then_some(rel)
+}
+
 /// ビルド係との接続以外の全部（接続から届いたものを処理している間も触れるように分けてある）。
 struct Core {
     opts: ServeOptions,
     session: Session,
     jobs: Vec<JobCtx>,
+    lsps: Vec<LspCtx>,
+    /// project id → 根（`lsp_state` を zcode に流すとき、根で知らせる）。
+    lsp_roots: Vec<(String, PathBuf)>,
     clients: Vec<Client>,
     cache: HashCache,
     dirs: Option<Dirs>,
@@ -646,6 +685,99 @@ impl Core {
         self.jobs.push(JobCtx { ticket, who, project, request, flags, started_us: now, art: None, rx: None, placed: None, art_failed: None, art_retried: false, rescans: 0, overlay });
     }
 
+    /// LSP の問い合わせを受ける（`client` が `None` なら `Warm` から: 返事はしない）。
+    fn on_lsp(&mut self, now: u64, client: Option<u32>, ask: LspAsk) {
+        use ipc::DoneStatus as S;
+        let LspAsk { req, kind, file, line, col, text, overlay } = ask;
+        let reply = |core: &mut Core, status: S, message: String| {
+            if let Some(c) = core.clients.iter_mut().find(|c| Some(c.id) == client) {
+                c.send(&ipc::Response::LspResult { req, status, message: truncate(message, MESSAGE_MAX), text: String::new(), items: Vec::new() });
+            }
+        };
+        if overlay.iter().map(|o| o.bytes.len()).sum::<usize>() > ipc::MAX_OVERLAY_BYTES {
+            return reply(self, S::Limit, format!("未保存の中身が {}MiB を超えている", ipc::MAX_OVERLAY_BYTES >> 20));
+        }
+        // v1 は Rust だけ（rust-analyzer）
+        if !file.extension().is_some_and(|e| e == "rs") {
+            return reply(self, S::NotApplicable, "LSP は Rust のファイルだけ".into());
+        }
+        let project = match scan::find_project(&file, wire::Lang::Rust) {
+            Ok(p) => p,
+            Err(ProjectError::NotApplicable) => return reply(self, S::NotApplicable, "Rust のプロジェクトではない".into()),
+            Err(ProjectError::Io(m)) => return reply(self, S::Error, m),
+        };
+        if let Some(why) = self.cfg_err.clone().or_else(|| self.opts.config.unusable().map(str::to_owned)) {
+            return reply(self, S::Auth, why);
+        }
+        let Some(rel) = rel_of(&project, &file) else { return reply(self, S::NotApplicable, "プロジェクトの外のファイル".into()) };
+        let overlay = scan::resolve_overlay(&project, overlay.into_iter().map(|o| (o.path, o.bytes)).collect());
+        let manifest = match self.scan(&project).and_then(|m| scan::apply_overlay(m, &overlay)) {
+            Ok(m) => m,
+            Err(ScanError::TooLarge(m)) => return reply(self, S::Limit, m),
+            Err(ScanError::Io(m)) => return reply(self, S::Error, m),
+        };
+        let query = match kind {
+            None => None,
+            Some(ipc::LspKind::Hover) => Some(wire::LspQuery::Hover),
+            Some(ipc::LspKind::Definition) => Some(wire::LspQuery::Definition),
+            Some(ipc::LspKind::References) => Some(wire::LspQuery::References),
+            Some(ipc::LspKind::Symbols) => Some(wire::LspQuery::Symbols),
+            Some(ipc::LspKind::Completion) => Some(wire::LspQuery::Completion),
+        };
+        if !self.lsp_roots.iter().any(|(id, _)| *id == project.id) {
+            if self.lsp_roots.len() >= 16 {
+                self.lsp_roots.remove(0);
+            }
+            self.lsp_roots.push((project.id.clone(), project.root.clone()));
+        }
+        let request = LspRequest { project: project.id.clone(), manifest, query, path: rel, line, col, text };
+        let ticket = self.session.lsp(now, request.clone());
+        self.lsps.push(LspCtx { ticket, client, req, project, request, overlay });
+    }
+
+    /// LSP の問い合わせが終わった。
+    fn on_lsp_done(&mut self, i: usize, outcome: LspOutcome) {
+        use ipc::DoneStatus as S;
+        let ctx = self.lsps.remove(i);
+        let (status, message, text, items) = match outcome {
+            LspOutcome::Answer { text, items } => {
+                let root = ctx.project.root.clone();
+                let items = items
+                    .into_iter()
+                    .filter(|it| it.path.is_empty() || zc_wire::tree::is_canonical_path(&it.path))
+                    .map(|it| ipc::LspItem {
+                        path: if it.path.is_empty() { PathBuf::new() } else { root.join(&it.path) },
+                        label: truncate(it.ext, 512),
+                        line: it.line,
+                        col: it.col,
+                        end: it.end,
+                        kind: it.kind,
+                        name: truncate(it.name, 512),
+                        detail: truncate(it.detail, 512),
+                        insert: truncate(it.insert, 1024),
+                    })
+                    .collect();
+                (S::Ok, String::new(), truncate(text, zc_wire::limits::MAX_LSP_TEXT), items)
+            }
+            LspOutcome::Failed { code, message } => match code {
+                wire::ErrorCode::Limit | wire::ErrorCode::TooLarge => (S::Limit, message, String::new(), Vec::new()),
+                _ => (S::Error, message, String::new(), Vec::new()),
+            },
+            LspOutcome::Cancelled => (S::Cancelled, String::new(), String::new(), Vec::new()),
+            LspOutcome::GaveUp => {
+                let (s, m) = match &self.last_err {
+                    Some(NetError::Auth(0)) => (S::Auth, self.auth_msg.clone().unwrap_or_else(|| describe_net(&NetError::Auth(0)).1)),
+                    Some(e) => describe_net(e),
+                    None => (S::Offline, "ビルド係につながらない".into()),
+                };
+                (s, m, String::new(), Vec::new())
+            }
+        };
+        if let Some(c) = self.clients.iter_mut().find(|c| Some(c.id) == ctx.client) {
+            c.send(&ipc::Response::LspResult { req: ctx.req, status, message: truncate(message, MESSAGE_MAX), text, items });
+        }
+    }
+
     fn scan(&mut self, project: &Project) -> Result<Arc<zc_wire::tree::Manifest>, ScanError> {
         let now_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
         let (m, st) = self.cache.scan(project, now_ns)?;
@@ -655,6 +787,26 @@ impl Core {
 
     /// 走査のあとでファイルが書き換わっていた依頼を、目録を作り直して出し直す。
     fn rescan(&mut self, now: u64, ticket: Ticket) {
+        if let Some(i) = self.lsps.iter().position(|l| l.ticket == ticket) {
+            // LSP の問い合わせは作り直して出し直す（1 回だけ。同じことが続けば次の問い合わせに任せる）
+            let mut ctx = self.lsps.remove(i);
+            match self.scan(&ctx.project).and_then(|m| scan::apply_overlay(m, &ctx.overlay)) {
+                Ok(m) => {
+                    ctx.request.manifest = m;
+                    ctx.ticket = self.session.lsp(now, ctx.request.clone());
+                    self.lsps.push(ctx);
+                }
+                Err(e) => {
+                    let m = match e {
+                        ScanError::TooLarge(m) | ScanError::Io(m) => m,
+                    };
+                    if let Some(c) = self.clients.iter_mut().find(|c| Some(c.id) == ctx.client) {
+                        c.send(&ipc::Response::LspResult { req: ctx.req, status: ipc::DoneStatus::Error, message: m, text: String::new(), items: Vec::new() });
+                    }
+                }
+            }
+            return;
+        }
         let Some(i) = self.jobs.iter().position(|j| j.ticket == ticket) else { return };
         let mut ctx = self.jobs.remove(i);
         ctx.rescans += 1;
@@ -686,6 +838,30 @@ impl Core {
     }
 
     fn on_event(&mut self, now: u64, ev: Event, frame: Option<&[u8]>) {
+        let ev = match ev {
+            Event::LspDone { ticket, outcome } => {
+                if let Some(i) = self.lsps.iter().position(|l| l.ticket == ticket) {
+                    self.on_lsp_done(i, outcome);
+                }
+                return;
+            }
+            Event::LspState { project, state, message, .. } => {
+                let Some(root) = self.lsp_roots.iter().find(|(id, _)| *id == project).map(|(_, r)| r.clone()) else { return };
+                let state = match state {
+                    wire::LspPhase::Loading => ipc::LspState::Loading,
+                    wire::LspPhase::Ready => ipc::LspState::Ready,
+                    wire::LspPhase::Failed => ipc::LspState::Failed,
+                };
+                let r = ipc::Response::LspState { root, state, message: truncate(message, MESSAGE_MAX) };
+                for c in &mut self.clients {
+                    if c.kind == Some(ipc::ClientKind::Editor) {
+                        c.send(&r);
+                    }
+                }
+                return;
+            }
+            other => other,
+        };
         let ticket = match &ev {
             Event::Uploading { ticket, .. }
             | Event::Queued { ticket, .. }
@@ -697,6 +873,7 @@ impl Core {
             | Event::ArtifactBegin { ticket, .. }
             | Event::ArtifactData { ticket, .. }
             | Event::Done { ticket, .. } => *ticket,
+            Event::LspDone { .. } | Event::LspState { .. } => return,
         };
         let Some(i) = self.jobs.iter().position(|j| j.ticket == ticket) else { return };
         let who = self.jobs[i].who;
@@ -780,6 +957,7 @@ impl Core {
                 }
             }
             Event::Done { outcome, .. } => self.on_done(now, i, outcome),
+            Event::LspDone { .. } | Event::LspState { .. } => {}
         }
     }
 
@@ -1041,6 +1219,8 @@ fn run_inner(opts: ServeOptions, reload: bool, cfg_err: Option<String>) -> std::
             opts,
             session: Session::new(),
             jobs: Vec::new(),
+            lsps: Vec::new(),
+            lsp_roots: Vec::new(),
             clients: Vec::new(),
             cache: HashCache::new(),
             dirs,
@@ -1310,9 +1490,9 @@ impl Serve {
                     self.net.pending_blob = Some(Action::SendBlob { id, manifest, path, sha256, size });
                     return;
                 }
-                let root = self.core.jobs.iter().find(|j| Arc::ptr_eq(&j.request.manifest, &manifest)).map(|j| j.project.root.clone());
+                let root = self.core.jobs.iter().find(|j| Arc::ptr_eq(&j.request.manifest, &manifest)).map(|j| j.project.root.clone()).or_else(|| self.core.lsps.iter().find(|l| Arc::ptr_eq(&l.request.manifest, &manifest)).map(|l| l.project.root.clone()));
                 // 未保存の中身（どの依頼の重ねでも、同じパス・同じ中身なら使える）は RAM から送る。
-                let mem = self.core.jobs.iter().flat_map(|j| j.overlay.iter()).find(|o| o.rel == path && o.sha256 == sha256 && o.bytes.len() as u64 == size).map(|o| o.bytes.clone());
+                let mem = self.core.jobs.iter().flat_map(|j| j.overlay.iter()).chain(self.core.lsps.iter().flat_map(|l| l.overlay.iter())).find(|o| o.rel == path && o.sha256 == sha256 && o.bytes.len() as u64 == size).map(|o| o.bytes.clone());
                 let mut sent_last = false;
                 let ok = match (&mem, &root) {
                     (Some(bytes), _) => {
@@ -1598,11 +1778,19 @@ impl Serve {
             }
             // 最初は Hello。
             (_, None) => self.core.clients[ci].dead = true,
-            (ipc::Request::Warm { .. }, _) => {
+            (ipc::Request::Warm { file }, _) => {
                 self.maybe_reload(now);
                 self.core.want_warm = true;
                 let st = status(self);
                 self.core.clients[ci].send(&st);
+                // Rust のファイルなら、rust-analyzer も先に起こす（返事は LspState で）
+                if file.extension().is_some_and(|e| e == "rs") && file.is_file() {
+                    self.core.on_lsp(now, None, LspAsk { req: ipc::ReqId::NONE, kind: None, file, line: 0, col: 0, text: String::new(), overlay: Vec::new() });
+                }
+            }
+            (ipc::Request::Lsp { req, kind, file, line, col, text, overlay }, Some(_)) => {
+                self.maybe_reload(now);
+                self.core.on_lsp(now, Some(id), LspAsk { req, kind: Some(kind), file, line, col, text, overlay });
             }
             (ipc::Request::Status, _) => {
                 let st = status(self);
@@ -1670,6 +1858,13 @@ impl Serve {
             }).collect();
             for t in tickets {
                 self.core.session.cancel(now, t);
+            }
+            let lsps: Vec<Ticket> = self.core.lsps.iter_mut().filter(|l| l.client == Some(id)).map(|l| {
+                l.client = None;
+                l.ticket
+            }).collect();
+            for t in lsps {
+                self.core.session.lsp_cancel(t);
             }
         }
     }

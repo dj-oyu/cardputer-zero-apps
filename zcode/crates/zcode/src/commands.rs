@@ -93,6 +93,13 @@ pub const BINDINGS: &[Binding] = &[
     b("Markdown", "太字", "Alt+B", Command::Bold),
     b("Markdown", "斜体", "Alt+I", Command::Italic),
     b("日本語入力", "かなモードへ", "Ctrl+J", Command::ImeOn),
+    // ビルド係の rust-analyzer（Rust だけ。docs/lsp-design.md）。F8 は手元の診断だけでオフラインでも効く
+    b("型の情報", "型と説明", "Ctrl+H", Command::Hover),
+    b("型の情報", "定義へ", "Ctrl+D", Command::GotoDefinition),
+    b("型の情報", "使っている所", "Ctrl+R", Command::FindReferences),
+    b("型の情報", "名前を探す", "Ctrl+T", Command::FindSymbol),
+    b("型の情報", "次の診断へ", "F8", Command::NextDiagnostic),
+    b("型の情報", "前の診断へ", "Shift+F8", Command::PrevDiagnostic),
 ];
 
 /// 打鍵に割り当てられた操作。割り当てが無く、文字の打鍵なら `InsertChar`。
@@ -146,5 +153,12 @@ mod tests {
         assert_eq!(lookup(&KeyEvent::new(Key::Tab, Mods::SHIFT)), Some(Command::Outdent));
         assert_eq!(lookup(&KeyEvent::new(Key::Char('b'), Mods::CTRL)), Some(Command::ToggleTree));
         assert_eq!(lookup(&KeyEvent::new(Key::Char('e'), Mods::CTRL)), Some(Command::FocusTree));
+        // 型の情報（LSP）と診断の移動
+        assert_eq!(lookup(&KeyEvent::new(Key::Char('h'), Mods::CTRL)), Some(Command::Hover));
+        assert_eq!(lookup(&KeyEvent::new(Key::Char('d'), Mods::CTRL)), Some(Command::GotoDefinition));
+        assert_eq!(lookup(&KeyEvent::new(Key::Char('r'), Mods::CTRL)), Some(Command::FindReferences));
+        assert_eq!(lookup(&KeyEvent::new(Key::Char('t'), Mods::CTRL)), Some(Command::FindSymbol));
+        assert_eq!(lookup(&KeyEvent::new(Key::F(8), Mods::FN)), Some(Command::NextDiagnostic));
+        assert_eq!(lookup(&KeyEvent::new(Key::F(8), Mods::SHIFT)), Some(Command::PrevDiagnostic));
     }
 }

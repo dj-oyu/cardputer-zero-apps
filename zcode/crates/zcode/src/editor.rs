@@ -27,7 +27,7 @@ use crate::app::{AppEvent, LoopCx, Screen, TimerId};
 use crate::commands;
 use crate::doc::{DocBackend, TextDoc};
 use crate::intel::{self, CheckFail};
-use crate::remote::{OverlaySource, RemoteClient, RemoteEvent, RemoteJob, RemoteReq};
+use crate::remote::{LspAsk, OverlaySource, RemoteClient, RemoteEvent, RemoteJob, RemoteReq};
 use crate::save::{SaveOk, SaveRequest, Saver, StoreSaver};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -50,6 +50,9 @@ use zc_ui::{ShortcutList, ShortcutRow};
 use zc_store::{BackupPolicy, DocBackup, Restore, Snapshot};
 use zc_ui::{CandidatePopup, CandidateRow, CodeLayouter, MdLayouter, MiniBuffer, PreeditStyle, PreeditView, MINI_H};
 use zc_ui::{CompletionPopup, EditorStatus, EditorView, FileTree, ImeMode, PickerList, PopupItem, RenderCx, SpanSource, StatusBar, Tab, TabBar, TerminalPanel, Widget, TERM_PANEL_H};
+
+#[path = "editor_lsp.rs"]
+mod lsp;
 
 /// ステータスバーを遅らせる時間（§5.2）。
 const STATUS_DELAY: Duration = Duration::from_millis(50);
@@ -133,6 +136,16 @@ pub trait RemoteLink {
     fn auto_check_ready(&mut self) -> bool {
         true
     }
+    /// LSP の問い合わせ（docs/lsp-design.md）。最後に必ず [`RemoteEvent::LspResult`] が 1 回届く。
+    /// ビルド係を使わない人（設定が無い）には `None`（何も作らない）。
+    fn lsp(&mut self, ask: LspAsk, cx: &mut LoopCx<'_>) -> Option<RemoteReq> {
+        let _ = (ask, cx);
+        None
+    }
+    /// 先につないでおく（Rust のファイルを開いた。serve が rust-analyzer も起こす）。
+    fn warm(&mut self, file: PathBuf, cx: &mut LoopCx<'_>) {
+        let _ = (file, cx);
+    }
 }
 
 /// 本物の専用スレッド。最初の依頼まで作らない（ビルド係を使わない人には、スレッドも
@@ -147,6 +160,17 @@ impl RemoteLink for LazyRemote {
     fn auto_check_ready(&mut self) -> bool {
         // 保存時の check でもう作ってあるか、zc-remote の設定がある人だけ
         self.0.is_some() || crate::remote::remote_config_exists()
+    }
+    fn lsp(&mut self, ask: LspAsk, cx: &mut LoopCx<'_>) -> Option<RemoteReq> {
+        if !self.auto_check_ready() {
+            return None;
+        }
+        Some(self.0.get_or_insert_with(|| RemoteClient::new(cx.results.clone(), None)).lsp(ask))
+    }
+    fn warm(&mut self, file: PathBuf, cx: &mut LoopCx<'_>) {
+        if self.auto_check_ready() {
+            self.0.get_or_insert_with(|| RemoteClient::new(cx.results.clone(), None)).warm(file);
+        }
     }
 }
 
@@ -558,6 +582,43 @@ struct CompState {
     sel: usize,
     /// 置き換える単語の先頭部分（打った文字）。
     prefix: String,
+    /// rust-analyzer の候補（届いたら足す。小窓では単語補完より先に出す。docs/lsp-design.md）。
+    lsp: Vec<lsp::LspCand>,
+}
+
+/// 補完の小窓の 1 行（単語補完と rust-analyzer の候補を合わせたもの）。
+struct CompEntry {
+    label: String,
+    tag: &'static str,
+    tag_color: Color,
+    insert: String,
+    /// 置き換えの始まり（カーソルの行の、文字の位置）。
+    start: u32,
+    /// 打った文字と一致している先頭の文字数（青で示す）。
+    hit: usize,
+}
+
+impl CompState {
+    /// 小窓に出す候補（rust-analyzer の分が先。単語補完の同じ語は除く）。`col` はカーソルの桁。
+    fn entries(&self, col: u32) -> Vec<CompEntry> {
+        let mut out: Vec<CompEntry> = self
+            .lsp
+            .iter()
+            .map(|c| CompEntry { label: c.label.clone(), tag: "rs", tag_color: palette::FUNCTION, insert: c.insert.clone(), start: c.start, hit: col.saturating_sub(c.start) as usize })
+            .collect();
+        let n = self.prefix.chars().count();
+        for i in &self.items {
+            if out.iter().any(|e| e.insert == i.label) {
+                continue;
+            }
+            let (tag, tag_color) = match i.kind {
+                CompletionKind::Word => ("ab", palette::STATUS),
+                CompletionKind::Keyword => ("kw", palette::CONTROL),
+            };
+            out.push(CompEntry { label: i.label.clone(), tag, tag_color, insert: i.label.clone(), start: col.saturating_sub(n as u32), hit: n });
+        }
+        out
+    }
 }
 
 /// 開いているアウトライン（モック 14）。
@@ -604,6 +665,12 @@ pub struct EditorScreen {
     popup: CompletionPopup,
     /// 小窓の下の行を描き直してから、小窓を置き直す。
     popup_stale: bool,
+    /// 型の情報（LSP。`editor_lsp.rs`）。
+    lsp: lsp::LspUi,
+    /// hover の小窓（補完の小窓と同じ部品）。
+    hover_popup: CompletionPopup,
+    /// hover の小窓の下の行を描き直してから、置き直す（閉じたときも）。
+    hover_stale: bool,
     /// アウトライン（開いているあいだは本文の全体を覆う）。
     outline: Option<OutlineState>,
     picker: PickerList,
@@ -708,6 +775,9 @@ impl EditorScreen {
             completion: None,
             popup: CompletionPopup::new("Tab 確定  ↑↓ 選ぶ  Esc 閉じる"),
             popup_stale: false,
+            lsp: lsp::LspUi::default(),
+            hover_popup: CompletionPopup::new("Esc 閉じる"),
+            hover_stale: false,
             outline: None,
             picker: PickerList::new("アウトライン"),
             skk: Skk::new(load_skk_user_dict()),
@@ -828,7 +898,16 @@ impl EditorScreen {
     }
     /// 開いている補完の候補と、選んでいる位置（テスト用）。
     pub fn completion(&self) -> Option<(Vec<String>, usize)> {
-        self.completion.as_ref().map(|c| (c.items.iter().map(|i| i.label.clone()).collect(), c.sel))
+        let col = self.tabs.get(self.active).map_or(0, |t| t.doc.selection().1.col);
+        self.completion.as_ref().map(|c| (c.entries(col).into_iter().map(|e| e.label).collect(), c.sel))
+    }
+    /// 出している hover の行（テスト用）。
+    pub fn hover(&self) -> Option<Vec<String>> {
+        self.hover_items().map(|v| v.into_iter().map(|i| i.label).collect())
+    }
+    /// 開いている「使っている所」・「名前を探す」の一覧の行（名前、選べない行か）と選んでいる位置（テスト用）。
+    pub fn locs_rows(&self) -> Option<(String, Vec<(String, bool)>, usize)> {
+        self.lsp.locs.as_ref().map(|s| (s.title.clone(), s.rows.iter().map(|(r, i)| (r.name.clone(), i.is_none())).collect(), s.sel))
     }
     /// 開いているアウトラインの行（名前、親として残しただけの行か）と選んでいる位置（テスト用）。
     pub fn outline_rows(&self) -> Option<(Vec<(String, bool)>, usize)> {
@@ -936,6 +1015,8 @@ impl EditorScreen {
         // 別の文書の上に出ていた小窓は消す（ビューは全部描き直す）
         self.completion = None;
         self.popup.forget();
+        self.lsp.hover = None;
+        self.hover_popup.forget();
         self.skk.reset();
         self.cand_popup.forget();
     }
@@ -1134,6 +1215,13 @@ impl EditorScreen {
         if self.message.take().is_some() {
             self.status_due = true;
         }
+        // hover の小窓は次の打鍵で閉じる（Esc は閉じるだけ）
+        if self.lsp.hover.is_some() {
+            self.close_hover();
+            if ev.key == Key::Esc {
+                return;
+            }
+        }
         // 打鍵があったら、試験の結果が届いても一覧で打鍵を奪わない（F6 は exec で立て直す）
         self.test_waiting = false;
         // SKK: エディタとターミナルの打鍵はまず SKK へ（入力欄・アウトラインは英数のまま）
@@ -1168,6 +1256,10 @@ impl EditorScreen {
             self.tests_key(ev, cx);
             return;
         }
+        if self.lsp.locs.is_some() {
+            self.locs_key(ev, cx);
+            return;
+        }
         let Some(cmd) = commands::lookup(ev) else { return };
         if ev.repeat && !cmd.repeatable() {
             return;
@@ -1183,7 +1275,7 @@ impl EditorScreen {
                     return;
                 }
                 Command::Move { motion: m @ (Motion::Up | Motion::Down), select: false } => {
-                    let n = c.items.len();
+                    let n = (c.items.len() + c.lsp.len()).max(1);
                     c.sel = if m == Motion::Up { (c.sel + n - 1) % n } else { (c.sel + 1) % n };
                     return;
                 }
@@ -1197,9 +1289,23 @@ impl EditorScreen {
         self.exec(cmd, cx);
         // 単語を打っている間・消している間は候補を出し直す。ほかの操作では閉じる
         match cmd {
-            Command::InsertChar(c) if c.is_alphanumeric() || c == '_' => self.update_completion(false),
-            Command::Backspace if self.completion.is_some() => self.update_completion(false),
-            Command::Complete => self.update_completion(true),
+            Command::InsertChar(c) if c.is_alphanumeric() || c == '_' => {
+                self.update_completion(false);
+                self.arm_lsp_completion(false, cx);
+            }
+            // rust-analyzer はメソッド・パスの続きも出せる（単語補完には無い）
+            Command::InsertChar('.' | ':') => {
+                self.completion = None;
+                self.arm_lsp_completion(false, cx);
+            }
+            Command::Backspace if self.completion.is_some() => {
+                self.update_completion(false);
+                self.arm_lsp_completion(false, cx);
+            }
+            Command::Complete => {
+                self.update_completion(true);
+                self.arm_lsp_completion(true, cx);
+            }
             _ => self.completion = None,
         }
     }
@@ -1462,7 +1568,8 @@ impl EditorScreen {
     /// カーソルの前の単語から候補を作り直す。`manual`（Ctrl+Space）なら 1 文字からでも出し、
     /// 候補が無ければそう知らせる。
     fn update_completion(&mut self, manual: bool) {
-        self.completion = None;
+        // rust-analyzer の候補は、打った文字で絞って残す（新しい答えが届けば替える）
+        let old_lsp = self.completion.take().map(|c| c.lsp).unwrap_or_default();
         if self.focus != Focus::Editor {
             return;
         }
@@ -1471,13 +1578,25 @@ impl EditorScreen {
         if tab.loading || a != h {
             return;
         }
+        let lsp: Vec<lsp::LspCand> = {
+            let mut line = String::new();
+            tab.doc.line(h.line, &mut line);
+            old_lsp
+                .into_iter()
+                .filter(|c| {
+                    let typed: String = line.chars().skip(c.start as usize).take(h.col.saturating_sub(c.start) as usize).collect();
+                    c.start <= h.col && c.insert.to_lowercase().starts_with(&typed.to_lowercase()) && c.insert != typed
+                })
+                .collect()
+        };
         let Some(prefix) = zc_intel::prefix_at(tab.doc.as_lines(), h) else {
             if manual {
                 self.say("補完: カーソルの前に単語が無い", false);
             }
             return;
         };
-        if !manual && prefix.chars().count() < intel::AUTO_MIN_CHARS {
+        // rust-analyzer の候補が残っていれば、1 文字目から絞って出す
+        if !manual && lsp.is_empty() && prefix.chars().count() < intel::AUTO_MIN_CHARS {
             return;
         }
         let mut text = String::new();
@@ -1497,24 +1616,24 @@ impl EditorScreen {
         }
         let keywords = tab.lang.info().map_or(&[][..], |i| i.keywords);
         let items = zc_intel::complete(&tab.words, keywords, &prefix, h, intel::MAX_ITEMS);
-        if items.is_empty() {
-            if manual {
+        if items.is_empty() && lsp.is_empty() {
+            if manual && tab.remote_lang() != Some(RemoteLang::Rust) {
                 self.say(format!("「{prefix}」の候補は無い"), false);
             }
             return;
         }
-        self.completion = Some(CompState { items, sel: 0, prefix });
+        self.completion = Some(CompState { items, sel: 0, prefix, lsp });
     }
 
     /// 選んでいる候補で、打っている単語を置き換える（1 回の取り消しで戻せる）。
     fn accept_completion(&mut self) {
         let Some(c) = self.completion.take() else { return };
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
-        let Some(item) = c.items.get(c.sel) else { return };
         let (_, h) = tab.doc.selection();
-        let start = Pos::new(h.line, h.col.saturating_sub(c.prefix.chars().count() as u32));
+        let Some(item) = c.entries(h.col).into_iter().nth(c.sel) else { return };
+        let start = Pos::new(h.line, item.start.min(h.col));
         tab.doc.break_undo_group();
-        if let Some(ch) = tab.doc.replace_range(start, h, &item.label) {
+        if let Some(ch) = tab.doc.replace_range(start, h, &item.insert) {
             tab.edited(ch, &mut self.diag_store);
         }
         tab.doc.break_undo_group();
@@ -1571,7 +1690,9 @@ impl EditorScreen {
     }
 
     fn sync_picker(&mut self) {
-        if let Some(o) = &self.outline {
+        if let Some(s) = &self.lsp.locs {
+            self.picker.set(&s.query, s.rows.iter().map(|(r, _)| r.clone()).collect(), s.sel);
+        } else if let Some(o) = &self.outline {
             self.picker.set(&o.query, o.rows.iter().map(|r| r.row.clone()).collect(), o.sel);
         } else if let Some(t) = &self.tests {
             self.picker.set(&t.query, t.rows.iter().map(|r| r.row.clone()).collect(), t.sel);
@@ -1710,6 +1831,14 @@ impl EditorScreen {
                 }
             }
             Command::ShowOutline if !self.tabs.is_empty() => self.open_outline(),
+            Command::Hover | Command::GotoDefinition | Command::FindReferences | Command::FindSymbol | Command::NextDiagnostic | Command::PrevDiagnostic => {
+                if !self.tabs.is_empty() {
+                    if self.focus == Focus::Tree {
+                        self.set_focus(Focus::Editor);
+                    }
+                    self.exec_lsp(cmd, cx);
+                }
+            }
             Command::ShowShortcuts => self.open_shortcuts(),
             Command::TogglePreview if self.focus == Focus::Editor => self.toggle_preview(),
             Command::ToggleCheckbox if self.focus == Focus::Editor => self.toggle_checkbox(),
@@ -2060,6 +2189,8 @@ impl EditorScreen {
             RemoteEvent::Diagnostics { req, tag, root, complete, files } => self.remote_diagnostics(req, tag, &root, complete, files),
             RemoteEvent::Tests { req, root, report } => self.tests_arrived(req, root, report),
             RemoteEvent::Done { req, tag, status, message, .. } => self.remote_done(req, tag, status, &message, cx),
+            RemoteEvent::LspResult { req, status, message, text, items } => self.on_lsp_result(req, status, message, text, items, cx),
+            RemoteEvent::LspState { state, message, .. } => self.on_lsp_state(state, message),
             // ログは頼んでいない。成果物は F5（端末の zc-remote run）が自分で受け取る
             RemoteEvent::Log { .. } | RemoteEvent::Artifact { .. } => {}
         }
@@ -2739,7 +2870,16 @@ impl EditorScreen {
             self.status.set_bg(palette::STATUS);
             return;
         }
-        if self.outline.is_some() {
+        if let Some(s) = &self.lsp.locs {
+            let left = match (s.symbols, s.waiting.is_some()) {
+                (true, true) => "名前を探す: 問い合わせ中".to_string(),
+                (true, false) => format!("名前を探す  {} 件", s.items.len()),
+                (false, _) => s.selected().map(|l| format!("{}:{}", l.place, l.line + 1)).unwrap_or_else(|| s.title.clone()),
+            };
+            self.status.set_left(&left);
+            self.status.set_right("Enter 移動  Esc 閉じる");
+            self.status.set_chips(Vec::new());
+        } else if self.outline.is_some() {
             self.status.set_left("アウトライン");
             self.status.set_right("Enter 移動  Esc 閉じる");
             self.status.set_chips(Vec::new());
@@ -2907,6 +3047,9 @@ impl Screen for EditorScreen {
                         }
                         t.sync_cursor();
                         self.status_due = true;
+                        // 定義へ飛んだ先なら、その桁へ。Rust なら rust-analyzer を先に起こしておく
+                        self.lsp_opened(id);
+                        self.lsp_warm(id, cx);
                     }
                     Err(e) => {
                         let title = self.tabs[i].title.clone();
@@ -3034,6 +3177,8 @@ impl Screen for EditorScreen {
             TimerId::SkkFlush => self.flush_skk(cx),
             TimerId::Backup => self.write_backups(cx),
             TimerId::AutoCheck => self.auto_check(cx),
+            TimerId::LspComplete => self.lsp_complete_timer(cx),
+            TimerId::LspSymbols => self.lsp_symbols_timer(cx),
             TimerId::Tick => {
                 // 実行中の経過時間と、ビルド係の「実行中 n 秒」
                 if self.term.as_ref().is_some_and(|t| t.running.is_some()) || self.progress.is_some() {
@@ -3065,6 +3210,7 @@ impl Screen for EditorScreen {
         self.status.invalidate();
         self.picker.invalidate();
         self.popup.invalidate();
+        self.hover_popup.invalidate();
         self.panel.invalidate();
         self.empty_drawn = None;
         if let Some(t) = self.tabs.get_mut(self.active) {
@@ -3126,7 +3272,7 @@ impl Screen for EditorScreen {
             damage |= self.status.render(cx, regions.status);
             return damage;
         }
-        if self.outline.is_some() || self.tests.is_some() {
+        if self.outline.is_some() || self.tests.is_some() || self.lsp.locs.is_some() {
             // 本文（ツリーとエディタ）の全体を覆う（モック 14・15）
             let body = Rect::new(0, regions.tabs.bottom() as i16, Rect::SCREEN.w, (regions.status.y as i32 - regions.tabs.bottom()) as u16);
             damage |= self.picker.render(cx, body);
@@ -3141,6 +3287,7 @@ impl Screen for EditorScreen {
         }
         self.pump_highlight(None);
         let want_popup = self.completion.is_some() && self.focus == Focus::Editor;
+        let hover = if want_popup { None } else { self.hover_items() };
         match self.tabs.get_mut(self.active) {
             Some(t) => {
                 // 小窓を閉じる・置き直すときは、下にあった行を描き直させる
@@ -3150,6 +3297,13 @@ impl Screen for EditorScreen {
                         self.popup.forget();
                     }
                 }
+                if let Some(old) = self.hover_popup.drawn() {
+                    if hover.is_none() || std::mem::take(&mut self.hover_stale) {
+                        t.view.invalidate_rows(old.y as i32, old.bottom());
+                        self.hover_popup.forget();
+                    }
+                }
+                self.hover_stale = false;
                 if let Some(old) = self.cand_popup.drawn() {
                     if cand.is_none() || std::mem::take(&mut self.cand_stale) {
                         t.view.invalidate_rows(old.y as i32, old.bottom());
@@ -3170,23 +3324,21 @@ impl Screen for EditorScreen {
                 let view_damage = t.view.render(cx, regions.editor, t.doc.as_lines(), &mut spans);
                 damage |= view_damage;
                 if let (true, Some(c), Some(caret)) = (want_popup, self.completion.as_ref(), t.view.caret_rect()) {
-                    let items = c
-                        .items
-                        .iter()
-                        .map(|i| {
-                            let (tag, tag_color) = match i.kind {
-                                CompletionKind::Word => ("ab", palette::STATUS),
-                                CompletionKind::Keyword => ("kw", palette::CONTROL),
-                            };
-                            PopupItem { tag, tag_color, label: i.label.clone(), hit_chars: c.prefix.chars().count() }
-                        })
-                        .collect();
-                    self.popup.set(items, c.sel);
                     let (_, h) = t.doc.selection();
-                    let word = Pos::new(h.line, h.col.saturating_sub(c.prefix.chars().count() as u32));
+                    let entries = c.entries(h.col);
+                    let start = entries.iter().map(|e| e.start).min().unwrap_or(h.col);
+                    let items = entries.into_iter().map(|e| PopupItem { tag: e.tag, tag_color: e.tag_color, label: e.label, hit_chars: e.hit }).collect();
+                    self.popup.set(items, c.sel);
+                    let word = Pos::new(h.line, start);
                     let word_x = t.view.point_of(word).map_or(caret.x as i32, |r| r.x as i32);
                     let rect = self.popup.place(cx, caret, word_x, regions.editor);
                     damage |= self.popup.render_at(cx, rect, !view_damage.is_empty());
+                }
+                // hover（Ctrl+H）: カーソルの下の小窓（補完の小窓と同じ見た目。選んでいる行は無い）
+                if let (Some(items), Some(caret)) = (hover, t.view.caret_rect()) {
+                    self.hover_popup.set(items, usize::MAX);
+                    let rect = self.hover_popup.place(cx, caret, caret.x as i32, regions.editor);
+                    damage |= self.hover_popup.render_at(cx, rect, !view_damage.is_empty());
                 }
                 // SKK の候補一覧（モック 8）。▼ の語の下（登録欄の中の変換なら登録欄の上）
                 if let (false, Some((rows, sel, page))) = (cand_on_panel, cand.clone()) {

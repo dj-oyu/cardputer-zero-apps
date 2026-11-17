@@ -513,3 +513,56 @@ fn oversized_overlay_is_not_sent() {
     assert_eq!((*r, *status), (Some(req), DoneStatus::NotApplicable));
     assert!(message.contains("MiB"), "{message}");
 }
+
+/// LSP（docs/lsp-design.md）: 問い合わせ → `Request::Lsp`（未保存の中身を重ねる）→ 答えが
+/// `RemoteEvent::LspResult` で届く。状態はすぐ届く。serve が死んだら、待っていた問い合わせにも
+/// 必ず答え（Error）が届く。
+#[test]
+fn lsp_queries_answer_once_even_when_serve_dies() {
+    use zc_remote_ipc::{LspItem, LspKind, LspState};
+    use zcode::remote::LspAsk;
+    let dir = TempDir::new("lsp");
+    let listener = UnixListener::bind(dir.socket()).unwrap();
+    let (tx, rx) = main_channel().unwrap();
+    let client = RemoteClient::with_socket(tx, no_program(), dir.socket());
+    let doc = SimpleDoc::from_text("fn a() {}");
+    let ask = |kind| LspAsk { kind, file: "/p/src/main.rs".into(), line: 2, col: 7, text: String::new(), overlay: vec![OverlaySource::new("/p/src/main.rs".into(), doc.snapshot_lines())] };
+    let req = client.lsp(ask(LspKind::Hover));
+    let mut fake = Fake::accept(&listener);
+    fake.handshake();
+    let Some(Request::Lsp { req: r, kind, file, line, col, text, overlay }) = fake.recv() else { panic!() };
+    assert_eq!((r, kind, file.as_path(), line, col, text.as_str()), (ReqId(req.0), LspKind::Hover, Path::new("/p/src/main.rs"), 2, 7, ""));
+    assert_eq!(overlay, vec![OverlayFile { path: "/p/src/main.rs".into(), bytes: b"fn a() {}".to_vec() }]);
+    let item = LspItem { path: "/p/src/a.rs".into(), line: 1, col: 3, ..Default::default() };
+    fake.send(&Response::LspState { root: "/p".into(), state: LspState::Ready, message: "".into() });
+    fake.send(&Response::LspResult { req: r, status: DoneStatus::Ok, message: "".into(), text: "fn a()".into(), items: vec![item.clone()] });
+    // 自分の待っていない答え（2 回目・知らない番号）は流さない
+    fake.send(&Response::LspResult { req: r, status: DoneStatus::Ok, message: "".into(), text: "again".into(), items: vec![] });
+    let got = events(collect(&rx, Duration::from_secs(5), |e| matches!(e, RemoteEvent::LspResult { .. })));
+    assert_eq!(
+        got,
+        vec![
+            RemoteEvent::LspState { root: "/p".into(), state: LspState::Ready, message: "".into() },
+            RemoteEvent::LspResult { req, status: DoneStatus::Ok, message: "".into(), text: "fn a()".into(), items: vec![item] },
+        ]
+    );
+    // 待っている間に serve が死んだ
+    let req2 = client.lsp(ask(LspKind::References));
+    assert!(matches!(fake.recv(), Some(Request::Lsp { kind: LspKind::References, .. })));
+    drop(fake);
+    let got = events(collect(&rx, Duration::from_secs(5), |e| matches!(e, RemoteEvent::LspResult { .. })));
+    assert!(matches!(got.as_slice(), [RemoteEvent::LspResult { req: r, status: DoneStatus::Error, .. }] if *r == req2), "{got:?}");
+}
+
+/// `zc-remote` が無い: LSP の問い合わせにも「対象ではない」で答える（待たせない）。
+#[test]
+fn lsp_without_zc_remote_answers_not_applicable() {
+    use zc_remote_ipc::LspKind;
+    use zcode::remote::LspAsk;
+    let dir = TempDir::new("lspnone");
+    let (tx, rx) = main_channel().unwrap();
+    let client = RemoteClient::with_socket(tx, no_program(), dir.socket());
+    let req = client.lsp(LspAsk { kind: LspKind::Definition, file: "/p/a.rs".into(), line: 0, col: 0, text: String::new(), overlay: vec![] });
+    let got = events(collect(&rx, Duration::from_secs(5), |e| matches!(e, RemoteEvent::LspResult { .. })));
+    assert!(matches!(got.last(), Some(RemoteEvent::LspResult { req: r, status: DoneStatus::NotApplicable, .. }) if *r == req), "{got:?}");
+}
