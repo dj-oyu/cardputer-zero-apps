@@ -2,9 +2,10 @@
   "name": "zc-builder-tools",
   "private": true,
   "version": "0.1.0",
-  "description": "ビルド係のイメージに入れる JS / TS の道具（版は package-lock.json の integrity で固定。Dockerfile が npm ci --ignore-scripts で /opt/tools に入れる）",
+  "description": "ビルド係のイメージに入れる JS / TS と Python（pyright）の道具（版は package-lock.json の integrity で固定。Dockerfile が npm ci --ignore-scripts で /opt/tools に入れる）",
   "dependencies": {
     "esbuild": "0.28.2",
+    "pyright": "1.1.414",
     "typescript": "7.0.2"
   }
 }
