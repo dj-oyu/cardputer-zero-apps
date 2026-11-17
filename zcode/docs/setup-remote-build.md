@@ -43,13 +43,15 @@ zcode の「外でビルド・試験・型検査する仕組み」を使える�
 >   **使わない**。Worker 単位の Access は WebSocket に対応しておらず、Upgrade が 403 で失敗すると
 >   公式の文書に書かれている（[Cloudflare Access for Workers](https://developers.cloudflare.com/workers/configuration/cloudflare-access/)）。
 >   アカウント全体の「すべての Worker を保護する」設定も同じ理由で入れない
-> - Zero Trust の画面で self-hosted のアプリケーションを手で作り、公開ホスト名に
->   `<build-host>`（workers.dev）を入れる方法は **通らない**（「domain does not belong to zone」で
->   断られる。2026-11-17 にユーザーが確認）
-> - 使うのは、deploy した後の **Worker → Settings → Domains & Routes → workers.dev →
->   Enable Cloudflare Access**（workers.dev のホスト名に対する Access）。これで WebSocket が通るかは
->   **deploy の後に最初に確かめる**（2.5）。通らなければ、安いドメインを 1 つ取って
->   Custom Domain + ホスト名の Access にする（その場合は `wrangler.jsonc` の変更が要る）
+> - 使うのは、deploy した後に **Zero Trust で self-hosted のアプリケーションを手で作り、公開ホスト名に
+>   `zcode-build.<subdomain>.workers.dev` を入れる**方法（ホスト名に対する Access）。2026-11-17 に
+>   この形で **WebSocket の握手（101）がサービストークン付きで通る**ことを確かめた
+> - `<subdomain>` は**アカウントの本当の workers.dev のサブドメイン**でないと「domain does not belong to
+>   zone」で断られる（2026-11-17、違う名前を入れて断られた）。本当の URL は
+>   `cd zcode\remote\worker; npx wrangler triggers deploy` の最後の行（コードもイメージも送り直さない）か、
+>   Worker の **Domains** タブで分かる
+> - Worker の **Domains** タブの「Enable Access →」は、Worker 単位の保護（上の「Protect this Worker」）に
+>   つながる可能性があるので使わない
 
 ### 1.2 Zero Trust を有効にする
 
@@ -118,23 +120,22 @@ cd zcode
 
 入口 `<build-host>` に、サービストークンを持つものだけを通す設定。deploy の後でないとできない。
 
-1. [ ] Cloudflare のダッシュボード → **Workers & Pages** → `zcode-build` → **Settings** →
-       **Domains & Routes** → `workers.dev` の行で **Enable Cloudflare Access**
-       （新しい画面では Worker の **Domains** タブにある場合もある）。
-       **Worker の「Access」タブの「Protect this Worker」ではない**（WebSocket が 403 になる）
-2. [ ] 同じ場所の **Manage Cloudflare Access** を開く（Zero Trust の **Access controls →
-       Applications** にある、このホスト名のアプリケーション）
-3. [ ] ポリシーを Service Auth にする。自動で作られるポリシー（名前は `zcode-build - Production`。
-       **Access controls → Policies** にある再利用のポリシー）は、人のメールアドレスを通す
-       Allow になっているので、次のどちらかにする:
-   - そのポリシーを編集して **Action = Service Auth**、Include = **Service Token** → 1.3 の
-     トークン（両方）。人のメールアドレスの行は消す
-   - または、新しいポリシー `devices`（Action = Service Auth、Include = Service Token）を作って
-     アプリケーションに付け、自動のポリシーは外す
-   - **Allow のポリシーは残さない**（人のログインは通さない。Allow にすると人のログイン画面が
-     出てしまい、実機のプログラムからは使えない。理由は `remote-build.html` §3）
+1. [ ] 本当の URL を確かめる: `cd zcode\remote\worker; npx wrangler triggers deploy` の最後の行
+       （`https://zcode-build.<subdomain>.workers.dev`）。Worker の **Domains** タブでも見える
+2. [ ] Zero Trust → **Access controls → Applications** → **Create new application** →
+       **Self-hosted and private** → **Add public hostname** に、1 のホスト名
+       `zcode-build.<subdomain>.workers.dev` をそのまま入れる（ドメインの一覧には出ないので文字で入れる）。
+       「Add Workers」（Worker を指定する形）は使わない
+3. [ ] ポリシーを 1 つだけ: **Action = Service Auth**、Include = **Service Token** → 1.3 の
+       トークン（両方）。**Allow のポリシーは作らない**（人のログインは通さない。Allow にすると人の
+       ログイン画面が出てしまい、実機のプログラムからは使えない。理由は `remote-build.html` §3）
 4. [ ] アプリケーションの **AUD タグ**（Application Audience、64 桁の英数字）を控える
        （アプリケーションの設定の概要・基本情報の欄）
+5. [ ] トークン無しで門番に止められるか: `curl.exe -s -o NUL -w "%{http_code}" https://<build-host>/v1/ws`
+       が **403**（Access が無いと Worker まで届いて 426 になる）
+
+- Worker の **Access** タブの「Protect this Worker」と、**Domains** タブの「Enable Access →」は
+  使わない（Worker 単位の保護は WebSocket が 403 になる）
 
 ### 2.4 秘密の値を入れる
 
