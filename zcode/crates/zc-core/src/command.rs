@@ -81,6 +81,20 @@ pub enum Command {
     /// アウトライン（§10.2）。
     ShowOutline,
 
+    // --- 型の情報（LSP。ビルド係の rust-analyzer。docs/lsp-design.md） ---
+    /// カーソルの位置の型と説明（Ctrl+H）。
+    Hover,
+    /// 定義へ（Ctrl+D）。
+    GotoDefinition,
+    /// 使っている所の一覧（Ctrl+R）。
+    FindReferences,
+    /// プロジェクトの名前を探す（Ctrl+T）。
+    FindSymbol,
+    /// 次の診断（波線）へ（F8。手元の診断だけを見る。オフラインでも効く）。
+    NextDiagnostic,
+    /// 前の診断へ（Shift+F8）。
+    PrevDiagnostic,
+
     // --- 実行 ---
     /// 保存して実行（F5）。
     Run,

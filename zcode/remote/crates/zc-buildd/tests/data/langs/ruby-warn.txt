@@ -1,0 +1,3 @@
+w.rb:4: warning: found `= literal' in conditional, should be ==
+w.rb:2: warning: assigned but unused variable - x
+Syntax OK

@@ -27,6 +27,7 @@ Python のスクリプト（`py/`）は実機にそのまま送って `python3` 
 | `dfabench` | 規則をビルド時に DFA 化する方式（regex-automata）のコンパイル・読み込み・トークン化 | 引数なし | §6 |
 | `py/fb_spi_latency.py` | fb0 に書いてから SPI 転送が始まるまで（fsync あり / なし） | `python3 fb_spi_latency.py` | §1 |
 | `py/jedi_bench.py` | jedi の補完・構文チェックの時間とメモリ | `python3 jedi_bench.py [見本.py]` | §7 |
+| `lsp/run.sh`（+ `ra-measure.mjs`・`cpucheck.sh`） | rust-analyzer をビルド係のイメージの中で 1 vCPU・3GiB に絞って: 最初の hover・静かになるまで・RSS・cgroup の最大・温まった後の問い合わせ、F5 のビルドと同時 | PC で `wslc run --rm --memory 3g --cpus 1 -v "<zcode>\bench\lsp:/b:ro" --entrypoint bash cz-builder:lsp /b/run.sh <場面>`（場面は run.sh の先頭） | §13 |
 | `py/ast_check.sh` | `ast.parse` を使い捨てプロセスで実行したときの時間 | `sh ast_check.sh [見本.py]` | §7 |
 
 ※ `mcbench pf` は `mincore` で「まだ RAM に無いページ」を探してから触る作りだが、

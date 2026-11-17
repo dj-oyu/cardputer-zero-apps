@@ -126,6 +126,80 @@ fn c_flat_folder() {
 }
 
 #[test]
+fn cpp_flat_folder_takes_cpp_and_headers() {
+    let t = Tmp::new("cpp-flat");
+    let f = t.write("p/main.cpp", "int main(){}
+");
+    t.write("p/util.hpp", "");
+    t.write("p/util.cc", "");
+    t.write("p/old.h", "");
+    t.write("p/plain.c", "");
+    t.write("p/notes.txt", "");
+    t.write("p/sub/deep.cpp", "");
+    let p = find_project(&f, Lang::Cpp).unwrap();
+    assert_eq!((p.root.clone(), p.shape, p.entry.as_deref()), (t.p("p"), Shape::Flat, Some("main.cpp")));
+    assert_eq!(paths(&mut HashCache::new(), &p), ["main.cpp", "old.h", "util.cc", "util.hpp"]);
+}
+
+#[test]
+fn marker_roots_for_new_languages() {
+    let t = Tmp::new("marks");
+    for (lang, mark, file) in [
+        (Lang::Go, "go.mod", "cmd/app/main.go"),
+        (Lang::Zig, "build.zig", "src/main.zig"),
+        (Lang::Moonbit, "moon.mod.json", "cmd/main/main.mbt"),
+        (Lang::Python, "pyproject.toml", "pkg/mod.py"),
+        (Lang::Python, "setup.cfg", "pkg/mod.py"),
+        (Lang::Ruby, "Gemfile", "lib/x.rb"),
+    ] {
+        let dir = format!("{}-{}", lang.name(), mark.replace('.', "_"));
+        t.write(&format!("{dir}/{mark}"), "");
+        let f = t.write(&format!("{dir}/{file}"), "");
+        let p = find_project(&f, lang).unwrap();
+        assert_eq!((p.root.clone(), p.shape, p.entry.as_deref(), p.lang), (t.p(&dir), Shape::Tree, Some(file), lang), "{dir}");
+        // 根の印は project id の元（根のフォルダ）になる
+        assert_eq!(p.id, find_project(&t.p(&format!("{dir}/{mark}")), lang).unwrap().id);
+    }
+    // MoonBit の新しい形（moon.mod）
+    t.write("mb2/moon.mod", "name = \"a/b\"
+");
+    let f = t.write("mb2/lib/x.mbt", "");
+    let p = find_project(&f, Lang::Moonbit).unwrap();
+    assert_eq!((p.root.clone(), p.entry.as_deref()), (t.p("mb2"), Some("lib/x.mbt")));
+}
+
+#[test]
+fn new_languages_fall_back_to_a_single_file() {
+    let t = Tmp::new("single");
+    for (lang, file) in [(Lang::Go, "g/hello.go"), (Lang::Zig, "z/hello.zig"), (Lang::Moonbit, "m/hello.mbt"), (Lang::Python, "py/a.py"), (Lang::Ruby, "r/a.rb"), (Lang::Shell, "s/a.sh")] {
+        let f = t.write(file, "x
+");
+        let dir = Path::new(file).parent().unwrap().to_str().unwrap();
+        t.write(&format!("{dir}/other.txt"), "");
+        let p = find_project(&f, lang).unwrap();
+        assert_eq!((p.root.clone(), p.shape), (t.p(dir), Shape::SingleFile), "{file}");
+        let (m, _) = HashCache::new().scan(&p, later()).unwrap();
+        assert_eq!(m.files().len(), 1, "{file}");
+    }
+    // Shell は根の印があっても 1 ファイルだけ
+    t.write("s2/pyproject.toml", "");
+    t.write("s2/Gemfile", "");
+    let f = t.write("s2/run.sh", "");
+    assert_eq!(find_project(&f, Lang::Shell).unwrap().shape, Shape::SingleFile);
+}
+
+#[test]
+fn build_outputs_of_new_languages_are_not_sent() {
+    let t = Tmp::new("outs");
+    let f = t.write("z/build.zig", "");
+    for rel in ["z/src/main.zig", "z/zig-out/bin/app", "z/zig-cache/x", "z/src/zig-cache/y", "z/_build/x", "z/src/_build/keep.zig", "z/src/__pycache__/a.pyc", "z/src/zig-out/keep.zig"] {
+        t.write(rel, "x");
+    }
+    let p = find_project(&f, Lang::Zig).unwrap();
+    assert_eq!(paths(&mut HashCache::new(), &p), ["build.zig", "src/_build/keep.zig", "src/main.zig", "src/zig-out/keep.zig"]);
+}
+
+#[test]
 fn node_needs_dependencies() {
     let t = Tmp::new("node");
     t.write("app/package.json", r#"{"name":"app","dependencies":{}}"#);

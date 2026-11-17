@@ -325,7 +325,70 @@ Raspberry Pi OS = Debian 13 aarch64、kernel 6.18.39+rpt-rpi-v8、microSD）。
   許して **400 行まではメイン、超えたら batch**（`zcode` の `MD_MAIN_PARSE_LINES`）
 - 1 打鍵ごとの `edited` と、見えている行の `line_into`（20 行で 10µs 未満）はメインで足りる
 
-## 13. まだ測っていないもの
+## 13. rust-analyzer（ビルド係のイメージ、1 vCPU・3GiB、2026-11-17）
+
+LSP（`docs/lsp-design.md`）を始める前の関門。実機では動かさない（design.md §10）ので、ビルド係で
+足りるかを見た。
+
+**測り方**: rust-analyzer を足したイメージ（`cz-builder:lsp`。rustup の `rust-analyzer` と
+`rust-src` の component、Rust 1.100.0 に付いてくる `rust-analyzer 1.100.0 (0ef1bc3 2026-11-09)`）を
+PC の wslc で `--memory 3g --cpus 1` に絞り、場面ごとに新しいコンテナで回した
+（`bench/lsp/run.sh`、LSP の相手は `bench/lsp/ra-measure.mjs`）。絞りが効いていることは
+`bench/lsp/cpucheck.sh` で確かめた（`cpu.max` = `100000 100000`、4 本の空回し 5 秒で CPU 5.08 秒、
+`memory.max` = 3GiB）。
+
+- 「冷えた」= 新しいコンテナ（crate も target も無い。crates.io から取るところから）。「再起動」=
+  同じコンテナで rust-analyzer だけ起動し直す（crate と build script の結果はある）
+- 最初の hover: `initialize` → `didOpen` の直後から 0.5 秒ごとに hover を投げ、中身のある答えが
+  返るまで（依存の型の hover。hello は `String::len`、serde は `serde_json::to_string`、ripgrep は
+  `anyhow::Result`）。静か = `experimental/serverStatus` の `quiescent`
+- RSS は rust-analyzer と子（proc-macro-srv・cargo・rustc）の合計（最大は 200ms ごとの見本と、静かになった時・終わりの値の最大）。cgroup はコンテナ全体の
+  `memory.peak`（ページキャッシュ込み）
+- 設定は `{"checkOnSave":false,"cargo":{"targetDir":true}}`（ほかは既定。cachePriming・
+  buildScripts・procMacro は有効）
+
+| 場面 | 最初の hover | 静かになるまで | RSS（静か） | RSS の最大 | cgroup の最大 |
+|---|---|---|---|---|---|
+| (a) hello（依存なし）、冷えた | 5.0 秒 | 4.2 秒 | 700MB | 711MB | 1125MB |
+| (a) 再起動 | 3.8 秒 | 3.1 秒 | 693MB | 704MB | 1125MB |
+| (b) regex + serde（derive）+ serde_json、冷えた | 6.6 秒 | 8.3 秒 | 813MB | 986MB | 1057MB |
+| (b) 再起動 | 4.5 秒 | 3.7 秒 | 801MB | 808MB | 1057MB |
+| (c) ripgrep 14.1.1（58 crate）、冷えた | 10.0 秒 | 10.0 秒 | 1131MB | 1234MB | 1256MB |
+| (c) 再起動 | 4.7 秒 | 4.2 秒 | 882MB | 992MB | 1268MB |
+| (c) 冷えた、buildScripts・procMacro なし | 4.4 秒 | 4.5 秒 | 818MB | 856MB | 871MB |
+| (c) 冷えた、cachePriming なし | 9.3 秒 | 7.6 秒 | 1046MB | 1203MB | 1223MB |
+| (c) 冷えた、**同時に F5 のビルド**（zc-buildd と同じ `cargo build --target aarch64… --profile zc-f5`） | 11.5 秒 | 13.5 秒 | 971MB | 1078MB | **1408MB** |
+
+温まった後の 1 回（5 回のうち最初 / 残りの中央値、ms）:
+
+| 場面 | hover | definition | references | workspace/symbol | completion |
+|---|---|---|---|---|---|
+| (a) hello | 0.4 / 0.4 | 1.2 / 0.3 | 1.1 / 1.0 | 2.2 / 0.2 | 17 / 4.2 |
+| (b) regex + serde | 7.4 / 0.4 | 0.3 / 0.3 | 0.4 / 0.3 | 5.1 / 0.3 | 1.8 / 0.8 |
+| (c) ripgrep | 1.7 / 0.4 | 0.4 / 0.3 | 558 / 6 | 116 / 0.5 | 3.2 / 0.5 |
+
+- **3GiB に収まる**。いちばん重い「ripgrep を冷えた状態から索引しながら、同時に F5 のビルド」でも
+  コンテナ全体の最大が 1.4GB、OOM は 0（`memory.events`）。ビルドは 52 秒で通った（rust-analyzer なしの
+  同じビルドとの比較はしていない）
+- メモリの大半は std（sysroot）の索引: 依存なしの hello でも約 700MB。ripgrep で 0.9〜1.1GB
+- 問い合わせそのものは速い（hover・definition は 1ms 未満）。references と workspace/symbol は
+  最初の 1 回だけ 0.1〜0.6 秒（索引を作る）。実機から見た遅さは往復の通信（Wi-Fi・Cloudflare）が決める
+- buildScripts・procMacro を切ると冷えた起動が 10.0 → 4.4 秒、RSS が約 300MB 減るが、`#[derive]` の
+  impl・build script の作るコードが見えなくなる。3GiB に余裕があるので **切らない**
+- cachePriming を切っても最初の hover は速くならず（9.3 秒）、最初の references が遅くなる。**既定のまま**
+- **PC の 1 コアは Cloudflare の 1 vCPU より速い**: regex の初回の F5 は Cloudflare で 22.8 秒（実機の
+  計測、`zcode/AGENTS.md`）。CPU で決まる「冷えた」の時間は Cloudflare では 2〜3 倍になる見込み
+  （**未計測**。最初の deploy の後で確かめる）。メモリの数字は変わらないはず
+- イメージ: 展開後 1.52 → 1.63GB（`rust-src` 83MB・`rust-analyzer` 42MB・proc-macro-srv 1.6MB）。
+  gzip で約 25MB 増える
+
+決めた設定（`zc-buildd` の `lsp.rs`）: `checkOnSave: false`（zc-buildd の check があるので 2 重にしない）、
+`cargo.targetDir: true`（zc-buildd の cargo と `target/` のロックを取り合わない。build script と
+proc-macro は別の target に 1 回だけ作る）、`files.watcher: "client"`（変わったファイルは zc-buildd が
+知らせる。inotify を使わない）、ほかは既定。rust-analyzer は同時に 1 つだけ（プロジェクトを替えたら
+前のを止める）。
+
+## 14. まだ測っていないもの
 
 | 項目 | いつ測るか |
 |---|---|

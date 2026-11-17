@@ -7,6 +7,10 @@ first_line = '^#!.*\bpython[0-9.]*\b'
 line_comment = "#"
 indent = "    "
 run = "python3 {file}"
+# ビルド係での扱い（docs/stage3-design.md §4.4）: 保存時と打鍵が止まったときに pyright で型検査
+# （入っていない外部のパッケージの import は warning）。実行は今のまま実機の python3
+remote = "python"
+# 実機の check（ビルド係に頼めないとき。構文だけ）
 check = "python3 -I -S -c 'import ast,sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' {file}"
 # 括弧の組 1 = 行（1 始まり）、2 = 桁、3 = メッセージ（2 と 3 は省略可）
 check_pattern = 'line (\d+)'

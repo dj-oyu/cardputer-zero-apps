@@ -14,6 +14,7 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 | `docs/setup-remote-build.md` | **人向け**の導入手順: Cloudflare（プラン・Zero Trust・サービストークン・Access・deploy・秘密の値）、Tailscale と PC（ACL・ファイアウォール）、実機ごとの設定、トークンを失くしたとき |
 | `docs/remote-build.html` | 外でビルド・試験・型検査する仕組みの設計（Cloudflare Containers / PC、認証、送る形・返す形、実機側の別プロセス `zc-remote`）。却下した案の理由つき。未実装。ユーザーの決定（2026-11-16）: Cloudflare が前提、`zc-remote` の TLS の暗号は ring（「pure Rust だけ」の例外。zcode 本体には入れない）、最後に成功した実行ファイルをプロジェクトごとに 1 つ SD（`~/.cache/zcode/bin/`）に残す（「再計算できるキャッシュは SD に書かない」の例外。オフラインでは作り直せないため） |
 | `docs/stage3-design.md` | 段階 3 の残りの設計: 外部ビルド（受付 `zc-buildd`・実機側 `zc-remote`・Cloudflare の Worker / DO / コンテナ・約束）、zcode へのつなぎ込み、診断の持ち方、JS / TS の F5、人がやる準備、**課題の表（持ち物・順番・担当）**。課題は C4（スナップショット。最初の deploy の後）以外実装済み（2026-11-17）。`remote-build.html` と食い違うところはこちらが優先 |
+| `docs/lsp-design.md` | 型の情報（LSP）: rust-analyzer をビルド係で動かし、zcode は外部ビルドの道に乗る薄い相手（約束・各層の決めごと・試験・未確認） |
 | `bench/` | 実測に使ったベンチマーク（`bench/README.md`）。測り直すときはこれを使う |
 
 ## 守ること（設計の要点）
@@ -31,8 +32,9 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   後方参照・先読み・Unicode 文字クラスを使わない
 - **SD**: キャッシュを SD に書かない。控えは RAM（tmpfs）と SD の 2 段。保存は
   一時ファイル → fsync → rename
-- **LSP**: 常駐させない（jedi で初回 9〜11 秒・60MB）。最初の版は単語補完・保存時の
-  構文チェック（`ast.parse`、約 0.4 秒）・アウトライン
+- **LSP**: 実機で常駐させない（jedi で初回 9〜11 秒・60MB）。最初の版は単語補完・保存時の
+  構文チェック（`ast.parse`、約 0.4 秒）・アウトライン。Rust の型の情報は rust-analyzer を
+  **ビルド係で**動かす（`docs/lsp-design.md`）
 - 担当（Fable / Opus / Sonnet）は API（`zc-core` の型と各 crate の公開関数）を
   勝手に変えない。変えたいときは統合側（メインのセッション）に戻す
 
@@ -228,7 +230,7 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   の integrity、`npm ci --ignore-scripts`）。git・Python・フォントは入れない。実行は uid 1000 の builder。
   `CARGO_HOME` と `npm_config_cache` は置き場（`/var/lib/zc-buildd`）の中（PC ではボリュームに残る）
 - 大きさ: 展開後 1.52GB、送る形（gzip の層の合計）約 500MB（Rust 263・apt 140・Node 52・ベース 29・
-  tsc / esbuild 15・受付 0.4MB）。`/opt/rustup` が 762MB で大半
+  tsc / esbuild 15・受付 0.4MB）。`/opt/rustup` が 762MB で大半。LSP で rust-analyzer と rust-src を足して 1.63GB（gzip で約 25MB 増）
 - 版を上げるとき: ARG の値（と `tools/` の lock）を書き換え → `run-pc.ps1 -Build` → 中で試験:
   `wslc run --rm -v "<zcode>:/work:ro" -w /work/remote -e CARGO_TARGET_DIR=/var/lib/zc-buildd/t --entrypoint bash cz-builder:latest -c "cargo test --locked -p zc-buildd"`。
   `bash tools/test-install-runtimes.sh` もイメージの中で通る（60 件）
@@ -359,6 +361,29 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   書き換える。インストーラが「同じ版は入れ直さない」で古いものを残さないか、実機で確かめる
 - 実行ファイル 1.77MB（aarch64）、待機中の RSS は x86-64 で約 3MB（実機は未計測）
 
+## 型の情報（LSP、2026-11-17、ブランチ `zcode-lsp`、`docs/lsp-design.md`）
+
+- **ユーザーの決定**: v1 は Rust（rust-analyzer）だけ。Rust のファイルを開いたら（`Warm`）ビルド係が
+  そのプロジェクトの rust-analyzer を裏で起動する（コンテナと同じ寿命）。キーは Ctrl+H 型と説明・
+  Ctrl+D 定義へ・Ctrl+R 使っている所・Ctrl+T 名前を探す・F8 / Shift+F8 次 / 前の診断（手元だけ・オフラインでも効く）。
+  補完は rust-analyzer の候補が届いたら小窓に足す（単語補完はすぐ出る）
+- 関門の実測（`docs/measurements.md` §13）: 1 vCPU・3GiB で、ripgrep を冷えた状態から索引しつつ F5 の
+  ビルドを同時に回しても最大 1.4GB・OOM 0。rust-analyzer は std だけで約 700MB。イメージは +110MB
+  （展開後 1.63GB。rustup の `rust-analyzer` と `rust-src` の component）
+- 受付（`zc-buildd/src/lsp.rs`）: rust-analyzer は同時に 1 つ。木はジョブと別（`proj/<id>/lsp`）、target も
+  別（`lsp-target`）。最初の索引が済むまで「準備中」で返す。位置を UTF-16 に直すのはここだけ
+  （道の全部は UTF-8 のバイト位置）。CPU の通算を `cpu_ms`・`/v1/status` の `lsp_cpu_ms` で出す
+- DO: LSP は中継するだけ（keep-warm の動きに数える、1 日のジョブ数には数えない）。上限なら DO が
+  `lsp_result {limit}` で返す。受付の `cpu_ms` の増えた分を CPU として数える（`Meter.addLspCpu`）
+- IPC は**版 3**（`Lsp`・`LspResult`・`LspState`）。**zc-remote を先に入れ替えてから zcode を入れる**
+  （版 3 の zcode は版 2 の serve と話せない）
+- zcode（`editor_lsp.rs`）: 頼むだけで待たない。頼んだときの版（hover・定義・補完はカーソルも）が
+  変わっていたら答えを捨てる。「上限・オフライン・認証・設定が無い」は 1 回だけ、「準備中」は毎回知らせる。
+  定義がプロジェクトの外ならステータスバーに「定義は <場所>:<行>」（タブは作らない）。戻る操作は無い
+- 本物の rust-analyzer の試験はビルド係のイメージの中で回る（`tests/lsp.rs`・`e2e.rs`）。開発コンテナの
+  rustup の `rust-analyzer` は代理だけ（component が無い）なので、試験は「動くか」で見て飛ばす
+- **deploy が要る**（イメージと Worker）。未確認: Cloudflare の 1 vCPU での冷えた起動の時間、実機の打ちやすさ
+
 ## 外部ビルドを実機で通した（2026-11-17、Cloudflare）
 
 - Worker を deploy し、workers.dev のホスト名に Zero Trust の self-hosted アプリ（Service Auth）を掛けた
@@ -423,6 +448,27 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - 実機（2 号機・Wi-Fi、2026-11-17）: 保存せずに未定義の名前を打つと、打ち終えて 3 秒後の画面に赤い波線と
   ステータスバーの誤り（`cannot find value ...`）が出ていた。消すと波線も消える。未確認: 打鍵中の遅延・
   `idle` での電池
+
+## ビルド係の言語を足した（2026-11-17、ブランチ `zcode-remote-langs`）
+
+- 決めたこと: Python（pyright）・Shell（shellcheck）は **check だけ**（実行は実機のまま）。C++ は C と同じ
+  形。Go・Zig・MoonBit は check・build（aarch64）・test（x86_64）。Ruby は check（`ruby -wc`）だけで、実行は
+  実機の ruby（まだ入っていない）。表と細かい決まりは `docs/stage3-design.md` §4.4、根は §7.2、イメージは §6.4
+- **MoonBit は native でクロスビルドできた**（JS + LLRT にしなかった）: `MOON_CC=aarch64-linux-gnu-gcc` を
+  渡すと、moon が x86_64 用の `libmoonbitrun.o` を使わずランタイムを C のソースから作る。この版の moon は
+  `moon.mod.json` を断り（`moon.mod` に移す）、単独の `.mbt` は check できるが build できない（`.mbtx` に
+  写して作る）。MoonBit に `/* */` のコメントは無い
+- 診断の桁の数え方（実物で確かめた。fixture は `remote/crates/zc-buildd/tests/data/langs/`、作り方は同じ所の
+  `gen.sh`）: pyright = 0 始まりの UTF-16、shellcheck・MoonBit = 1 始まりのコードポイント（タブも 1）、
+  g++・Go・Zig = 1 始まりのバイト、ruby = 桁なし（`^` の行の空白の数がバイト）
+- 古い受付（このブランチより前）は知らない `lang` で接続全体を切る。`zc-remote` は「ビルド係が go に
+  対応していない（イメージが古い）」にする。**新しい言語は deploy し直してから**。試験は
+  `ZC_E2E_OLD_BUILDD=<古い zc-buildd>` を付けると e2e で確かめる（前のイメージの `/usr/local/bin/zc-buildd`）
+- Python・Shell も保存のたびにまず `zc-remote` に頼む（届かなければ今の実機の check）。F6 は
+  `RemoteLang::has_tests` の言語だけ（C も「試験を実行できない」になった）
+- イメージ: 展開後 1.52 → 2.26GB、送る形 486 → 705MiB。手元の冷えた起動は差なし（約 0.5 秒）。Go は冷えた
+  キャッシュだと標準ライブラリから作るので、1 CPU で `go vet` 7.7 秒・`go test` 13 秒（温まれば 0.1 秒以下）。
+  標準ライブラリを前もって作ってイメージに入れると +360MB なので入れていない（C4 のスナップショットで温まる）
 
 ## ビルド係の費用の上限（2026-11-17、ブランチ `zcode-cost-cap`）
 

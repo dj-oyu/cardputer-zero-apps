@@ -530,6 +530,28 @@ fn full_flow_then_cached_and_no_reupload() {
 
 // ───────────── 約束の間違い ─────────────
 
+/// これより新しい実機が知らない言語を頼んでも、そのジョブだけを断り、接続は続く
+/// （2026-11-17。前の版の受付は接続全体の error {protocol} で切っていた）。
+#[test]
+fn unknown_language_is_refused_per_job() {
+    let sv = Server::start("unknown-lang");
+    let mut c = Client::open(sv.addr());
+    let t = project("fn main() {}\n");
+    t.upload(&mut c);
+    c.send_text(&format!(r#"{{"type":"job","job":"{}","project":"{PROJECT}","tree":"{}","kind":"check","lang":"cobol"}}"#, "ab".repeat(16), t.id));
+    match c.msg() {
+        ServerMsg::Error { job: Some(j), code: ErrorCode::Protocol, message, .. } => {
+            assert_eq!(j, "ab".repeat(16));
+            assert!(message.contains(msg::UNSUPPORTED_LANG), "{message}");
+        }
+        other => panic!("ジョブの error のはず: {other:?}"),
+    }
+    // 同じ接続でふつうのジョブが通る
+    c.send(&t.job(Kind::Check, false));
+    assert!(matches!(c.until_done().last(), Some(Ev::Msg(ServerMsg::Done { .. }))));
+    assert_eq!(sv.fake.runs.load(Ordering::SeqCst), 1, "知らない言語は実行しない");
+}
+
 #[test]
 
 fn hello_rules() {
@@ -847,4 +869,51 @@ fn http_get_fails(addr: SocketAddr) -> bool {
     let _ = s.write_all(b"GET /healthz HTTP/1.1\r\n\r\n");
     let mut b = [0u8; 16];
     !matches!(s.read(&mut b), Ok(n) if n > 0)
+}
+
+/// LSP の口（docs/lsp-design.md）: ready を受けた木にだけ答える・答えは同じ id で必ず 1 つ・
+/// 接続は続く。rust-analyzer があれば（ビルド係のイメージの中）、本物で hover まで通す。
+#[test]
+fn lsp_messages_over_the_socket() {
+    use zc_wire::msg::{LspPhase, LspQuery};
+    let srv = Server::start("lsp");
+    let mut c = Client::open(srv.addr());
+    c.s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+    let t = project("fn helper() -> u8 { 1 }\nfn main() { let _ = helper(); }\n");
+    // 木がそろっていない
+    c.send(&ClientMsg::Lsp { id: 5, project: PROJECT.into(), tree: t.id.clone(), query: LspQuery::Hover, path: "src/main.rs".into(), line: 1, col: 22, text: String::new() });
+    assert!(matches!(c.msg(), ServerMsg::LspResult { id: 5, error: Some(ErrorCode::BadTree), .. }));
+    c.send(&ClientMsg::LspWarm { project: PROJECT.into(), tree: t.id.clone(), path: "src/main.rs".into() });
+    assert!(matches!(c.msg(), ServerMsg::LspState { state: LspPhase::Failed, error: Some(ErrorCode::BadTree), .. }));
+    // 接続は続いている
+    t.upload(&mut c);
+    c.send(&ClientMsg::LspWarm { project: PROJECT.into(), tree: t.id.clone(), path: "src/main.rs".into() });
+    // rustup の代理（component が無いと動かない）もあるので、動くかで見る
+    let have_ra = std::process::Command::new("rust-analyzer").arg("--version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+    match c.msg() {
+        ServerMsg::LspState { state: LspPhase::Loading, .. } if have_ra => {}
+        // 無い・代理だけ（起動してすぐ終わる）。どちらも loading か failed で知らせる
+        ServerMsg::LspState { state: LspPhase::Failed | LspPhase::Loading, .. } if !have_ra => {}
+        other => panic!("{other:?}"),
+    }
+    let (_, body) = http_get(srv.addr(), "/v1/status");
+    assert!(body.contains("\"lsp_cpu_ms\""), "{body}");
+    if !have_ra {
+        return;
+    }
+    loop {
+        match c.msg() {
+            ServerMsg::LspState { state: LspPhase::Ready, .. } => break,
+            ServerMsg::LspState { state: LspPhase::Failed, message, .. } => panic!("{message}"),
+            _ => {}
+        }
+    }
+    c.send(&ClientMsg::Lsp { id: 6, project: PROJECT.into(), tree: t.id.clone(), query: LspQuery::Hover, path: "src/main.rs".into(), line: 1, col: 22, text: String::new() });
+    match c.msg() {
+        ServerMsg::LspResult { id: 6, error: None, text, cpu_ms, .. } => {
+            assert!(text.contains("fn helper() -> u8"), "{text}");
+            assert!(cpu_ms > 0);
+        }
+        other => panic!("{other:?}"),
+    }
 }

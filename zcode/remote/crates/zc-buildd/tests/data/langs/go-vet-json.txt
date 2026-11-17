@@ -1,0 +1,11 @@
+{
+	"example.com/hello": {
+		"printf": [
+			{
+				"posn": "/tmp/fxw/go/main.go:8:14",
+				"end": "/tmp/fxw/go/main.go:8:16",
+				"message": "fmt.Printf format %s has arg x of wrong type int"
+			}
+		]
+	}
+}

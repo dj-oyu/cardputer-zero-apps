@@ -1,0 +1,116 @@
+# Zig (zig) — zc-highlight の見本の正解。ZCODE_UPDATE_GOLDEN=1 で作り直す
+   1| //! 見本: Zig の組み込み関数・複数行文字列・エラー処理
+    : comment "//! 見本: Zig の組み込み関数・複数行文字列・エラー処理"
+   2| const std = @import("std");
+    : keyword "const" · operator "=" · attribute "@import" · punctuation "(" · string "\"std\"" · punctuation ");"
+   3| const Allocator = std.mem.Allocator;
+    : keyword "const" · type "Allocator" · operator "=" · punctuation "." · punctuation "." · type "Allocator" · punctuation ";"
+   4| 
+   5| /// ドキュメントコメント
+    : comment "/// ドキュメントコメント"
+   6| pub const MAX_ITEMS: usize = 64;
+    : keyword "pub" · keyword "const" · constant "MAX_ITEMS" · punctuation ":" · type "usize" · operator "=" · number "64" · punctuation ";"
+   7| 
+   8| const Color = enum(u8) { red, green = 0x10, blue };
+    : keyword "const" · type "Color" · operator "=" · keyword "enum" · punctuation "(" · type "u8" · punctuation ")" · punctuation "{" · punctuation "," · operator "=" · number "0x10" · punctuation "," · punctuation "};"
+   9| 
+  10| const Point = struct {
+    : keyword "const" · type "Point" · operator "=" · keyword "struct" · punctuation "{"
+  11|     x: f32 = 0.0,
+    : punctuation ":" · type "f32" · operator "=" · number "0.0" · punctuation ","
+  12|     y: f32 = 1e-3,
+    : punctuation ":" · type "f32" · operator "=" · number "1e-3" · punctuation ","
+  13| 
+  14|     pub fn len(self: Point) f32 {
+    : keyword "pub" · keyword "fn" · function "len" · punctuation "(" · punctuation ":" · type "Point" · punctuation ")" · type "f32" · punctuation "{"
+  15|         return @sqrt(self.x * self.x + self.y * self.y);
+    : control "return" · attribute "@sqrt" · punctuation "(" · punctuation "." · operator "*" · punctuation "." · operator "+" · punctuation "." · operator "*" · punctuation "." · punctuation ");"
+  16|     }
+    : punctuation "}"
+  17| };
+    : punctuation "};"
+  18| 
+  19| const ParseError = error{ Empty, BadDigit };
+    : keyword "const" · type "ParseError" · operator "=" · keyword "error" · punctuation "{" · type "Empty" · punctuation "," · type "BadDigit" · punctuation "};"
+  20| 
+  21| const banner =
+    : keyword "const" · operator "="
+  22|     \\zcode "demo"
+    : string "\\\\zcode \"demo\""
+  23|     \\  line two {not a format}
+    : string "\\\\  line two {not a format}"
+  24| ;
+    : punctuation ";"
+  25| 
+  26| fn parse(text: []const u8) ParseError!u32 {
+    : keyword "fn" · function "parse" · punctuation "(" · punctuation ":" · punctuation "[]" · keyword "const" · type "u8" · punctuation ")" · type "ParseError" · operator "!" · type "u32" · punctuation "{"
+  27|     if (text.len == 0) return error.Empty;
+    : control "if" · punctuation "(" · punctuation "." · operator "==" · number "0" · punctuation ")" · control "return" · keyword "error" · punctuation "." · type "Empty" · punctuation ";"
+  28|     var total: u32 = 0;
+    : keyword "var" · punctuation ":" · type "u32" · operator "=" · number "0" · punctuation ";"
+  29|     for (text) |c| {
+    : control "for" · punctuation "(" · punctuation ")" · operator "|" · operator "|" · punctuation "{"
+  30|         if (c < '0' or c > '9') return error.BadDigit;
+    : control "if" · punctuation "(" · operator "<" · string "'0'" · control "or" · operator ">" · string "'9'" · punctuation ")" · control "return" · keyword "error" · punctuation "." · type "BadDigit" · punctuation ";"
+  31|         total = total * 10 + (c - '0');
+    : operator "=" · operator "*" · number "10" · operator "+" · punctuation "(" · operator "-" · string "'0'" · punctuation ");"
+  32|     }
+    : punctuation "}"
+  33|     return total;
+    : control "return" · punctuation ";"
+  34| }
+    : punctuation "}"
+  35| 
+  36| pub fn Stack(comptime T: type) type {
+    : keyword "pub" · keyword "fn" · function "Stack" · punctuation "(" · keyword "comptime" · type "T" · punctuation ":" · type "type" · punctuation ")" · type "type" · punctuation "{"
+  37|     return struct {
+    : control "return" · keyword "struct" · punctuation "{"
+  38|         items: std.ArrayList(T),
+    : punctuation ":" · punctuation "." · function "ArrayList" · punctuation "(" · type "T" · punctuation "),"
+  39| 
+  40|         pub fn init(allocator: Allocator) @This() {
+    : keyword "pub" · keyword "fn" · function "init" · punctuation "(" · punctuation ":" · type "Allocator" · punctuation ")" · attribute "@This" · punctuation "()" · punctuation "{"
+  41|             return .{ .items = std.ArrayList(T).init(allocator) };
+    : control "return" · punctuation ".{" · punctuation "." · operator "=" · punctuation "." · function "ArrayList" · punctuation "(" · type "T" · punctuation ")." · function "init" · punctuation "(" · punctuation ")" · punctuation "};"
+  42|         }
+    : punctuation "}"
+  43|     };
+    : punctuation "};"
+  44| }
+    : punctuation "}"
+  45| 
+  46| test "parse digits" {
+    : keyword "test" · string "\"parse digits\"" · punctuation "{"
+  47|     try std.testing.expectEqual(@as(u32, 1_024), try parse("1024"));
+    : control "try" · punctuation "." · punctuation "." · function "expectEqual" · punctuation "(" · attribute "@as" · punctuation "(" · type "u32" · punctuation "," · number "1_024" · punctuation ")," · control "try" · function "parse" · punctuation "(" · string "\"1024\"" · punctuation "));"
+  48|     try std.testing.expectError(error.BadDigit, parse("1x"));
+    : control "try" · punctuation "." · punctuation "." · function "expectError" · punctuation "(" · keyword "error" · punctuation "." · type "BadDigit" · punctuation "," · function "parse" · punctuation "(" · string "\"1x\"" · punctuation "));"
+  49| }
+    : punctuation "}"
+  50| 
+  51| pub fn main() !void {
+    : keyword "pub" · keyword "fn" · function "main" · punctuation "()" · operator "!" · type "void" · punctuation "{"
+  52|     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    : keyword "var" · operator "=" · punctuation "." · punctuation "." · function "GeneralPurposeAllocator" · punctuation "(.{}){};"
+  53|     defer _ = gpa.deinit();
+    : control "defer" · operator "=" · punctuation "." · function "deinit" · punctuation "();"
+  54|     const n: u7 = 0b101_0101;
+    : keyword "const" · punctuation ":" · type "u7" · operator "=" · number "0b101_0101" · punctuation ";"
+  55|     const msg = "tab\t \"q\" \x41 \u{1F600}";
+    : keyword "const" · operator "=" · string "\"tab" · escape "\\t" · escape "\\\"" · string "q" · escape "\\\"" · escape "\\x41" · escape "\\u{1F600}" · string "\"" · punctuation ";"
+  56|     std.debug.print("{s} {d} {x:0>4}\n", .{ msg, n, 0xBEEF });
+    : punctuation "." · punctuation "." · function "print" · punctuation "(" · string "\"" · constant "{s}" · constant "{d}" · constant "{x:0>4}" · escape "\\n" · string "\"" · punctuation "," · punctuation ".{" · punctuation "," · punctuation "," · number "0xBEEF" · punctuation "});"
+  57|     const value = parse("42") catch |err| {
+    : keyword "const" · operator "=" · function "parse" · punctuation "(" · string "\"42\"" · punctuation ")" · control "catch" · operator "|" · operator "|" · punctuation "{"
+  58|         std.debug.print("error: {}\n", .{err});
+    : punctuation "." · punctuation "." · function "print" · punctuation "(" · string "\"error: " · constant "{}" · escape "\\n" · string "\"" · punctuation "," · punctuation ".{" · punctuation "});"
+  59|         return err;
+    : control "return" · punctuation ";"
+  60|     };
+    : punctuation "};"
+  61|     _ = value;
+    : operator "=" · punctuation ";"
+  62|     _ = banner;
+    : operator "=" · punctuation ";"
+  63| }
+    : punctuation "}"

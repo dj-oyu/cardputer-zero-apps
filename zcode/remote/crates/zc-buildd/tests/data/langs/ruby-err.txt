@@ -1,0 +1,4 @@
+ruby: e.rb:3: syntax error, unexpected string literal, expecting ')' (SyntaxError)
+  puts "日本"
+       ^
+

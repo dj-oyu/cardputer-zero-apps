@@ -44,7 +44,7 @@ first_line = '^#!.*\bpython'    # 拡張子で決まらないとき、1 行目�
 line_comment = "#"              # Ctrl+/ のコメント切り替え（省略可）
 indent = "    "                 # 字下げ 1 段（省略すると空白 4 つ）
 run = "python3 {file}"          # F5 で実行するコマンド（省略可）
-remote = "rust"                 # ビルド係での扱い: rust / c / node（省略可。下の「ビルド係と実行環境」）
+remote = "rust"                 # ビルド係での扱い: rust / c / node / python / shell / cpp / go / ruby / zig / moonbit（省略可。下の「ビルド係と実行環境」）
 check = "python3 -I -S -c '...' {file}"  # 保存時の構文チェック（省略可。design.md §10.2）
 check_pattern = 'line (\d+)'    # チェックの出力からエラーを拾う正規表現（省略可）
 keywords = ["print", "len"]     # 単語補完に足す語（[words] の語は自動で入る。省略可）
@@ -149,7 +149,16 @@ DFA の表の大きさは「状態の数 × 文字の種類の数（2 の冪に�
 | C | `c` | `zc-remote run {file}` | `gcc -fsyntax-only`（実機に gcc があれば） |
 | JavaScript | `node` | npm の依存があれば `zc-remote run`、無ければ `llrt` | `tsc --allowJs`（構文だけ） |
 | TypeScript | `node` | npm の依存があれば `zc-remote run`、無ければ `tsc` で型検査して JS を出し `llrt` で実行 | `tsc --noEmit` |
-| Python・Shell | — | `python3` / `bash` | `ast.parse` / `bash -n` |
+| Python | `python` | `python3 {file}` | `ast.parse`（ビルド係は pyright で型検査。入っていない外部の import は warning） |
+| Shell | `shell` | `bash {file}` | `bash -n`（ビルド係は shellcheck） |
+| C++ | `cpp` | `zc-remote run {file}` | `g++ -fsyntax-only`（実機に g++ があれば） |
+| Go・Zig・MoonBit | `go` / `zig` / `moonbit` | `zc-remote run {file}` | 無し |
+| Ruby | `ruby` | 実機の `ruby`（無ければ `sudo apt install ruby` を案内して 127） | 実機に ruby があれば `ruby -wc`（ビルド係も `ruby -wc`） |
+
+- 「試験を実行」（F6）が動くのは `rust`・`node`・`go`・`zig`・`moonbit` だけ（`RemoteLang::has_tests`）。
+  ほかの `remote` は検査（と C・C++ のビルド）だけ
+- `remote` の言語は、保存のたびにまず `zc-remote` に頼む。`zc-remote` が無い・設定が無い・オフラインの
+  ときは、実機の `check` に回る（Python・Shell もこの形。2026-11-17 から）
 
 - 「npm の依存があるか」は `zc-remote applies <file>`（終了コード 0 = ビルド係の対象。通信しない）
   で決める。`zc-remote` が入っていなければ対象ではない扱いになり、実機で動かす

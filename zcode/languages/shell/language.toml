@@ -13,7 +13,10 @@ first_line = '^#!.*\b(ba)?sh'
 line_comment = "#"
 indent = "    "
 run = "bash {file}"
-# bash -n の出力: `ファイル: line 5: 構文エラー...`（桁は無いので空の捕獲で 2 を飛ばす）
+# ビルド係での扱い（docs/stage3-design.md §4.4）: 保存時と打鍵が止まったときに shellcheck。
+# 実行は今のまま実機の bash
+remote = "shell"
+# 実機の check（ビルド係に頼めないとき）。bash -n の出力: `ファイル: line 5: 構文エラー...`（桁は無いので空の捕獲で 2 を飛ばす）
 check = "bash -n {file}"
 check_pattern = 'line (\d+)(): (.*)'
 keywords = [

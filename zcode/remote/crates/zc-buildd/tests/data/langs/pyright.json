@@ -1,0 +1,78 @@
+{
+    "version": "1.1.414",
+    "time": "1794883154932",
+    "generalDiagnostics": [
+        {
+            "file": "/tmp/fxw/py/a.py",
+            "severity": "warning",
+            "message": "Import \"requests\" could not be resolved from source",
+            "range": {
+                "start": {
+                    "line": 0,
+                    "character": 7
+                },
+                "end": {
+                    "line": 0,
+                    "character": 15
+                }
+            },
+            "rule": "reportMissingModuleSource"
+        },
+        {
+            "file": "/tmp/fxw/py/a.py",
+            "severity": "error",
+            "message": "Operator \"+\" not supported for types \"Literal['日本']\" and \"Literal[1]\"",
+            "range": {
+                "start": {
+                    "line": 3,
+                    "character": 9
+                },
+                "end": {
+                    "line": 3,
+                    "character": 17
+                }
+            },
+            "rule": "reportOperatorIssue"
+        },
+        {
+            "file": "/tmp/fxw/py/a.py",
+            "severity": "error",
+            "message": "Type \"Literal[1]\" is not assignable to return type \"str\"\n  \"Literal[1]\" is not assignable to \"str\"",
+            "range": {
+                "start": {
+                    "line": 5,
+                    "character": 11
+                },
+                "end": {
+                    "line": 5,
+                    "character": 12
+                }
+            },
+            "rule": "reportReturnType"
+        },
+        {
+            "file": "/tmp/fxw/py/a.py",
+            "severity": "error",
+            "message": "\"undefined_name\" is not defined",
+            "range": {
+                "start": {
+                    "line": 6,
+                    "character": 6
+                },
+                "end": {
+                    "line": 6,
+                    "character": 20
+                }
+            },
+            "rule": "reportUndefinedVariable"
+        }
+    ],
+    "summary": {
+        "filesAnalyzed": 1,
+        "errorCount": 3,
+        "warningCount": 1,
+        "informationCount": 0,
+        "timeInSec": 0.17
+    }
+}
+

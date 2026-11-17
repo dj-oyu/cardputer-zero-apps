@@ -118,7 +118,7 @@ Cloudflare のコンテナの中でも PC でも、同じ実行ファイルが�
 |---|---|
 | `GET /v1/ws`（Upgrade、`Sec-WebSocket-Protocol: zc-build.v1`） | WebSocket（§5） |
 | `GET /healthz` | `200 ok` |
-| `GET /v1/status` | `{"running":n,"queued":n,"jobs":[…],"uptime_s":n}`（DO が、コンテナを起こしておくかの判断に使う） |
+| `GET /v1/status` | `{"running":n,"queued":n,"jobs":[…],"uptime_s":n,"lsp_cpu_ms":n,"lsp":…}`（DO が、コンテナを起こしておくかの判断と、rust-analyzer の CPU の計りに使う。`docs/lsp-design.md`） |
 
 認証はしない（Cloudflare では Access と Worker、PC では Tailscale の ACL が門番）。Worker が
 付ける `X-Zc-Device` は、ログに出す名前として使うだけ。
@@ -162,6 +162,35 @@ out/<job id>/                         成果物（圧縮済み）
 | Rust | `cargo build --target aarch64-unknown-linux-gnu`、F5 用のプロファイル（下）、`-Ctarget-cpu=cortex-a53` | `cargo check --all-targets`（同じ target） | `cargo test --no-fail-fast`（**x86_64 のまま**） |
 | C | `aarch64-linux-gnu-gcc -mcpu=cortex-a53 -O2 -Wall -Wextra` | 同じ引数で `-fsyntax-only` | 未対応 |
 | Node（JS / TS、npm の依存あり） | `npm ci --ignore-scripts` → `tsc` で型検査 → `esbuild --bundle` で 1 ファイルの JS | `tsc --noEmit` | `npm test` |
+| Python | 無い（実機の `python3`） | `pyright --outputjson --pythonversion 3.13`。入っていない外部の import は warning | 無い |
+| Shell | 無い（実機の `bash`） | `shellcheck -f json1 -S info`（`#!` が無ければ `--shell=bash`）。info も warning、style は捨てる | 無い |
+| C++ | C と同じ形で `aarch64-linux-gnu-g++`（`*.cpp` `*.cc` `*.cxx` `*.c++`） | 同じ引数で `-fsyntax-only` | 無い |
+| Go | `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w"`（F5 のファイルのパッケージ） | `go vet -json`（指摘は warning）。型・構文の誤りがあれば `go build` で全部を集める | `go test -json`（**x86_64**） |
+| Ruby | 無い（実機の `ruby`） | ファイルごとに `ruby -wc` | 無い |
+| Zig | 1 ファイル: `zig build-exe -target aarch64-linux-gnu -mcpu=cortex_a53 -O ReleaseSmall`、`build.zig` の木: `zig build -Dtarget=… -Dcpu=cortex_a53 --release=small` | `zig ast-check` → 通れば `build-exe -fno-emit-bin`（`pub fn main` のある 1 ファイル）か `zig build` | `zig test` / `zig build test`（**x86_64**） |
+| MoonBit | `MOON_CC=aarch64-linux-gnu-gcc moon build --target native --release`（1 ファイルは `.mbtx` に写して） | `moon check --target native --output-json` | `moon test --target native`（**x86_64**） |
+
+2026-11-17 に Python 以下を足した（ブランチ `zcode-remote-langs`）。細かい決まりは各 `runner/<言語>.rs`
+の先頭。言語ごとの決めごと:
+
+- **MoonBit は native の後ろでクロスビルドする**（JS + LLRT にしない）。`MOON_CC` がホスト向けで
+  ないと、moon は x86_64 用に配られた `libmoonbitrun.o`（mimalloc）と `libbacktrace.a` を使わず、
+  ランタイムを C のソースからクロスの gcc でコンパイルし、システムの malloc を使う。出てくるのは
+  動的リンクの PIE（glibc、実機と同じ Debian 13）。Cortex-A53 向けの `-mcpu` は付けていない
+  （moon に C の引数を渡す口が `moon.pkg` にしか無い）。この版の moon は `moon.mod.json` を断る
+  （`moon.mod` に移せと言う）
+- Go: モジュールは `GOFLAGS=-mod=mod` で回し、道具が直した `go.sum` / `go.mod` は書き戻す。
+  `GOTOOLCHAIN=local`（もっと新しい Go を勝手に取ってこない）
+- 作業の木の中にキャッシュ・出力を作らない（写すたびに消される）: Zig は `--cache-dir` /
+  `ZIG_LOCAL_CACHE_DIR` を `<project_dir>/zig-cache`、MoonBit は `--target-dir <project_dir>/moon-target`
+- F6（試験）は、試験のある言語（Rust・Node・Go・Zig・MoonBit。`RemoteLang::has_tests`）だけ。
+  ほかは zcode が「試験を実行できない」と言う
+- 約束の互換: `lang` に名前を足した（`python` `shell` `cpp` `go` `ruby` `zig` `moonbit`）。この版の
+  受付は知らない名前を `Lang::Unknown` として読み、そのジョブだけを `error {protocol}`
+  （`zc_wire::msg::UNSUPPORTED_LANG`）で断る。**古い受付は接続全体の `error {protocol, "unknown
+  variant"}` で切る**ので、`zc-remote` はどちらも「ビルド係が <言語> に対応していない（イメージが古い）」
+  の 1 行にする（終了コード 6）。UNIX ソケットの約束は版 2 のまま言語の番号 4〜10 を足した。古い
+  serve は知らない番号で接続を切り、zcode は「切れた」として実機の `check` に回る
 
 - F5 用のプロファイル: `opt-level = 2`・`debug = 0`・`strip`・LTO なし・`incremental`。
   プロジェクトの `Cargo.toml` は書き換えず、`--config` で渡す。配布用は `release` の指定で
@@ -170,7 +199,11 @@ out/<job id>/                         成果物（圧縮済み）
 - `Cargo.lock` / `package-lock.json` が無い・古いときは、道具が作った lock を実機へ返して
   書き戻す（無いと job id が安定しない）
 - 診断の位置は **0 始まりの行と、行の中の UTF-8 のバイト位置**に直してから返す
-  （rustc は 1 始まりの文字数、tsc は 1 始まりの UTF-16 の単位、gcc は 1 始まりのバイト）。
+  （rustc は 1 始まりの文字数、tsc は 1 始まりの UTF-16 の単位、gcc は 1 始まりのバイト。
+  足した言語: pyright は 0 始まりの UTF-16、shellcheck と MoonBit は 1 始まりの文字（コード
+  ポイント。タブも 1）、g++・Go・Zig は 1 始まりのバイト、ruby は桁なし（構文の誤りだけ、写しの行が
+  ファイルと同じなら `^` の前の空白の数 = バイト）。どれも日本語・絵文字の後ろで実物を確かめ、
+  `zc-buildd/tests/data/langs/` に置いた）。
   マクロの展開先・依存 crate を指す診断は手元の呼び出し元に寄せ、寄せられなければ
   位置なし（パスが空）にする。細かい決まりは `runner/rust.rs` の先頭
 - 試験を x86_64 で動かすので、`target/` は aarch64 用とホスト用の 2 つになる（承知の上）
@@ -229,6 +262,10 @@ permessage-deflate なし）。制御は JSON のテキストフレーム、フ�
 | `error` | `job?`, `code`, `message`, `retry_after_s?` | `job` が無ければ接続全体の失敗（このあと切る）。`code`: version / protocol / too-large / limit / unknown-job / bad-tree / bad-blob / unavailable / internal |
 
 型の正本は `zc-wire/src/msg.rs`（serde の定義がそのまま JSON の形）。
+
+LSP（2026-11-17。`docs/lsp-design.md` §4.1）: 実機 → `lsp_warm`・`lsp`、ビルド係 → `lsp_state`・`lsp_result` を
+足した（知らない type は無視する決まりなので、版は 1 のまま）。どれもジョブと同じく、その接続で `ready` を
+受けた木に対して。
 
 ### 5.3 バイナリフレーム
 
@@ -342,8 +379,45 @@ u64 offset    この中身の、流れの中での位置
 
 `remote/container/Dockerfile`（linux/amd64、Debian 13）。開発コンテナの Rust の部分と同じもの
 （rustup の stable・aarch64 のクロス）に、Node・npm・esbuild・TypeScript 7 の `tsc`・zstd・
-`zc-buildd` を足す。Python とフォントは入れない。道具は root で動かさない。版とチェックサムは
+`zc-buildd` を足す。Python の実行系とフォントは入れない。道具は root で動かさない。版とチェックサムは
 固定する。**秘密を入れない**（`build.rs`・`postinstall`・試験という任意のコードが動く）。
+
+2026-11-17 に足した道具（版は Dockerfile の ARG と `tools/package-lock.json`）:
+
+| 道具 | 版 | 固定のしかた | 展開後 |
+|---|---|---|---|
+| pyright | 1.1.414 | npm の integrity（`tools/package-lock.json`）。Node で動く | 38MB |
+| ShellCheck | 0.11.0 | 静的リンクの実行ファイル、Release の `.tar.xz` の SHA-256 | 16MB |
+| g++（aarch64） | Debian 14.2 | apt（ベースのイメージの digest） | 約 70MB |
+| Ruby | Debian 3.3.13 | apt | 約 35MB |
+| Go | 1.27.4 | go.dev の `.tar.gz` の SHA-256。`test/`・`api/`・`doc/`・`misc/`・`src/cmd/` は消す | 187MB |
+| Zig | 0.17.1 | ziglang.org の `.tar.xz` の SHA-256。libc のヘッダは Linux の aarch64・x86(_64) だけ残す | 259MB |
+| MoonBit | moon 0.1.20261104・moonc v0.10.20+65efd5b93 | 版つきの URL（`binaries/0.10.20%2B65efd5b93/`）と core の `.tar.gz` の SHA-256。道具は moon・moonc・mooncake・moonrun・tcc だけ残し、core は native だけ束ねる | 181MB |
+
+- 環境: `GOTOOLCHAIN=local`・`GOTELEMETRY=off`・`MOON_HOME=/opt/moon`。キャッシュは置き場の中
+  （`GOPATH`・`GOCACHE`・`ZIG_GLOBAL_CACHE_DIR`）。受付はこれらを道具に渡す（`runner::tool_env`）
+- 大きさ（2026-11-17、手元の wslc で測った）: 展開後 1.52GB → **2.26GB（+0.74GB）**、送る形（層ごとの
+  gzip の合計）486MiB → **705MiB（+219MiB）**。分ける（Go・Zig・MoonBit を置き場へ後から入れる）
+  目安の 1GB は超えないので、1 つのイメージのまま。手元の冷えた起動（`wslc run` → `/healthz`）は
+  どちらも約 0.5 秒で差は無い。Cloudflare での新しいイメージの最初の取り込みは、前の 500MB で 38 秒
+  だったので、それより長くなる見込み（未計測）
+- 道具だけの時間（hello 程度。手元の wslc で `--cpus 1`、冷えた = 起こした直後のコンテナ / 温まった = 2 回目。
+  受付と通信の分は入らない。Cloudflare では未計測）:
+
+  | 言語 | check | build（aarch64） | test（x86_64） |
+  |---|---|---|---|
+  | Python | 0.51 秒（pyright。2 回目も同じ） | — | — |
+  | Shell | 0.01 秒 | — | — |
+  | C++ | 0.23 秒 | 0.33 秒 | — |
+  | Go | 冷えた 7.7 秒 / 温まった 0.07 秒（vet） | 冷えた 6.6 秒 / 1 行変えて 0.13 秒 | 冷えた 13.1 秒 / 0.08 秒 |
+  | Ruby | 0.01 秒 | — | — |
+  | Zig | ast-check 0.01 秒 + 意味 0.87 / 0.28 秒 | 3.5 / 1.6 秒（ReleaseSmall） | 3.2 秒 |
+  | MoonBit | 0.07 / 0.03 秒 | 冷えた 4.3 秒（ランタイムの C を作る） / 1 行変えて 0.22 秒 | 1.9 秒 |
+
+  Go の冷えた分は標準ライブラリを `GOCACHE` に作る時間（arm64 と amd64 で約 360MB）。イメージに入れると
+  その分大きくなるので入れていない（PC ではボリュームに残る。Cloudflare では C4 のスナップショット待ち）
+- ライセンス: MoonBit の道具は無償の配布物（同梱の CREDITS.md に、使っている部品のライセンス）、
+  core は Apache-2.0。イメージは Cloudflare の自分のレジストリにだけ置く（公開しない）
 
 起動の方式は、DO が自分でイメージ・大きさ・スナップショットを指定する形
 （`scheduling_policy = "durable_object"`。ベータ）。大きさは **custom の 1 vCPU・3GiB・12GB**
@@ -388,6 +462,8 @@ vCPU 秒（使った分だけ）、ディスク 0.00000007 ドル / GB 秒。
     `error {limit}`（job なし）で閉じる（4429）。走っているジョブは止めず、終わったらすぐ止める。
     実機（`zc-remote`）は今の約束のまま「上限」として表示する（約束は変えていない）
   - 見込みは `GET /v1/usage`（Access の内側、JSON）。人向けの説明は `setup-remote-build.md` §2.6
+  - rust-analyzer（LSP）の CPU はジョブの外で使われる。受付が通算（`cpu_ms`・`lsp_cpu_ms`）を知らせ、DO は増えた分を
+    CPU として足す。上限に達したら LSP の問い合わせも DO が断る（`docs/lsp-design.md` §5）
 - 2 本目の守り: Cloudflare の Billing の予算の通知（8 ドル前後）。1 日のジョブ数（400）、実機 1 台に
   コンテナ 1 つ
 
@@ -431,8 +507,19 @@ zcode と同じプロセスグループ（APPLaunch の Esc 長押しで一緒�
 | Rust | いちばん近い `Cargo.toml`。その上に `[workspace]` のある `Cargo.toml` があればそちら | そのファイル 1 つだけを送る |
 | C | ファイルのあるフォルダ（直下の `*.c` `*.h` だけ） | — |
 | Node | いちばん近い `package.json` で、依存が空でないもの | 対象ではない（実機の `tsc` に回す） |
+| Python | いちばん近い `pyproject.toml` か `setup.cfg` | そのファイル 1 つだけ |
+| Shell | — | いつもそのファイル 1 つだけ |
+| C++ | C と同じ（直下の `*.cpp` `*.cc` `*.cxx` `*.c++` `*.hpp` `*.hh` `*.hxx` `*.h` `*.inl` `*.ipp` `*.tpp`） | — |
+| Go | いちばん近い `go.mod` | そのファイル 1 つだけ |
+| Ruby | いちばん近い `Gemfile` | そのファイル 1 つだけ |
+| Zig | いちばん近い `build.zig` | そのファイル 1 つだけ |
+| MoonBit | いちばん近い `moon.mod`（古い形の `moon.mod.json` も） | そのファイル 1 つだけ |
 
-- 送らないもの: `target/`・`node_modules/`・`.git/`・`dist/`・`build/`・`.` で始まるフォルダ
+（Python 以下は 2026-11-17。根の印は `stat` で探すだけなので、Rust・C・Node の走査の手間は変わらない。
+1 ファイルだけのときの project id は、Rust と同じくファイルの絶対パスから作る）
+
+- 送らないもの: `target/`・`node_modules/`・`__pycache__/`・`zig-cache/`・`.git/`・`dist/`・`build/`・
+  `zig-out/`・`_build/`（後ろの 4 つは根の直下だけ）・`.` で始まるフォルダ
   （`.cargo/`・`.github/` は送る）、根の `.gitignore` に書かれたもの、シンボリックリンク
 - 根の外を指す `path = "../x"` の依存は送らない（ビルドが失敗し、その診断が出る）
 - 上限: 2000 ファイル・合計 32MiB・1 ファイル 4MiB。超えたら、何が超えたかを添えて断る
@@ -576,8 +663,9 @@ serve → zcode / CLI:
 `tag` は serve が振るジョブの通し番号。同じジョブについての知らせを突き合わせる。型の正本は
 `zc-remote-ipc/src/lib.rs`。
 
-約束の版は 2（2026-11-17。`Submit` に未保存の中身の重ねと `flags` の bit4 `AUTO` を足した）。
-serve は版 1 の相手も受け、`Hello` を相手の版で返す。依頼は重ねの分だけ大きくてよい
+約束の版は 3（2026-11-17。版 2 で `Submit` に未保存の中身の重ねと `flags` の bit4 `AUTO` を足し、版 3 で
+LSP の `Lsp`（0x0007）・`LspResult`（0x800A）・`LspState`（0x800B）を足した。並びは `docs/lsp-design.md` §4.2）。
+serve は版 1〜3 の相手を受け、`Hello` を相手の版で返す。依頼は重ねの分だけ大きくてよい
 （`MAX_REQUEST_FRAME` = 256KiB + 1MiB）。重ねのパスは絶対パス（zcode は根を知らない。serve が
 根からの相対に直し、目録に無いものは捨てる）。
 
@@ -681,7 +769,7 @@ pub struct DiagnosticSet { source, complete: bool, files: Vec<FileDiagnostics> }
 足す項目は 1 つ（`zc-highlight` の `LanguageInfo::remote`。雛形に入っている）:
 
 ```toml
-remote = "rust"   # ビルド係での扱い: rust / c / node。あれば保存時にビルド係の check、「試験を実行」が使える
+remote = "rust"   # ビルド係での扱い: rust / c / node / python / shell / cpp / go / ruby / zig / moonbit。あれば保存時にビルド係の check、「試験を実行」が使える（試験は rust・node・go・zig・moonbit だけ）
 ```
 
 各言語の行（課題 H1 が書く）:
@@ -692,7 +780,9 @@ remote = "rust"   # ビルド係での扱い: rust / c / node。あれば保存�
 | C | `c` | `zc-remote run {file}` | 今のまま（`gcc -fsyntax-only`。実機に gcc があれば効く） |
 | JavaScript | `node` | 下 | 今の `tsc --allowJs`。`--lib es2022,dom` を下の形に |
 | TypeScript | `node` | 下 | 今の `tsc`。`--lib es2022,dom` を下の形に |
-| Python・Shell | — | 今のまま | 今のまま |
+| Python | `python`（2026-11-17） | 今のまま（`python3 {file}`） | 今のまま（`ast.parse`。ビルド係に頼めないとき） |
+| Shell | `shell`（2026-11-17） | 今のまま（`bash {file}`） | 今のまま（`bash -n`） |
+| C++・Go・Ruby・Zig・MoonBit | `cpp` / `go` / `ruby` / `zig` / `moonbit`（2026-11-17。言語のフォルダは別の課題） | C++・Go・Zig・MoonBit は `zc-remote run {file}`、Ruby は実機の `ruby`（無ければ `sudo apt install ruby` を案内） | 無し（Ruby だけ、実機に ruby があれば `ruby -wc`） |
 
 ### 10.2 JS / TS の F5（実機で）
 

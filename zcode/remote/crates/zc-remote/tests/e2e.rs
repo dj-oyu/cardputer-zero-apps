@@ -221,7 +221,63 @@ fn c_file_is_built_remotely_and_placed() {
     assert!(text(&out.stderr).contains("undeclared"), "{}", text(&out.stderr));
 }
 
-const BROKEN_RS: &str = "fn main() {\n    let name = \"あ\";\n    let _s = \"日本語\"; let x: i32 = \"str\";\n    println!(\"{name} {x}\");\n}\n";
+/// 2026-11-17 に足した言語の通し: Go の 1 ファイルを `run` 相当の `build` で受け取り、`check` の
+/// 診断が 1 始まりの「パス:行:桁」（桁はバイト + 1）で出る。
+#[test]
+fn go_file_is_checked_and_built_remotely() {
+    if skip_without(&["go", "aarch64-linux-gnu-strip", "zstd"]) {
+        return;
+    }
+    let sb = Sandbox::new("go");
+    let buildd = Buildd::start(&sb);
+    let env = pc(buildd.port);
+    let file = sb.write("code/g/hello.go", "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"hello from Go\") }\n");
+    let out = run({ let mut c = sb.cmd(&env); c.current_dir(file.parent().unwrap()).args(["build", "hello.go"]); c }, WAIT);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let placed = PathBuf::from(text(&out.stdout).trim());
+    assert_aarch64_exe(&placed);
+    if let Some(out) = run_under_qemu(&placed, &[]) {
+        assert_eq!(out, "hello from Go\n");
+    }
+    let src = "package main\n\n// 日本語\nfunc main() {\n\tvar s string = /* 日本 */ 1\n\t_ = s\n}\n";
+    std::fs::write(&file, src).unwrap();
+    let col = src.lines().nth(4).unwrap().rfind('1').unwrap() + 1;
+    let out = run({ let mut c = sb.cmd(&env); c.current_dir(file.parent().unwrap()).args(["check", "hello.go"]); c }, WAIT);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains(&format!("hello.go:5:{col}: error: cannot use 1")), "{}", text(&out.stdout));
+}
+
+/// 古い受付（2026-11-17 より前。知らない `lang` で接続全体の `error {protocol}` を返す）に新しい
+/// 言語を頼むと、落ちずに「受付が古い」の 1 行で終わる。古い受付の実行ファイルを
+/// `ZC_E2E_OLD_BUILDD` で渡したときだけ回す（イメージ `cz-builder:latest` の `/usr/local/bin/zc-buildd`）。
+#[test]
+fn old_builder_reports_unsupported_language() {
+    let Some(old) = std::env::var_os("ZC_E2E_OLD_BUILDD") else {
+        eprintln!("e2e: ZC_E2E_OLD_BUILDD が無いので飛ばす");
+        return;
+    };
+    let sb = Sandbox::new("old");
+    let data = sb.root.join("buildd");
+    let mut child = Command::new(old).args(["--listen", "127.0.0.1:0", "--data"]).arg(&data).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut err = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    err.read_line(&mut line).unwrap();
+    let port: u16 = line.split_whitespace().nth(1).and_then(|a| a.rsplit(':').next()).and_then(|p| p.parse().ok()).unwrap();
+    let buildd = Buildd { child, port };
+    let env = pc(buildd.port);
+    let file = sb.write("code/g/hello.go", "package main\n\nfunc main() {}\n");
+    let out = run({ let mut c = sb.cmd(&env); c.current_dir(file.parent().unwrap()).args(["check", "hello.go"]); c }, WAIT);
+    assert_eq!(out.status.code(), Some(6), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("ビルド係が go に対応していない"), "{}", text(&out.stderr));
+    // 同じ serve で、Rust はそのまま通る（受付は生きている）
+    let rs = sb.write("code/r/main.rs", "fn main() {}\n");
+    if have("cargo") {
+        let out = run({ let mut c = sb.cmd(&env); c.current_dir(rs.parent().unwrap()).args(["check", "main.rs"]); c }, WAIT);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    }
+}
+
+const BROKEN_RS: &str ="fn main() {\n    let name = \"あ\";\n    let _s = \"日本語\"; let x: i32 = \"str\";\n    println!(\"{name} {x}\");\n}\n";
 
 /// 型エラーのある crate の check: 診断が UNIX ソケット（`zc_remote_ipc`）で届く。
 /// 行は 0 始まり、桁は行の中の UTF-8 のバイト位置。F5（CLI の `run`）の診断は、zcode の
@@ -461,4 +517,65 @@ fn a_dropped_connection_is_resumed_with_attach() {
     let direct = PathBuf::from(text(&out.stdout).trim());
     assert_eq!(direct.file_name(), placed.file_name());
     assert!(std::fs::read(&direct).unwrap() == first, "つなぎ直して受け取ったものと、切れずに受け取ったものが同じ");
+}
+
+/// LSP の通し（docs/lsp-design.md）: 本物の serve → 本物の受付 → 本物の rust-analyzer。
+/// `Warm` で起こし、未保存の中身を重ねた hover が新しい型を返し、定義の場所が実機の絶対パスに
+/// 直って届く。rust-analyzer はビルド係のイメージ（cz-builder）にだけある。
+#[test]
+fn rust_analyzer_answers_through_serve() {
+    if skip_without(&["cargo", "rust-analyzer"]) {
+        return;
+    }
+    // rustup の代理（component が無いと動かない）だけのとき
+    if !std::process::Command::new("rust-analyzer").arg("--version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success()) {
+        if std::env::var_os("ZC_E2E_REQUIRE").is_some_and(|v| v == "1") {
+            panic!("rust-analyzer が動かない（ZC_E2E_REQUIRE=1）");
+        }
+        eprintln!("e2e: rust-analyzer が動かないので飛ばす");
+        return;
+    }
+    let sb = Sandbox::new("lsp");
+    let buildd = Buildd::start(&sb);
+    let _serve = sb.serve(&pc(buildd.port), &[]);
+    sb.write("code/la/Cargo.toml", HELLO_TOML);
+    let util = sb.write("code/la/src/util.rs", "pub fn helper(a: i32) -> i32 {\n    a\n}\n");
+    let main_text = "mod util;\nfn main() {\n    let s = \"日本\"; let n = util::helper(1);\n    println!(\"{s}{n}\");\n}\n";
+    let main = sb.write("code/la/src/main.rs", main_text);
+    let mut c = sb.client(ipc::ClientKind::Editor);
+    c.send(&ipc::Request::Warm { file: main.clone() });
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        match c.recv(deadline.saturating_duration_since(std::time::Instant::now())) {
+            Some(ipc::Response::LspState { state: ipc::LspState::Ready, root, .. }) => {
+                assert_eq!(root, sb.home().join("code/la"));
+                break;
+            }
+            Some(ipc::Response::LspState { state: ipc::LspState::Failed, message, .. }) => panic!("{message}"),
+            Some(_) => {}
+            None => panic!("rust-analyzer が準備できない"),
+        }
+    }
+    let col = main_text.split('\n').nth(2).unwrap().find("helper").unwrap() as u32 + 2;
+    let ask = |c: &mut Client, req: u32, kind: ipc::LspKind, overlay: Vec<ipc::OverlayFile>| {
+        c.send(&ipc::Request::Lsp { req: ipc::ReqId(req), kind, file: main.clone(), line: 2, col, text: String::new(), overlay });
+        loop {
+            match c.recv(WAIT) {
+                Some(ipc::Response::LspResult { req: r, status, message, text, items }) if r == ipc::ReqId(req) => return (status, message, text, items),
+                Some(_) => {}
+                None => panic!("答えが来ない"),
+            }
+        }
+    };
+    let (status, message, text, _) = ask(&mut c, 1, ipc::LspKind::Hover, vec![]);
+    assert_eq!(status, ipc::DoneStatus::Ok, "{message}");
+    assert!(text.contains("pub fn helper(a: i32) -> i32"), "{text}");
+    // 未保存の util.rs を重ねる（ディスクは i32 のまま）
+    let unsaved = ipc::OverlayFile { path: util.clone(), bytes: b"pub fn helper(a: u16) -> u16 {\n    a\n}\n".to_vec() };
+    let (status, _, text, _) = ask(&mut c, 2, ipc::LspKind::Hover, vec![unsaved]);
+    assert_eq!(status, ipc::DoneStatus::Ok);
+    assert!(text.contains("pub fn helper(a: u16) -> u16"), "{text}");
+    let (status, _, _, items) = ask(&mut c, 3, ipc::LspKind::Definition, vec![]);
+    assert_eq!(status, ipc::DoneStatus::Ok);
+    assert_eq!(items.iter().map(|i| (i.path.clone(), i.line, i.col)).collect::<Vec<_>>(), [(util.clone(), 0, 7)]);
 }
