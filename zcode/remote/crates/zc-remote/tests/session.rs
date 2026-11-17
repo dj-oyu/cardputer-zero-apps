@@ -675,3 +675,146 @@ fn manifest_json_matches_the_wire_type() {
     assert_eq!(acts[2], manifest(&m));
     assert_eq!(acts.len(), 3);
 }
+
+// ───────────── LSP（docs/lsp-design.md） ─────────────
+
+use zc_remote::session::{LspOutcome, LspRequest, LSP_WAIT_US};
+use zc_wire::msg::{LspItem, LspPhase, LspQuery};
+
+fn lreq(m: &Arc<Manifest>, query: Option<LspQuery>) -> LspRequest {
+    LspRequest { project: P.into(), manifest: m.clone(), query, path: "src/main.rs".into(), line: 2, col: 5, text: String::new() }
+}
+
+fn lsp_msg(id: u32, m: &Manifest, q: LspQuery) -> Action {
+    text(&ClientMsg::Lsp { id, project: P.into(), tree: m.tree_id(), query: q, path: "src/main.rs".into(), line: 2, col: 5, text: String::new() })
+}
+
+fn lsp_done(ticket: Ticket, outcome: LspOutcome) -> Action {
+    Action::Emit(Event::LspDone { ticket, outcome })
+}
+
+#[test]
+fn lsp_query_syncs_the_tree_then_answers() {
+    let m = mf(&[("Cargo.toml", "[package]"), ("src/main.rs", "fn main() {}")]);
+    let mut s = Session::new();
+    let t = s.lsp(0, lreq(&m, Some(LspQuery::Hover)));
+    assert_eq!(drain(&mut s), [Action::Connect]);
+    assert_eq!(s.active(), 1);
+    s.on_open(0);
+    assert_eq!(drain(&mut s), [hello(), manifest(&m)]);
+    assert_eq!(rx(&mut s, ServerMsg::Need { tree: m.tree_id(), blobs: vec![] }), []);
+    assert_eq!(rx(&mut s, ServerMsg::Ready { tree: m.tree_id() }), [lsp_msg(t.0, &m, LspQuery::Hover)]);
+    // 答えを待つ締め切り
+    assert_eq!(s.deadline_us(), Some(LSP_WAIT_US));
+    // 知らない id の答えは捨てる
+    assert_eq!(rx(&mut s, ServerMsg::LspResult { cpu_ms: 1, id: t.0 + 100, error: None, message: String::new(), text: "x".into(), items: vec![], retry_after_s: None }), []);
+    let items = vec![LspItem { path: "src/main.rs".into(), line: 0, col: 3, ..Default::default() }];
+    assert_eq!(
+        rx(&mut s, ServerMsg::LspResult { cpu_ms: 1, id: t.0, error: None, message: String::new(), text: "fn main()".into(), items: items.clone(), retry_after_s: None }),
+        [lsp_done(t, LspOutcome::Answer { text: "fn main()".into(), items }), Action::Idle]
+    );
+    assert_eq!(s.active(), 0);
+    // 同じ接続・同じ木: 目録を送らずに問い合わせる
+    let t2 = s.lsp(0, lreq(&m, Some(LspQuery::Definition)));
+    assert_eq!(drain(&mut s), [lsp_msg(t2.0, &m, LspQuery::Definition)]);
+    // 断られた（準備中・上限）
+    assert_eq!(
+        rx(&mut s, ServerMsg::LspResult { cpu_ms: 0, id: t2.0, error: Some(ErrorCode::Limit), message: "上限".into(), text: String::new(), items: vec![], retry_after_s: Some(9) }),
+        [lsp_done(t2, LspOutcome::Failed { code: ErrorCode::Limit, message: "上限（あと 9 秒）".into() }), Action::Idle]
+    );
+}
+
+#[test]
+fn lsp_warm_is_sent_once_and_state_is_forwarded() {
+    let m = mf(&[("src/main.rs", "fn main() {}")]);
+    let mut s = Session::new();
+    let t = s.lsp(0, lreq(&m, None));
+    s.on_open(0);
+    drain(&mut s);
+    rx(&mut s, ServerMsg::Need { tree: m.tree_id(), blobs: vec![] });
+    let acts = rx(&mut s, ServerMsg::Ready { tree: m.tree_id() });
+    assert_eq!(acts, [text(&ClientMsg::LspWarm { project: P.into(), tree: m.tree_id(), path: "src/main.rs".into() }), lsp_done(t, LspOutcome::Answer { text: String::new(), items: vec![] }), Action::Idle]);
+    assert_eq!(s.deadline_us(), None);
+    assert_eq!(
+        rx(&mut s, ServerMsg::LspState { cpu_ms: 3, project: P.into(), state: LspPhase::Ready, message: String::new(), error: None }),
+        [Action::Emit(Event::LspState { project: P.into(), state: LspPhase::Ready, message: String::new(), error: None })]
+    );
+}
+
+#[test]
+fn newer_lsp_query_of_the_same_kind_replaces_an_unsent_one() {
+    let m1 = mf(&[("src/main.rs", "fn a() {}")]);
+    let m2 = mf(&[("src/main.rs", "fn ab() {}")]);
+    let mut s = Session::new();
+    let t1 = s.lsp(0, lreq(&m1, Some(LspQuery::Completion)));
+    assert_eq!(drain(&mut s), [Action::Connect]);
+    let h = s.lsp(0, lreq(&m1, Some(LspQuery::Hover)));
+    let t2 = s.lsp(0, lreq(&m2, Some(LspQuery::Completion)));
+    assert_eq!(drain(&mut s), [lsp_done(t1, LspOutcome::Cancelled)]);
+    s.on_open(0);
+    // 木の確認は前から順に（m1 は hover が待っている）
+    assert_eq!(drain(&mut s), [hello(), manifest(&m1)]);
+    rx(&mut s, ServerMsg::Need { tree: m1.tree_id(), blobs: vec![] });
+    assert_eq!(rx(&mut s, ServerMsg::Ready { tree: m1.tree_id() }), [lsp_msg(h.0, &m1, LspQuery::Hover), manifest(&m2)]);
+    rx(&mut s, ServerMsg::Need { tree: m2.tree_id(), blobs: vec![] });
+    assert_eq!(rx(&mut s, ServerMsg::Ready { tree: m2.tree_id() }), [lsp_msg(t2.0, &m2, LspQuery::Completion)]);
+    // 取り消し: 答えが来ても捨てる
+    s.lsp_cancel(h);
+    assert_eq!(drain(&mut s), [lsp_done(h, LspOutcome::Cancelled)]);
+    assert_eq!(rx(&mut s, ServerMsg::LspResult { cpu_ms: 0, id: h.0, error: None, message: String::new(), text: "late".into(), items: vec![], retry_after_s: None }), []);
+}
+
+#[test]
+fn lsp_query_times_out_and_fails_on_disconnect() {
+    let m = mf(&[("src/main.rs", "fn main() {}")]);
+    let mut s = Session::new();
+    let t = s.lsp(0, lreq(&m, Some(LspQuery::References)));
+    s.on_open(0);
+    drain(&mut s);
+    rx(&mut s, ServerMsg::Need { tree: m.tree_id(), blobs: vec![] });
+    rx(&mut s, ServerMsg::Ready { tree: m.tree_id() });
+    s.on_tick(LSP_WAIT_US - 1);
+    assert_eq!(drain(&mut s), []);
+    s.on_tick(LSP_WAIT_US);
+    assert_eq!(drain(&mut s), [lsp_done(t, LspOutcome::Failed { code: ErrorCode::Internal, message: "ビルド係が答えない（時間切れ）".into() }), Action::Idle]);
+
+    // 送ったあとで切れた（新しい接続なので、温まっていた接続の言い訳は無い）→ やり直さない
+    let mut s = Session::new();
+    let t = s.lsp(0, lreq(&m, Some(LspQuery::Hover)));
+    s.on_open(0);
+    drain(&mut s);
+    rx(&mut s, ServerMsg::Need { tree: m.tree_id(), blobs: vec![] });
+    rx(&mut s, ServerMsg::Ready { tree: m.tree_id() });
+    s.on_closed(0, false);
+    assert_eq!(drain(&mut s), [lsp_done(t, LspOutcome::GaveUp), Action::Idle]);
+
+    // まだ送っていないうちに切れた → つなぎ直して送る
+    let mut s = Session::new();
+    let t = s.lsp(0, lreq(&m, Some(LspQuery::Hover)));
+    s.on_open(0);
+    drain(&mut s);
+    s.on_closed(0, false);
+    assert_eq!(drain(&mut s), [Action::Reconnect { after_ms: 0 }]);
+    s.on_open(0);
+    assert_eq!(drain(&mut s), [hello(), manifest(&m)]);
+    rx(&mut s, ServerMsg::Need { tree: m.tree_id(), blobs: vec![] });
+    assert_eq!(rx(&mut s, ServerMsg::Ready { tree: m.tree_id() }), [lsp_msg(t.0, &m, LspQuery::Hover)]);
+
+    // オフライン（つなげない）
+    let mut s = Session::new();
+    let t = s.lsp(0, lreq(&m, Some(LspQuery::Hover)));
+    drain(&mut s);
+    s.on_closed(0, true);
+    assert_eq!(drain(&mut s), [lsp_done(t, LspOutcome::GaveUp), Action::Idle]);
+}
+
+#[test]
+fn connection_level_limit_fails_lsp_queries_too() {
+    let m = mf(&[("src/main.rs", "fn main() {}")]);
+    let mut s = Session::new();
+    let t = s.lsp(0, lreq(&m, Some(LspQuery::Hover)));
+    s.on_open(0);
+    drain(&mut s);
+    let acts = rx(&mut s, ServerMsg::Error { job: None, code: ErrorCode::Limit, message: "上限".into(), retry_after_s: Some(60) });
+    assert_eq!(acts, [lsp_done(t, LspOutcome::Failed { code: ErrorCode::Limit, message: "上限（あと 60 秒）".into() }), Action::Idle]);
+}

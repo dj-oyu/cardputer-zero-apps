@@ -40,9 +40,12 @@
 //! - 未保存の中身の重ね（[`OverlaySource`]。打鍵が止まったときの check）は、メインでは
 //!   文書の写しを取るだけ。バイト列にするのはこのスレッド。合計が
 //!   [`zc_remote_ipc::MAX_OVERLAY_BYTES`] を超えたら送らず、[`DoneStatus::NotApplicable`] で返す
+//! - LSP（docs/lsp-design.md）: [`RemoteClient::lsp`] の答えは [`RemoteEvent::LspResult`] で必ず
+//!   1 回届く（つなげない・切れた・`zc-remote` が無いときも）。rust-analyzer の状態は
+//!   [`RemoteEvent::LspState`]。どちらもすぐ送る（間引かない。打鍵 1 回に 1 つ程度）
 
 use crate::app::AppEvent;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -54,8 +57,8 @@ use std::time::{Duration, Instant};
 use zc_core::rt::{MainSender, Notifier};
 use zc_core::LineSource;
 use zc_remote_ipc::{
-    decode_response, encode_request, ArtifactKind, Backend, ClientKind, DecodeError, DoneStatus, FileDiags, FrameReader, JobKind, JobTag, OverlayFile, Phase, RemoteLang, ReqId, Request,
-    Response, SubmitFlags, TestReport, IPC_VERSION, MAX_OVERLAY_BYTES, MAX_REQUEST_FRAME,
+    decode_response, encode_request, ArtifactKind, Backend, ClientKind, DecodeError, DoneStatus, FileDiags, FrameReader, JobKind, JobTag, LspItem, LspKind, LspState, OverlayFile, Phase, RemoteLang,
+    ReqId, Request, Response, SubmitFlags, TestReport, IPC_VERSION, MAX_OVERLAY_BYTES, MAX_REQUEST_FRAME,
 };
 
 /// メインを起こす最短の間隔（design.md §4.3 のターミナルの間引きと同じ 30fps）。
@@ -98,6 +101,20 @@ impl RemoteJob {
     pub fn new(kind: JobKind, lang: RemoteLang, flags: SubmitFlags, file: PathBuf) -> RemoteJob {
         RemoteJob { kind, lang, flags, file, overlay: Vec::new() }
     }
+}
+
+/// LSP の問い合わせ（[`RemoteClient::lsp`]）。位置は 0 始まりの行と、行の中の UTF-8 のバイト位置。
+#[derive(Clone, Debug)]
+pub struct LspAsk {
+    pub kind: LspKind,
+    /// 問い合わせる文書の絶対パス。
+    pub file: PathBuf,
+    pub line: u32,
+    pub col: u32,
+    /// workspace/symbol の検索の文字列（ほかは空）。
+    pub text: String,
+    /// 未保存の文書（打鍵が止まったときの check と同じ重ね）。
+    pub overlay: Vec<OverlaySource>,
 }
 
 /// 開いている文書の未保存の中身（[`RemoteJob::overlay`]）。メインは文書の写し
@@ -184,12 +201,18 @@ pub enum RemoteEvent {
     Artifact { req: RemoteReq, kind: ArtifactKind, stale: bool, path: PathBuf },
     /// ジョブが終わった。
     Done { req: Option<RemoteReq>, tag: JobTag, status: DoneStatus, exit: i32, backend: Backend, elapsed_ms: u32, message: String },
+    /// LSP の問い合わせの答え（[`RemoteClient::lsp`] 1 つに必ず 1 回）。`status` が `Ok` でなければ
+    /// `message` に理由（「rust-analyzer が準備中」も `Error`）。
+    LspResult { req: RemoteReq, status: DoneStatus, message: String, text: String, items: Vec<LspItem> },
+    /// rust-analyzer の状態（`root` のプロジェクト）。
+    LspState { root: PathBuf, state: LspState, message: String },
 }
 
 /// メイン → 専用スレッド。
 enum Cmd {
     Warm(PathBuf),
     Submit(RemoteReq, RemoteJob, Instant),
+    Lsp(RemoteReq, LspAsk),
     Cancel(RemoteReq),
     Quit,
 }
@@ -229,15 +252,28 @@ impl RemoteClient {
         self.send(Cmd::Warm(file));
     }
 
-    /// ジョブを頼む。待たない。結果は [`RemoteEvent`] で届き、最後に必ず
-    /// [`RemoteEvent::Done`] が 1 回届く（スレッドやソケットが壊れたときも）。
-    pub fn submit(&self, job: RemoteJob) -> RemoteReq {
+    fn next_req(&self) -> RemoteReq {
         let mut n = self.next_req.fetch_add(1, Ordering::Relaxed);
         if n == 0 {
             // 0 は「自分の依頼ではない」なので使わない（一巡したとき）
             n = self.next_req.fetch_add(1, Ordering::Relaxed);
         }
-        let req = RemoteReq(n);
+        RemoteReq(n)
+    }
+
+    /// LSP の問い合わせ。待たない。答えは [`RemoteEvent::LspResult`] で必ず 1 回届く。
+    pub fn lsp(&self, ask: LspAsk) -> RemoteReq {
+        let req = self.next_req();
+        if !self.send(Cmd::Lsp(req, ask)) {
+            self.results.send(AppEvent::Remote(RemoteEvent::LspResult { req, status: DoneStatus::Error, message: "zc-remote の専用スレッドを作れない".into(), text: String::new(), items: Vec::new() }));
+        }
+        req
+    }
+
+    /// ジョブを頼む。待たない。結果は [`RemoteEvent`] で届き、最後に必ず
+    /// [`RemoteEvent::Done`] が 1 回届く（スレッドやソケットが壊れたときも）。
+    pub fn submit(&self, job: RemoteJob) -> RemoteReq {
+        let req = self.next_req();
         if !self.send(Cmd::Submit(req, job, Instant::now())) {
             self.results.send(AppEvent::Remote(RemoteEvent::Done {
                 req: Some(req),
@@ -402,6 +438,8 @@ struct Worker {
     /// 次につなぎ直しを試す時刻と、今の間隔。
     reconnect: Option<(Instant, Duration)>,
     jobs: HashMap<u32, JobState>,
+    /// 答えを待っている LSP の問い合わせ。
+    lsps: HashSet<u32>,
     diags: HashMap<JobTag, DiagAcc>,
     /// ジョブごとに、最後にすぐ送った段階。
     phases: HashMap<JobTag, Phase>,
@@ -425,6 +463,7 @@ impl Worker {
             unavailable: false,
             reconnect: None,
             jobs: HashMap::new(),
+            lsps: HashSet::new(),
             diags: HashMap::new(),
             phases: HashMap::new(),
             held: Held::default(),
@@ -520,6 +559,7 @@ impl Worker {
                     }
                 }
                 Ok(Cmd::Submit(req, job, started)) => self.submit(req, job, started),
+                Ok(Cmd::Lsp(req, ask)) => self.lsp(req, ask),
                 Ok(Cmd::Cancel(req)) => {
                     if self.conn.is_some() && self.jobs.contains_key(&req.0) {
                         self.write(&Request::Cancel { req: ReqId(req.0) });
@@ -542,6 +582,25 @@ impl Worker {
             Err(ConnectFail::Unavailable) => self.done_now(req, None, started, DoneStatus::NotApplicable, String::new()),
             Err(ConnectFail::NoServe) => self.done_now(req, None, started, DoneStatus::Error, "zc-remote serve につながらない".into()),
         }
+    }
+
+    fn lsp(&mut self, req: RemoteReq, ask: LspAsk) {
+        let Some(overlay) = overlay_bytes(&ask.overlay, MAX_OVERLAY_BYTES) else {
+            return self.lsp_now(req, DoneStatus::Limit, format!("未保存の中身が {}MiB を超えている", MAX_OVERLAY_BYTES >> 20));
+        };
+        match self.ensure_connected(true) {
+            Ok(()) => {
+                self.lsps.insert(req.0);
+                self.write(&Request::Lsp { req: ReqId(req.0), kind: ask.kind, file: ask.file, line: ask.line, col: ask.col, text: ask.text, overlay });
+            }
+            Err(ConnectFail::Unavailable) => self.lsp_now(req, DoneStatus::NotApplicable, "zc-remote が使えない".into()),
+            Err(ConnectFail::NoServe) => self.lsp_now(req, DoneStatus::Error, "zc-remote serve につながらない".into()),
+        }
+    }
+
+    /// serve からではなく、ここで作る LSP の答え。
+    fn lsp_now(&mut self, req: RemoteReq, status: DoneStatus, message: String) {
+        self.emit_now(RemoteEvent::LspResult { req, status, message, text: String::new(), items: Vec::new() });
     }
 
     /// つながっていなければつなぐ。`spawn` なら、serve がいなければ起動して最大
@@ -766,6 +825,12 @@ impl Worker {
                 };
                 self.emit_now(RemoteEvent::Done { req, tag, status, exit, backend, elapsed_ms, message });
             }
+            Response::LspResult { req, status, message, text, items } => {
+                if self.lsps.remove(&req.0) {
+                    self.emit_now(RemoteEvent::LspResult { req: RemoteReq(req.0), status, message, text, items });
+                }
+            }
+            Response::LspState { root, state, message } => self.emit_now(RemoteEvent::LspState { root, state, message }),
         }
     }
 
@@ -790,6 +855,11 @@ impl Worker {
         jobs.sort_by_key(|(r, _)| *r);
         for (r, j) in jobs {
             self.done_now(RemoteReq(r), j.tag, j.started, status, message.to_string());
+        }
+        let mut lsps: Vec<u32> = self.lsps.drain().collect();
+        lsps.sort_unstable();
+        for r in lsps {
+            self.lsp_now(RemoteReq(r), status, message.to_string());
         }
         if !self.unavailable {
             self.reconnect = Some((Instant::now() + RECONNECT_FIRST, RECONNECT_FIRST));

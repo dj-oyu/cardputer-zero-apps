@@ -98,6 +98,10 @@ pub enum TimerId {
     SkkFlush,
     /// 打鍵が止まったときのビルド係の check（最後の編集から少し待つ。打鍵のたびに仕掛け直す）。
     AutoCheck,
+    /// LSP の補完（打鍵が少し止まってから頼む。docs/lsp-design.md）。
+    LspComplete,
+    /// LSP の名前の検索（一覧の検索欄の打鍵が少し止まってから頼む）。
+    LspSymbols,
     /// 無操作での画面スリープ（最後の打鍵から `dark_time` 後に 1 回だけ鳴る。
     /// イベントループが受け持ち、画面には渡さない）。
     Sleep,

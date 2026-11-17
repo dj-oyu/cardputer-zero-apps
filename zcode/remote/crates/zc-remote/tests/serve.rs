@@ -644,3 +644,37 @@ fn auto_check_sends_the_overlay_instead_of_the_disk() {
     assert_eq!(seen[0], ipc::Response::Hello { version: 1 });
     assert!(matches!(seen.last(), Some(ipc::Response::Done { status: ipc::DoneStatus::Failed, .. })), "{seen:#?}");
 }
+
+/// LSP の問い合わせ（版 3）: 対象でない・設定が無い・つながらない、はすぐ `LspResult` で返す
+/// （zcode は待たない）。`Warm` も返事は `Status` だけ。
+#[test]
+fn lsp_answers_at_once_when_it_cannot_ask() {
+    let sb = Sandbox::new("lspno");
+    let _serve = sb.serve(&[], &[]);
+    let ts = sb.write("code/b/x.ts", "export {};\n");
+    let rs = sb.write("code/a/main.rs", "fn main() {}\n");
+    let mut c = sb.client(ipc::ClientKind::Editor);
+    let ask = |c: &mut Client, req: u32, file: &std::path::Path| {
+        c.send(&ipc::Request::Lsp { req: ipc::ReqId(req), kind: ipc::LspKind::Hover, file: file.to_owned(), line: 0, col: 3, text: String::new(), overlay: vec![] });
+        match c.recv(WAIT) {
+            Some(ipc::Response::LspResult { req: r, status, message, .. }) if r == ipc::ReqId(req) => (status, message),
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(ask(&mut c, 1, &ts).0, ipc::DoneStatus::NotApplicable);
+    let (status, message) = ask(&mut c, 2, &rs);
+    assert_eq!(status, ipc::DoneStatus::Auth);
+    assert!(message.contains("remote.json"), "{message}");
+    c.send(&ipc::Request::Warm { file: rs.clone() });
+    assert!(matches!(c.recv(WAIT), Some(ipc::Response::Status { .. })));
+    assert_eq!(c.recv(Duration::from_millis(300)), None, "Warm には Status だけ");
+    drop(c);
+
+    // 届かないビルド係: オフライン
+    let sb = Sandbox::new("lspoff");
+    let _serve = sb.serve(&pc(closed_port()), &[]);
+    let rs = sb.write("code/a/main.rs", "fn main() {}\n");
+    let mut c = sb.client(ipc::ClientKind::Editor);
+    let (status, _) = ask(&mut c, 3, &rs);
+    assert_eq!(status, ipc::DoneStatus::Offline);
+}

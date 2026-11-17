@@ -567,7 +567,7 @@ fn job(a: Args) -> u8 {
                     say(format!("動いている serve の版が違う（{version}）。zc-remote stop してからやり直す"));
                     return exit::ERROR;
                 }
-                ipc::Response::Hello { .. } | ipc::Response::Status { .. } => {}
+                ipc::Response::Hello { .. } | ipc::Response::Status { .. } | ipc::Response::LspResult { .. } | ipc::Response::LspState { .. } => {}
                 ipc::Response::Phase { phase, done, total, .. } => {
                     if last_phase != Some(phase) {
                         last_phase = Some(phase);

@@ -50,6 +50,7 @@
 //!   聞く、などを差し込む口。既定は無し）→ 相手の IP
 
 use crate::jobs::{Feed, JobSpec, Registry, SubmitError, WatchEnd, Watcher};
+use crate::lsp::{LspHub, Query};
 use crate::runner::{Runner, Tools};
 use crate::store::{BlobWriter, StoreError};
 use crate::Config;
@@ -57,7 +58,8 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zc_wire::http;
@@ -90,6 +92,12 @@ const LINGER: Duration = Duration::from_secs(2);
 const READY_TREES: usize = 4;
 /// 置き場の掃除の間隔（接続もジョブも無い時にだけ）。
 const GC_EVERY: Duration = Duration::from_secs(600);
+/// LSP の問い合わせの答えを待つ時間（過ぎたら `internal` で返し、遅れた答えは捨てる）。
+pub const LSP_TIMEOUT: Duration = Duration::from_secs(25);
+/// 1 本の接続で同時に待てる LSP の問い合わせの数。
+const MAX_LSP_PENDING: usize = 16;
+/// 接続の通し番号（rust-analyzer の状態を知らせる相手を見分ける）。
+static CONN_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// 相手のアドレスから、ログに出す名前を引く口（PC の経路で、tailscaled に「相手はどの
 /// ノードか」を聞く、など）。認証には使わない。
@@ -106,6 +114,7 @@ pub struct Options {
 
 struct Shared {
     registry: Arc<Registry>,
+    lsp: Arc<LspHub>,
     stop: AtomicBool,
     conns: AtomicUsize,
     whois: Option<Arc<Whois>>,
@@ -152,7 +161,7 @@ pub fn spawn_with(cfg: Config, opts: Options) -> std::io::Result<Handle> {
     let addr = listener.local_addr()?;
     let runner = opts.runner.unwrap_or_else(|| Arc::new(Tools));
     let registry = Registry::new(&cfg, runner);
-    let shared = Arc::new(Shared { registry, stop: AtomicBool::new(false), conns: AtomicUsize::new(0), whois: opts.whois });
+    let shared = Arc::new(Shared { registry, lsp: Arc::new(LspHub::new()), stop: AtomicBool::new(false), conns: AtomicUsize::new(0), whois: opts.whois });
     let sh = shared.clone();
     let thread = std::thread::Builder::new().name("zc-accept".into()).spawn(move || accept_loop(listener, sh))?;
     Ok(Handle { addr, shared, thread: Some(thread) })
@@ -173,6 +182,10 @@ impl Handle {
     pub fn registry(&self) -> Arc<Registry> {
         self.shared.registry.clone()
     }
+    /// rust-analyzer の持ち主（試験用）。
+    pub fn lsp(&self) -> Arc<LspHub> {
+        self.shared.lsp.clone()
+    }
 }
 
 impl Drop for Handle {
@@ -182,12 +195,13 @@ impl Drop for Handle {
             let _ = t.join();
         }
         self.shared.registry.shutdown();
+        self.shared.lsp.shutdown();
     }
 }
 
 /// 接続 1 本を最後まで相手する（接続ごとのスレッドの中身）。
 pub fn serve_connection(stream: TcpStream, registry: Arc<Registry>) -> std::io::Result<()> {
-    let shared = Shared { registry, stop: AtomicBool::new(false), conns: AtomicUsize::new(0), whois: None };
+    let shared = Shared { registry, lsp: Arc::new(LspHub::new()), stop: AtomicBool::new(false), conns: AtomicUsize::new(0), whois: None };
     serve(stream, &shared)
 }
 
@@ -273,11 +287,13 @@ fn is_hex(s: &str, len: usize) -> bool {
     s.len() == len && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-fn status_json(registry: &Registry) -> String {
+fn status_json(registry: &Registry, lsp: &LspHub) -> String {
     let jobs = registry.status();
     let count = |s: &str| jobs.iter().filter(|j| j.state == s).count();
     let list: Vec<serde_json::Value> = jobs.iter().map(|j| serde_json::json!({ "job": j.job, "project": j.project, "kind": j.kind, "state": j.state })).collect();
-    serde_json::json!({ "running": count("running"), "queued": count("queued"), "jobs": list, "uptime_s": registry.uptime().as_secs() }).to_string()
+    // lsp_cpu_ms: rust-analyzer の CPU の通算（DO が費用の計りに使う。docs/lsp-design.md）
+    let lsp_state = lsp.state().map(|(_, s)| serde_json::to_value(s).unwrap_or_default());
+    serde_json::json!({ "running": count("running"), "queued": count("queued"), "jobs": list, "uptime_s": registry.uptime().as_secs(), "lsp_cpu_ms": lsp.cpu_ms(), "lsp": lsp_state }).to_string()
 }
 
 fn serve(stream: TcpStream, sh: &Shared) -> io::Result<()> {
@@ -316,7 +332,7 @@ fn serve(stream: TcpStream, sh: &Shared) -> io::Result<()> {
                 "/healthz" => respond(&stream, 200, "ok"),
                 "/v1/status" => {
                     let mut out = Vec::new();
-                    http::write_response(200, "application/json", status_json(&sh.registry).as_bytes(), &mut out);
+                    http::write_response(200, "application/json", status_json(&sh.registry, &sh.lsp).as_bytes(), &mut out);
                     write_all(&stream, &out, LINGER)
                 }
                 zc_wire::WS_PATH => respond(&stream, 426, "WebSocket の Upgrade が要る\n"),
@@ -347,8 +363,13 @@ fn serve(stream: TcpStream, sh: &Shared) -> io::Result<()> {
         .or_else(|| peer.map(|p| p.ip().to_string()))
         .unwrap_or_else(|| "?".into());
     let now = Instant::now();
+    let (lsp_tx, lsp_rx) = mpsc::channel();
     let mut conn = Conn {
         sh,
+        id: CONN_SEQ.fetch_add(1, Ordering::SeqCst),
+        lsp_tx,
+        lsp_rx,
+        lsp_pending: Vec::new(),
         stream,
         enc: Encoder::new(Role::Server),
         out: Vec::new(),
@@ -415,6 +436,13 @@ enum Step {
 
 struct Conn<'a> {
     sh: &'a Shared,
+    /// 接続の通し番号（[`CONN_SEQ`]）。
+    id: u64,
+    /// rust-analyzer の答え・状態の受け口（[`LspHub`] が送る。接続のスレッドが読んで流す）。
+    lsp_tx: Sender<ServerMsg>,
+    lsp_rx: Receiver<ServerMsg>,
+    /// 答えを待っている LSP の問い合わせ（id と締め切り）。
+    lsp_pending: Vec<(u32, Instant)>,
     stream: TcpStream,
     enc: Encoder,
     /// 送り待ち（`out_pos` より前は送り済み）。
@@ -538,6 +566,7 @@ impl Conn<'_> {
                 continue;
             }
             self.pump();
+            self.pump_lsp(now);
             if self.closing.is_some() {
                 continue;
             }
@@ -548,7 +577,7 @@ impl Conn<'_> {
             if self.pending() > 0 {
                 self.flush()?;
             }
-            let pulling = !self.watching.is_empty() && self.pending() < SEND_HIGH_WATER;
+            let pulling = (!self.watching.is_empty() || !self.lsp_pending.is_empty()) && self.pending() < SEND_HIGH_WATER;
             wait(&self.stream, self.pending() > 0, if pulling { TICK } else { Duration::from_secs(1) });
 
             // 届いた分を読む（1 回りで 1MB まで。送る方を待たせない）。
@@ -621,6 +650,8 @@ impl Conn<'_> {
                 Ok(w) => self.watch(w),
                 Err(_) => self.job_error(&job, ErrorCode::UnknownJob, "知らないジョブ", None),
             },
+            ClientMsg::LspWarm { project, tree, path } => self.on_lsp_warm(project, tree, path),
+            ClientMsg::Lsp { id, project, tree, query, path, line, col, text } => self.on_lsp(Query { id, query, path, line, col, text }, project, tree),
             ClientMsg::Cancel { job } => {
                 // この接続が見ていないジョブなら、終わりの知らせが届くように付けてから取り消す。
                 if !self.watching.iter().any(|w| w.watcher.job() == job) {
@@ -759,6 +790,70 @@ impl Conn<'_> {
             Ok(w) => self.watch(w),
             Err(SubmitError::QueueFull) => self.job_error(&job, ErrorCode::Limit, "待ちの列がいっぱい", Some(5)),
             Err(_) => self.job_error(&job, ErrorCode::BadTree, "job id の形が違う", None),
+        }
+    }
+
+    /// この接続で ready を受けた木の目録。
+    fn ready_manifest(&self, project: &str, tree: &str) -> Option<Arc<Manifest>> {
+        self.ready.iter().find(|r| r.tree == tree && r.project == project).map(|r| r.manifest.clone())
+    }
+
+    fn on_lsp_warm(&mut self, project: String, tree: String, path: String) {
+        let Some(manifest) = self.ready_manifest(&project, &tree) else {
+            // 木がそろっていない。状態で知らせる（接続は続ける）
+            let m = ServerMsg::LspState { cpu_ms: self.sh.lsp.cpu_ms(), project, state: zc_wire::msg::LspPhase::Failed, message: "この接続で ready を受けた木ではない".into(), error: Some(ErrorCode::BadTree) };
+            return self.send(&m);
+        };
+        let store = match self.sh.registry.store() {
+            Ok(s) => s,
+            Err(e) => return self.fail(ErrorCode::Internal, format!("置き場を開けない: {e}")),
+        };
+        self.sh.lsp.warm(&store, &project, &manifest, &path, self.id, &self.lsp_tx);
+    }
+
+    fn on_lsp(&mut self, q: Query, project: String, tree: String) {
+        let id = q.id;
+        let err = |this: &mut Self, code: ErrorCode, message: &str| {
+            let m = ServerMsg::LspResult { cpu_ms: this.sh.lsp.cpu_ms(), id, error: Some(code), message: message.into(), text: String::new(), items: vec![], retry_after_s: None };
+            this.send(&m);
+        };
+        let Some(manifest) = self.ready_manifest(&project, &tree) else {
+            return err(self, ErrorCode::BadTree, "この接続で ready を受けた木ではない");
+        };
+        if self.lsp_pending.len() >= MAX_LSP_PENDING {
+            return err(self, ErrorCode::Limit, "問い合わせが多すぎる");
+        }
+        let store = match self.sh.registry.store() {
+            Ok(s) => s,
+            Err(e) => return self.fail(ErrorCode::Internal, format!("置き場を開けない: {e}")),
+        };
+        self.lsp_pending.retain(|(p, _)| *p != id);
+        self.lsp_pending.push((id, Instant::now() + LSP_TIMEOUT));
+        self.sh.lsp.query(&store, &project, &manifest, q, &self.lsp_tx);
+    }
+
+    /// rust-analyzer から届いた答え・状態を流す。待ちすぎた問い合わせは時間切れで返す。
+    fn pump_lsp(&mut self, now: Instant) {
+        while self.pending() < SEND_HIGH_WATER {
+            let Ok(m) = self.lsp_rx.try_recv() else { break };
+            if let ServerMsg::LspResult { id, .. } = &m {
+                // 時間切れで返したもの・知らないものは捨てる
+                let Some(i) = self.lsp_pending.iter().position(|(p, _)| p == id) else { continue };
+                self.lsp_pending.swap_remove(i);
+            }
+            self.send(&m);
+        }
+        let mut expired = Vec::new();
+        self.lsp_pending.retain(|(id, at)| {
+            let keep = *at > now;
+            if !keep {
+                expired.push(*id);
+            }
+            keep
+        });
+        for id in expired {
+            let m = ServerMsg::LspResult { cpu_ms: self.sh.lsp.cpu_ms(), id, error: Some(ErrorCode::Internal), message: "rust-analyzer が答えない（時間切れ）".into(), text: String::new(), items: vec![], retry_after_s: None };
+            self.send(&m);
         }
     }
 

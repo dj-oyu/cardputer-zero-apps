@@ -34,6 +34,11 @@
 //      報告する。月の超過が上限（BUDGET_OVERAGE_USD）を超えそうなら、新しい job に error {limit}、
 //      冷えたコンテナは起こさず error {limit} で閉じる（4429）。走っているジョブは止めず、終わったら
 //      keep-warm を待たずにコンテナを止める
+//   9. **LSP**（docs/lsp-design.md）: 実機の lsp / lsp_warm はそのまま中継する（ほかのメッセージと同じく
+//      「動き」として keep-warm を数え直す。1 日のジョブ数には数えない）。上限に達していたら中継せず、
+//      DO が lsp_result {error:"limit"} / lsp_state {state:"failed", error:"limit"} を返す（接続は続く。
+//      冷えたコンテナも起こさない）。受付の lsp_result / lsp_state と /v1/status の cpu_ms（rust-analyzer の
+//      CPU の通算）を覗いて、増えた分を CPU として数える（Meter.addLspCpu）
 //
 // **コンテナが止まっているときの接続（「冷えた接続」）**: 6 の「コンテナを起こさずに返す」ために、
 // コンテナが止まっている間は、上流が要るメッセージが来るまでコンテナを起こさない。
@@ -280,6 +285,8 @@ export interface BuilddStatus {
   running: number;
   queued: number;
   jobs: { job: string; state?: string; status?: string }[];
+  /** rust-analyzer の CPU の通算（ms）。古い受付には無い。 */
+  lspCpuMs?: number;
 }
 
 /** ビルド係（コンテナと、その中の zc-buildd）の口。 */
@@ -366,6 +373,10 @@ const JOB_ID = /^[0-9a-f]{1,64}$/;
 const KINDS: readonly string[] = ["build", "check", "test"];
 /** 受付 → 実機のうち、台帳に関わるもの（serde は type を先頭に書く）。 */
 const PEEK = /^\{"type":"(started|done|hello)"/;
+/** 受付の LSP の返事の CPU の通算（zc-wire は type の直後に cpu_ms を置く）。中身は読まない。 */
+const LSP_CPU = /^\{"type":"lsp_(?:result|state)","cpu_ms":([0-9]{1,15})[,}]/;
+/** lsp の id（u32）。 */
+const LSP_ID_MAX = 0xffff_ffff;
 
 function byteLength(data: string | ArrayBuffer): number {
   if (typeof data !== "string") return data.byteLength;
@@ -531,6 +542,23 @@ export class SessionCore {
       return;
     }
 
+    if (type === "lsp" || type === "lsp_warm") {
+      // 月の費用の上限（ジョブと同じ判断。冷えたコンテナも起こさない）
+      const g = this.guard(this.clock.now());
+      if (g.exhausted) {
+        if (type === "lsp") {
+          const id = msg.id;
+          if (typeof id !== "number" || !Number.isInteger(id) || id < 0 || id > LSP_ID_MAX) return this.fail(conn, "protocol", "bad lsp id", CLOSE.protocol);
+          this.reply(conn, { type: "lsp_result", cpu_ms: 0, id, error: "limit", message: g.message, retry_after_s: g.retryAfterS });
+        } else {
+          this.reply(conn, { type: "lsp_state", cpu_ms: 0, project: typeof msg.project === "string" ? msg.project : "", state: "failed", message: g.message, error: "limit" });
+        }
+        return;
+      }
+      this.forward(conn, data);
+      return;
+    }
+
     if (type === "hello" && conn.mode === "cold" && conn.hello === null && msg.v === PROTOCOL_VERSION) {
       conn.hello = data;
       this.reply(conn, { type: "hello", v: PROTOCOL_VERSION, server: DO_SERVER_NAME });
@@ -611,6 +639,7 @@ export class SessionCore {
       }
       this.ledger.reconcile(alive, this.clock.now());
       busy = this.ledger.running() > 0 || st.running + st.queued > 0;
+      if (typeof st.lspCpuMs === "number") this.meter.addLspCpu(this.clock.now(), st.lspCpuMs);
     }
     const t = this.clock.now();
     // 走っている間は「動きがある」とみなす（終わってから keep-warm を数える）
@@ -804,6 +833,9 @@ export class SessionCore {
     if (conn.mode === "closed") return;
     let msg: Record<string, unknown> | null = null;
     if (typeof data === "string") {
+      // rust-analyzer の CPU（頭だけ見る。答えの中身は読まない）
+      const cpu = LSP_CPU.exec(data);
+      if (cpu !== null) this.meter.addLspCpu(this.clock.now(), Number(cpu[1]));
       // ログや診断は覗かない（大きい）。type が先頭に無い JSON だけは、念のため全部読む。
       if (PEEK.test(data) || !data.startsWith('{"type":"')) msg = parseObject(data);
       if (conn.swallowHello) {
@@ -940,7 +972,8 @@ export function parseStatus(v: unknown): BuilddStatus | null {
     }
   }
   const n = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) ? x : 0);
-  return { running: n(o.running), queued: n(o.queued), jobs };
+  const lspCpuMs = typeof o.lsp_cpu_ms === "number" && Number.isFinite(o.lsp_cpu_ms) && o.lsp_cpu_ms >= 0 ? o.lsp_cpu_ms : undefined;
+  return { running: n(o.running), queued: n(o.queued), jobs, lspCpuMs };
 }
 
 export class BuildSession implements DurableObject {
