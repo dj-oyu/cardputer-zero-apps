@@ -47,11 +47,15 @@ pub enum BackendChoice {
 }
 
 /// 保存時の check をいつ頼むか（zcode が読む設定ではなく、serve が依頼を受けたときに
-/// 当てはめる: `Warm` なら冷えているとき `Offline` ですぐ返す）。
+/// 当てはめる: `Warm` なら冷えているとき `Offline` ですぐ返す）。打鍵が止まったときの check
+/// （`SubmitFlags::AUTO`）は `Idle` のときだけ受け、ほかは「対象ではない」で返す。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CheckOnSave {
+    /// 保存のたびに（既定）。
     #[default]
     Always,
+    /// 保存のたびに加えて、打鍵が止まったとき（未保存の中身で）も。
+    Idle,
     /// 接続が温かいときだけ（無線を起こす回数を減らす）。
     Warm,
     /// 頼まない。
@@ -217,9 +221,10 @@ impl Config {
         if let Some(c) = raw.check_on_save {
             cfg.check_on_save = match c.as_str() {
                 "always" => CheckOnSave::Always,
+                "idle" => CheckOnSave::Idle,
                 "warm" => CheckOnSave::Warm,
                 "manual" => CheckOnSave::Manual,
-                _ => return Err(format!("check_on_save は always / warm / manual のどれか: {c:?}")),
+                _ => return Err(format!("check_on_save は always / idle / warm / manual のどれか: {c:?}")),
             };
         }
         Ok(cfg)
@@ -295,6 +300,7 @@ mod tests {
             assert!(Config::parse(bad).is_err(), "{bad}");
         }
         let e = Config::parse(r#"{ "client_secret": "s3cr3t", "backend": }"#).unwrap_err();
+        assert_eq!(Config::parse(r#"{ "check_on_save": "idle" }"#).unwrap().check_on_save, CheckOnSave::Idle);
         assert!(!e.contains("s3cr3t"), "{e}");
     }
 

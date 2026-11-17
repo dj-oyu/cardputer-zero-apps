@@ -1044,3 +1044,216 @@ fn run_tests_needs_a_remote_language() {
     assert!(ed.message().is_some_and(|m| m.contains("試験を実行できない")), "{:?}", ed.message());
     assert!(fake.jobs().is_empty());
 }
+
+// --- 打鍵が止まったときの check（check_on_save = idle） ---
+
+impl Loop {
+    /// 打鍵が止まったときの check のタイマーが鳴った（時間は待たずに鳴らす）。
+    fn idle(&mut self, ed: &mut EditorScreen) {
+        assert!(self.timers.deadline(TimerId::AutoCheck).is_some(), "タイマーが仕掛かっていない");
+        self.timers.cancel(TimerId::AutoCheck);
+        self.with(|cx| ed.on_timer(TimerId::AutoCheck, cx));
+    }
+}
+
+fn auto_jobs(fake: &FakeRemote) -> Vec<RemoteJob> {
+    fake.jobs().into_iter().filter(|j| j.flags.contains(SubmitFlags::AUTO)).collect()
+}
+
+fn overlay_text(j: &RemoteJob, i: usize) -> String {
+    String::from_utf8(j.overlay[i].bytes(usize::MAX).unwrap()).unwrap()
+}
+
+both!(auto_check_fires_once_after_typing_stops, auto_check_fires_once_after_typing_stops_simple, auto_check_fires_once_after_typing_stops_buffer);
+fn auto_check_fires_once_after_typing_stops(backend: DocBackend) {
+    let (dir, proj, mut ed, mut lp, fake) = rust_project(backend, "auto-once");
+    let (lib, wrap) = (proj.join("src/lib.rs"), proj.join("src/wrap.rs"));
+    // 動くだけでは仕掛けない
+    lp.keys(&mut ed, &[key(Key::Down)]);
+    assert_eq!(lp.timers.deadline(TimerId::AutoCheck), None);
+    // 打つたびに仕掛け直す（打っている間は鳴らない）
+    lp.type_str(&mut ed, "x");
+    let first = lp.timers.deadline(TimerId::AutoCheck).expect("仕掛かる");
+    assert!(first >= now_us() + 1_000_000, "1.2 秒後");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    lp.type_str(&mut ed, "y");
+    let second = lp.timers.deadline(TimerId::AutoCheck).unwrap();
+    assert!(second > first, "打つたびに先へ延びる");
+    assert!(fake.jobs().is_empty());
+    // 鳴った: 1 回だけ頼む。未保存の中身（文書と同じ）を重ねる
+    lp.idle(&mut ed);
+    let jobs = auto_jobs(&fake);
+    assert_eq!(jobs.len(), 1);
+    assert_eq!((jobs[0].kind, jobs[0].lang, jobs[0].file.as_path()), (JobKind::Check, RemoteLang::Rust, lib.as_path()));
+    assert_eq!(jobs[0].overlay.len(), 1);
+    assert_eq!(jobs[0].overlay[0].path, lib);
+    assert_eq!(overlay_text(&jobs[0], 0), text(&ed));
+    assert!(text(&ed).contains("xyfn f1()"));
+    // 大きすぎる中身は None（専用スレッドが送らずに断る）
+    assert!(jobs[0].overlay[0].bytes(10).is_none());
+    // 変わっていなければ、もう一度鳴っても頼まない
+    lp.with(|cx| ed.on_timer(TimerId::AutoCheck, cx));
+    assert_eq!(fake.jobs().len(), 1);
+    // 進み具合も知らせも出さない
+    lp.remote(&mut ed, RemoteEvent::Phase { req: Some(RemoteReq(1)), tag: JobTag(4), root: proj.clone(), phase: Phase::Running, done: 0, total: 0 });
+    assert_eq!(ed.remote_progress(), None);
+    lp.remote(&mut ed, done(Some(1), 4, DoneStatus::Ok));
+    assert_eq!(ed.message(), None);
+
+    // ほかの未保存の文書も重ねる。保存済みの文書は重ねない（ディスクのまま）
+    lp.with(|cx| ed.open_path(&wrap, cx));
+    lp.pump(&mut ed);
+    lp.keys(&mut ed, &[key(Key::End)]);
+    lp.type_str(&mut ed, " // w");
+    lp.idle(&mut ed);
+    let jobs = auto_jobs(&fake);
+    assert_eq!(jobs.len(), 2);
+    assert_eq!(jobs[1].file, wrap);
+    let mut paths: Vec<&Path> = jobs[1].overlay.iter().map(|o| o.path.as_path()).collect();
+    paths.sort();
+    assert_eq!(paths, [lib.as_path(), wrap.as_path()]);
+    let w = jobs[1].overlay.iter().position(|o| o.path == wrap).unwrap();
+    assert_eq!(overlay_text(&jobs[1], w), text(&ed));
+    // wrap.rs を保存した: 保存時の check を頼み、同じ版では打鍵が止まったときの check を頼まない
+    lp.keys(&mut ed, &[ctrl('s')]);
+    lp.pump(&mut ed);
+    assert_eq!(fake.jobs().len(), 3);
+    assert!(!fake.jobs()[2].flags.contains(SubmitFlags::AUTO));
+    lp.with(|cx| ed.on_timer(TimerId::AutoCheck, cx));
+    assert_eq!(fake.jobs().len(), 3);
+    // 保存した後に打てば、lib.rs（未保存）だけを重ねる
+    lp.type_str(&mut ed, "!");
+    lp.idle(&mut ed);
+    let jobs = auto_jobs(&fake);
+    assert_eq!(jobs.len(), 3);
+    let mut paths: Vec<&Path> = jobs[2].overlay.iter().map(|o| o.path.as_path()).collect();
+    paths.sort();
+    assert_eq!(paths, [lib.as_path(), wrap.as_path()], "打った wrap.rs は未保存に戻った");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+both!(auto_check_results_follow_edits_and_drop_superseded, auto_check_results_follow_edits_and_drop_superseded_simple, auto_check_results_follow_edits_and_drop_superseded_buffer);
+fn auto_check_results_follow_edits_and_drop_superseded(backend: DocBackend) {
+    let (dir, proj, mut ed, mut lp, fake) = rust_project(backend, "auto-late");
+    let diags = |req: u32, tag: u32, complete: bool, ds: &[(u32, &str)]| RemoteEvent::Diagnostics {
+        req: Some(RemoteReq(req)),
+        tag: JobTag(tag),
+        root: proj.clone(),
+        complete,
+        files: vec![FileDiags { path: "src/lib.rs".into(), diags: ds.iter().map(|&(l, m)| err(l, m)).collect() }],
+    };
+    let scanned_mine = |req: u32, tag: u32| RemoteEvent::Phase { req: Some(RemoteReq(req)), tag: JobTag(tag), root: proj.clone(), phase: Phase::Scanned, done: 0, total: 0 };
+    // 先頭に 2 行足して（未保存のまま）止まる → 頼む。診断の基準は、このときの文書の版
+    lp.keys(&mut ed, &[KeyEvent::new(Key::Home, Mods::CTRL)]);
+    lp.type_str(&mut ed, "// a\n// b\n");
+    lp.idle(&mut ed);
+    assert_eq!(auto_jobs(&fake).len(), 1);
+    lp.remote(&mut ed, scanned_mine(1, 5));
+    // 届く前に、もう 1 行足した
+    lp.type_str(&mut ed, "// c\n");
+    // 重ねた中身（12 行）の 5 行目は、今の 6 行目（保存済みの版を基準にすると 8 行目になる）
+    lp.remote(&mut ed, diags(1, 5, true, &[(4, "E0308")]));
+    assert_eq!(lines_of(&ed), [5]);
+    assert_eq!(ed.active_view().unwrap().marks()[0].line, 5);
+    assert_eq!(ed.message(), None, "知らせは出さない（波線と件数だけ）");
+    lp.remote(&mut ed, done(Some(1), 5, DoneStatus::Failed));
+    // 打ち続けて 2 回頼んだ。後から走査した方の結果を取り込んだら、古い方の結果は捨てる
+    lp.type_str(&mut ed, "x");
+    lp.idle(&mut ed);
+    lp.type_str(&mut ed, "y");
+    lp.idle(&mut ed);
+    assert_eq!(auto_jobs(&fake).len(), 3);
+    lp.remote(&mut ed, scanned_mine(2, 6));
+    lp.remote(&mut ed, scanned_mine(3, 7));
+    lp.remote(&mut ed, diags(3, 7, true, &[(1, "new")]));
+    lp.remote(&mut ed, diags(2, 6, true, &[(8, "old")]));
+    assert_eq!(lines_of(&ed), [1], "古い中身の結果で上書きしない");
+    lp.remote(&mut ed, done(Some(2), 6, DoneStatus::Cancelled));
+    lp.remote(&mut ed, done(Some(3), 7, DoneStatus::Failed));
+    // 取り消された方（Cancelled）では休まない
+    lp.type_str(&mut ed, "z");
+    assert!(lp.timers.deadline(TimerId::AutoCheck).is_some());
+    // 直った: 完全で空の結果で波線が消える。知らせは出さない
+    lp.idle(&mut ed);
+    lp.remote(&mut ed, scanned_mine(4, 8));
+    lp.remote(&mut ed, diags(4, 8, true, &[]));
+    lp.remote(&mut ed, done(Some(4), 8, DoneStatus::Ok));
+    assert!(ed.diagnostics().is_empty());
+    assert_eq!(ed.message(), None);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+both!(auto_check_failures_are_silent_and_pause_until_save, auto_check_failures_are_silent_and_pause_until_save_simple, auto_check_failures_are_silent_and_pause_until_save_buffer);
+fn auto_check_failures_are_silent_and_pause_until_save(backend: DocBackend) {
+    let (dir, _proj, mut ed, mut lp, fake) = rust_project(backend, "auto-quiet");
+    // NotApplicable は、設定が always（既定）・warm・manual のときに serve が断る形。どれも
+    // 何も知らせず、実機の構文チェックにも回さず、次の保存まで休む
+    for status in [DoneStatus::NotApplicable, DoneStatus::Offline, DoneStatus::Limit, DoneStatus::Auth, DoneStatus::Clock, DoneStatus::Error] {
+        lp.type_str(&mut ed, "x");
+        lp.idle(&mut ed);
+        let n = fake.jobs().len() as u32;
+        assert!(fake.jobs()[n as usize - 1].flags.contains(SubmitFlags::AUTO));
+        lp.remote(&mut ed, done(Some(n), 0, status));
+        lp.pump(&mut ed);
+        assert_eq!(ed.message(), None, "{status:?}");
+        assert!(ed.diagnostics().is_empty());
+        lp.type_str(&mut ed, "y");
+        assert_eq!(lp.timers.deadline(TimerId::AutoCheck), None, "{status:?}: 休んでいる間は仕掛けない");
+        lp.with(|cx| ed.on_timer(TimerId::AutoCheck, cx));
+        assert_eq!(fake.jobs().len() as u32, n);
+        // 保存すると、保存時の check を頼み、また試す
+        lp.keys(&mut ed, &[ctrl('s')]);
+        lp.pump(&mut ed);
+        assert_eq!(fake.jobs().len() as u32, n + 1);
+        assert!(!fake.jobs()[n as usize].flags.contains(SubmitFlags::AUTO));
+        lp.remote(&mut ed, done(Some(n + 1), 0, DoneStatus::Ok));
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+both!(auto_check_waits_for_builds_and_tests, auto_check_waits_for_builds_and_tests_simple, auto_check_waits_for_builds_and_tests_buffer);
+fn auto_check_waits_for_builds_and_tests(backend: DocBackend) {
+    let (dir, proj, mut ed, mut lp, fake) = rust_project(backend, "auto-busy");
+    // F5 のビルド（ほかの相手のジョブ）が同じプロジェクトで動いている間は頼まない。少し後にまた見る
+    lp.remote(&mut ed, RemoteEvent::Phase { req: None, tag: JobTag(3), root: proj.clone(), phase: Phase::Running, done: 0, total: 0 });
+    lp.type_str(&mut ed, "x");
+    lp.idle(&mut ed);
+    assert!(fake.jobs().is_empty());
+    assert!(lp.timers.deadline(TimerId::AutoCheck).is_some(), "もう一度見る");
+    // ほかのプロジェクトのビルドは関係ない
+    lp.remote(&mut ed, done(None, 3, DoneStatus::Ok));
+    lp.remote(&mut ed, RemoteEvent::Phase { req: None, tag: JobTag(9), root: dir.join("other"), phase: Phase::Running, done: 0, total: 0 });
+    lp.idle(&mut ed);
+    assert_eq!(auto_jobs(&fake).len(), 1);
+    lp.remote(&mut ed, done(Some(1), 0, DoneStatus::Ok));
+    // F6 の試験の間も頼まない（未保存なので、先に保存してから試験を頼む）
+    lp.keys(&mut ed, &[key(Key::F(6))]);
+    lp.pump(&mut ed);
+    assert_eq!(fake.jobs().iter().map(|j| j.kind).collect::<Vec<_>>(), [JobKind::Check, JobKind::Test]);
+    lp.type_str(&mut ed, "y");
+    lp.idle(&mut ed);
+    assert_eq!(fake.jobs().len(), 2);
+    lp.remote(&mut ed, RemoteEvent::Tests { req: RemoteReq(2), root: proj.clone(), report: TestReport { passed: 1, failed: 0, ignored: 0, cases: Vec::new() } });
+    lp.remote(&mut ed, done(Some(2), 5, DoneStatus::Ok));
+    lp.idle(&mut ed);
+    assert_eq!(auto_jobs(&fake).len(), 2);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+both!(auto_check_defers_the_unavailable_notice, auto_check_defers_the_unavailable_notice_simple, auto_check_defers_the_unavailable_notice_buffer);
+fn auto_check_defers_the_unavailable_notice(backend: DocBackend) {
+    let (dir, _proj, mut ed, mut lp, fake) = rust_project(backend, "auto-unavail");
+    // zc-remote が無いと分かったのが打鍵が止まったときの check なら、その場では出さない
+    lp.type_str(&mut ed, "x");
+    lp.idle(&mut ed);
+    lp.remote(&mut ed, RemoteEvent::Unavailable("zc-remote が無い".into()));
+    lp.remote(&mut ed, done(Some(1), 0, DoneStatus::NotApplicable));
+    assert_eq!(ed.message(), None);
+    // 保存時の check が終わったときに 1 回だけ出す
+    lp.keys(&mut ed, &[ctrl('s')]);
+    lp.pump(&mut ed);
+    assert_eq!(fake.jobs().len(), 2);
+    lp.remote(&mut ed, done(Some(2), 0, DoneStatus::NotApplicable));
+    assert_eq!(ed.message(), Some("ビルド係を使えない: zc-remote が無い"));
+    let _ = fs::remove_dir_all(&dir);
+}

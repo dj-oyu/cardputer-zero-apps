@@ -194,7 +194,12 @@ impl Client {
     }
 
     pub fn submit(&mut self, req: u32, kind: ipc::JobKind, lang: ipc::RemoteLang, flags: ipc::SubmitFlags, file: &Path) {
-        self.send(&ipc::Request::Submit { req: ipc::ReqId(req), kind, lang, flags, file: file.to_owned() });
+        self.submit_overlay(req, kind, lang, flags, file, Vec::new());
+    }
+
+    /// 未保存の中身を重ねて頼む（打鍵が止まったときの check の形）。
+    pub fn submit_overlay(&mut self, req: u32, kind: ipc::JobKind, lang: ipc::RemoteLang, flags: ipc::SubmitFlags, file: &Path, overlay: Vec<ipc::OverlayFile>) {
+        self.send(&ipc::Request::Submit { req: ipc::ReqId(req), kind, lang, flags, file: file.to_owned(), overlay });
     }
 
     /// 次の知らせ（最大 `wait`）。切れた・時間切れは `None`。

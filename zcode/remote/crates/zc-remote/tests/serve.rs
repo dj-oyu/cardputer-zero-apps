@@ -13,9 +13,10 @@ mod support;
 
 use d5::*;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use support::{serve_plain, Msg, Srv};
 use zc_remote_ipc as ipc;
@@ -478,4 +479,168 @@ fn ctrl_c_cancels_the_build_and_exits_130() {
     let mut c = sb.client(ipc::ClientKind::Cli);
     c.send(&ipc::Request::Status);
     assert!(matches!(c.recv(WAIT), Some(ipc::Response::Status { running_jobs: 0, .. })));
+}
+
+/// 中身を全部欲しがる偽物の受付。届いた目録（パス → 大きさ・SHA-256）と中身（SHA-256 → バイト列）を
+/// 控える。ジョブは型エラーで失敗させる。
+#[allow(clippy::type_complexity)]
+fn hungry_builder() -> (u16, Arc<Mutex<Vec<Vec<(String, u64, String)>>>>, Arc<Mutex<HashMap<String, Vec<u8>>>>) {
+    let manifests: Arc<Mutex<Vec<Vec<(String, u64, String)>>>> = Arc::default();
+    let blobs: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::default();
+    let (m2, b2) = (manifests.clone(), blobs.clone());
+    let port = serve_plain(move |_, s| {
+        let Some(mut srv) = Srv::accept(s, &[]) else { return };
+        // 今の目録で欲しがった中身（need の添字の順）と、受け取り中のもの
+        let mut tree = String::new();
+        let mut need: Vec<String> = Vec::new();
+        let mut parts: HashMap<u32, Vec<u8>> = HashMap::new();
+        let mut got = 0usize;
+        while let Some(m) = srv.recv() {
+            match m {
+                Msg::Text(t) => match decode::<ClientMsg>(&t).unwrap() {
+                    Some(ClientMsg::Hello { v, .. }) => srv.text(&encode(&ServerMsg::Hello { v, server: "fake/0".into() })),
+                    Some(ClientMsg::Manifest { tree: t, files, .. }) => {
+                        m2.lock().unwrap().push(files.iter().map(|f| (f.path.clone(), f.size, f.sha256.clone())).collect());
+                        need = Vec::new();
+                        for f in &files {
+                            if !need.contains(&f.sha256) {
+                                need.push(f.sha256.clone());
+                            }
+                        }
+                        (tree, got) = (t.clone(), 0);
+                        parts.clear();
+                        srv.text(&encode(&ServerMsg::Need { tree: t.clone(), blobs: need.clone() }));
+                        if need.is_empty() {
+                            srv.text(&encode(&ServerMsg::Ready { tree: t }));
+                        }
+                    }
+                    Some(ClientMsg::Job { job, kind, .. }) => failing_job(&mut srv, &job, kind),
+                    Some(ClientMsg::Cancel { job }) => srv.text(&encode(&ServerMsg::Done { job, status: Status::Cancelled, exit: 0, queue_ms: 0, run_ms: 0 })),
+                    _ => {}
+                },
+                Msg::Binary(b) => {
+                    let (h, data) = BinHeader::split(&b).expect("中身のフレーム");
+                    let buf = parts.entry(h.id).or_default();
+                    assert_eq!(buf.len() as u64, h.offset);
+                    buf.extend_from_slice(data);
+                    if h.last {
+                        b2.lock().unwrap().insert(need[h.id as usize].clone(), parts.remove(&h.id).unwrap());
+                        got += 1;
+                        if got == need.len() {
+                            srv.text(&encode(&ServerMsg::Ready { tree: tree.clone() }));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+    (port, manifests, blobs)
+}
+
+fn sha_hex(b: &[u8]) -> String {
+    Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// 打鍵が止まったときの check（`SubmitFlags::AUTO`）: 設定が idle のときだけ受ける。未保存の
+/// 中身（重ね）をディスクの代わりに送る（ディスクの中身と違う SHA-256 になる）。根の外・
+/// ディスクに無いファイルの重ねは捨てる。合計の上限。版 1 の相手もそのまま使える。
+#[test]
+fn auto_check_sends_the_overlay_instead_of_the_disk() {
+    let sb = Sandbox::new("overlay");
+    let (port, manifests, blobs) = hungry_builder();
+    let _serve = sb.serve(&pc(port), &[]);
+    sb.write("code/ov/Cargo.toml", "[package]\nname = \"ov\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+    let disk = "fn main() {}\n";
+    let main = sb.write("code/ov/src/main.rs", disk);
+    let lib = sb.write("code/ov/src/lib.rs", "pub fn f() {}\n");
+    let unsaved = "fn main() {\n    let x: i32 = \"str\";\n}\n";
+    let overlay = || {
+        vec![
+            ipc::OverlayFile { path: main.clone(), bytes: unsaved.into() },
+            // 根の外・まだディスクに無いファイルは使わない
+            ipc::OverlayFile { path: sb.home().join("code/other.rs"), bytes: b"x".to_vec() },
+            ipc::OverlayFile { path: sb.home().join("code/ov/src/new.rs"), bytes: b"y".to_vec() },
+        ]
+    };
+    let auto = ipc::SubmitFlags::AUTO;
+    let mut c = sb.client(ipc::ClientKind::Editor);
+
+    // 設定が always（既定）: すぐ「対象ではない」。受付にはつながない
+    c.submit_overlay(1, ipc::JobKind::Check, RUST, auto, &main, overlay());
+    let got = c.until_done(WAIT);
+    let (status, _, _, message) = done_of(&got);
+    assert_eq!((got.len(), status), (1, ipc::DoneStatus::NotApplicable), "{got:#?}");
+    assert!(message.contains("idle"), "{message}");
+    assert!(manifests.lock().unwrap().is_empty());
+
+    // idle にした（動いている serve が読み直す）: 重ねた中身で check する
+    std::fs::write(sb.root.join("config/zcode/remote.json"), r#"{ "check_on_save": "idle" }"#).unwrap();
+    c.submit_overlay(2, ipc::JobKind::Check, RUST, auto, &main, overlay());
+    let got = c.until_done(WAIT);
+    assert_eq!(done_of(&got).0, ipc::DoneStatus::Failed, "{got:#?}");
+    assert!(matches!(&got[0], ipc::Response::Phase { req: ipc::ReqId(2), phase: ipc::Phase::Scanned, .. }), "{got:#?}");
+    {
+        let m = manifests.lock().unwrap();
+        let files = m.last().unwrap();
+        let entry = |p: &str| files.iter().find(|f| f.0 == p).cloned().unwrap_or_else(|| panic!("{p} が無い: {files:?}"));
+        assert_eq!(entry("src/main.rs"), ("src/main.rs".into(), unsaved.len() as u64, sha_hex(unsaved.as_bytes())), "重ねの中身の SHA-256");
+        assert_eq!(entry("src/lib.rs").2, sha_hex(b"pub fn f() {}\n"), "重ねていないファイルはディスクのまま");
+        assert!(files.iter().all(|f| f.0 != "src/new.rs" && !f.0.contains("other")), "{files:?}");
+        assert_eq!(blobs.lock().unwrap().get(&sha_hex(unsaved.as_bytes())).map(Vec::as_slice), Some(unsaved.as_bytes()), "中身は RAM から送る");
+    }
+    // ディスクは書き換えていない
+    assert_eq!(std::fs::read_to_string(&main).unwrap(), disk);
+
+    // 保存時の check（重ね無し）は、ディスクの中身を送る（ハッシュの覚えは重ねで汚れない）
+    c.submit(3, ipc::JobKind::Check, RUST, ipc::SubmitFlags::NONE, &main);
+    assert_eq!(done_of(&c.until_done(WAIT)).0, ipc::DoneStatus::Failed);
+    {
+        let m = manifests.lock().unwrap();
+        let main_entry = m.last().unwrap().iter().find(|f| f.0 == "src/main.rs").cloned().unwrap();
+        assert_eq!((main_entry.1, main_entry.2), (disk.len() as u64, sha_hex(disk.as_bytes())));
+        assert_eq!(blobs.lock().unwrap().get(&sha_hex(disk.as_bytes())).map(Vec::as_slice), Some(disk.as_bytes()));
+    }
+
+    // 重ねの合計が上限を超えた（1 メッセージは MAX_FRAME より大きいが、依頼としては受け取れる）
+    let half = vec![b'/'; ipc::MAX_OVERLAY_BYTES / 2 + 1];
+    let big = vec![ipc::OverlayFile { path: main.clone(), bytes: half.clone() }, ipc::OverlayFile { path: lib.clone(), bytes: half }];
+    let n = manifests.lock().unwrap().len();
+    c.submit_overlay(4, ipc::JobKind::Check, RUST, auto, &main, big);
+    let got = c.until_done(WAIT);
+    assert_eq!((got.len(), done_of(&got).0), (1, ipc::DoneStatus::Limit), "{got:#?}");
+    assert_eq!(manifests.lock().unwrap().len(), n);
+
+    // CLI の依頼に AUTO は付けられない（zcode の check だけ）
+    let mut cli = sb.client(ipc::ClientKind::Cli);
+    cli.submit_overlay(5, ipc::JobKind::Check, RUST, auto, &main, overlay());
+    assert_eq!(done_of(&cli.until_done(WAIT)).0, ipc::DoneStatus::NotApplicable);
+
+    // 版 1 の相手（重ねを知らない zcode）: Hello は相手の版で返し、版 1 の Submit を読む
+    let mut raw = std::os::unix::net::UnixStream::connect(sb.socket()).unwrap();
+    raw.set_read_timeout(Some(WAIT)).unwrap();
+    let mut out = Vec::new();
+    ipc::encode_request(&ipc::Request::Hello { version: 1, client: ipc::ClientKind::Editor }, &mut out);
+    let mut v1 = Vec::new();
+    ipc::encode_request(&ipc::Request::Submit { req: ipc::ReqId(6), kind: ipc::JobKind::Check, lang: RUST, flags: ipc::SubmitFlags::NONE, file: main.clone(), overlay: Vec::new() }, &mut v1);
+    // 版 1 の形: 重ねの件数（末尾の 2 バイト）が無い
+    v1.truncate(v1.len() - 2);
+    let len = (v1.len() - 4) as u32;
+    v1[..4].copy_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&v1);
+    std::io::Write::write_all(&mut raw, &out).unwrap();
+    let mut r = ipc::FrameReader::new();
+    let mut buf = [0u8; 4096];
+    let mut seen = Vec::new();
+    while !matches!(seen.last(), Some(ipc::Response::Done { req: ipc::ReqId(6), .. })) {
+        if let Some(f) = r.next_frame().unwrap() {
+            seen.push(ipc::decode_response(f).unwrap());
+            continue;
+        }
+        let n = std::io::Read::read(&mut raw, &mut buf).unwrap();
+        assert!(n > 0, "切られた: {seen:#?}");
+        r.push(&buf[..n]);
+    }
+    assert_eq!(seen[0], ipc::Response::Hello { version: 1 });
+    assert!(matches!(seen.last(), Some(ipc::Response::Done { status: ipc::DoneStatus::Failed, .. })), "{seen:#?}");
 }

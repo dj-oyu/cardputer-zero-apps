@@ -500,6 +500,57 @@ fn hex(d: &[u8]) -> String {
     s
 }
 
+/// 未保存の中身（zcode の重ね。`SubmitFlags::AUTO` の check）。根からの相対パスと中身。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Overlaid {
+    pub rel: String,
+    /// 中身の SHA-256（16 進）。
+    pub sha256: String,
+    pub bytes: Arc<[u8]>,
+}
+
+/// 重ね（絶対パスと中身）を根からの相対に直す。根の外のもの・フォルダが無いもの・送れない
+/// 名前のものは捨てる（根はフォルダを `canonicalize` して比べる）。
+pub fn resolve_overlay(project: &Project, files: Vec<(PathBuf, Vec<u8>)>) -> Vec<Overlaid> {
+    let mut out = Vec::with_capacity(files.len());
+    for (path, bytes) in files {
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else { continue };
+        let Ok(dir) = fs::canonicalize(parent) else { continue };
+        let abs = dir.join(name);
+        let Some(rel) = abs.strip_prefix(&project.root).ok().and_then(|r| r.to_str()) else { continue };
+        if !zc_wire::tree::is_canonical_path(rel) {
+            continue;
+        }
+        let sha256 = hex(&Sha256::digest(&bytes));
+        out.push(Overlaid { rel: rel.to_owned(), sha256, bytes: bytes.into() });
+    }
+    out
+}
+
+/// 目録のうち、重ねと同じパスのファイルを、重ねの大きさと SHA-256 に差し替える。目録に無い
+/// ファイル（除外したもの・まだディスクに無いもの）は足さない。覚え（[`HashCache`]）には
+/// 触らない（ディスクの中身の覚えのまま）。
+pub fn apply_overlay(manifest: Arc<Manifest>, overlay: &[Overlaid]) -> Result<Arc<Manifest>, ScanError> {
+    if !manifest.files().iter().any(|f| overlay.iter().any(|o| o.rel == f.path)) {
+        return Ok(manifest);
+    }
+    let mut files = manifest.files().to_vec();
+    for f in &mut files {
+        if let Some(o) = overlay.iter().find(|o| o.rel == f.path) {
+            if o.bytes.len() as u64 > MAX_FILE_BYTES {
+                return Err(too_large_file(&o.rel));
+            }
+            f.size = o.bytes.len() as u64;
+            f.sha256 = o.sha256.clone();
+        }
+    }
+    let m = Manifest::new(files).map_err(|e| match e {
+        zc_wire::tree::ManifestError::TooLarge(what) => ScanError::TooLarge(format!("目録が上限を超えている: {what}")),
+        e => ScanError::Io(format!("目録にできない: {e}")),
+    })?;
+    Ok(Arc::new(m))
+}
+
 /// 送る直前に、ファイルが目録のとおりか確かめながら読む口。`chunk` に
 /// [`zc_wire::limits::CHUNK_BYTES`] ずつ渡し、最後に SHA-256 が合えば `Ok(true)`。
 /// 走査のあとで書き換わっていたら `Ok(false)`（serve は目録を作り直す）。

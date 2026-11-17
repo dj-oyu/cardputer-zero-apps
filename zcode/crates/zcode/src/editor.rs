@@ -17,13 +17,17 @@
 //!   （[`RemoteLink`]）に頼み、対象でない・届かないときは実機の構文チェックを `check`
 //!   ワーカーで走らせる。遅れて届いた結果は、タブごとの編集の記録（`ShiftLog`）で今の行へ
 //!   ずらしてから取り込む（docs/stage3-design.md §8・§9）
+//! - 打鍵が止まったときの check（`check_on_save = idle`）: `remote` のある言語で編集したら
+//!   [`AUTO_CHECK_IDLE`] のタイマーを仕掛け直すだけ（打鍵ごとの仕事はこれだけ）。鳴ったら、
+//!   未保存の文書の写しを重ねて（[`crate::remote::OverlaySource`]）ビルド係の check を頼む。
+//!   診断の基準は頼んだときの文書の版。断られた・届かないときは何も出さず、次の保存まで休む
 //! - カーソルの点滅は、最後の打鍵から約 10 秒で止める（点いたまま。待機中の CPU を 0% に）
 
 use crate::app::{AppEvent, LoopCx, Screen, TimerId};
 use crate::commands;
 use crate::doc::{DocBackend, TextDoc};
 use crate::intel::{self, CheckFail};
-use crate::remote::{RemoteClient, RemoteEvent, RemoteJob, RemoteReq};
+use crate::remote::{OverlaySource, RemoteClient, RemoteEvent, RemoteJob, RemoteReq};
 use crate::save::{SaveOk, SaveRequest, Saver, StoreSaver};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -110,6 +114,11 @@ const RUN_TICK: Duration = Duration::from_secs(1);
 /// 控えておく「ジョブ → 保存済みの版」の数の上限（終わったジョブの分は消す。これは、
 /// 終わりの知らせが届かなかったときの歯止め）。
 const MAX_BINDINGS: usize = 16;
+/// 最後の編集から、打鍵が止まったときの check を頼むまでの時間。
+pub const AUTO_CHECK_IDLE: Duration = Duration::from_millis(1200);
+/// ほかの相手（F5 の `zc-remote run` など）のジョブを、最後に知らせを見てから「動いている」と
+/// みなす上限（serve が死んで終わりの知らせが届かなかったときの歯止め）。
+const FOREIGN_JOB_MAX_US: u64 = 10 * 60 * 1_000_000;
 
 /// ビルド係（`zc-remote` の相手をする専用スレッド）への口。画面は依頼を渡すだけで待たない。
 /// 結果は [`AppEvent::Remote`] で届く。既定は本物の [`RemoteClient`]（最初の依頼で作る）。
@@ -117,6 +126,11 @@ const MAX_BINDINGS: usize = 16;
 pub trait RemoteLink {
     /// ジョブを頼む。最後に必ず [`RemoteEvent::Done`] が 1 回届く。
     fn submit(&mut self, job: RemoteJob, cx: &mut LoopCx<'_>) -> RemoteReq;
+    /// 打鍵が止まったときの check を頼んでよいか（ビルド係を使わない人に、スレッドや serve を
+    /// 作らないため）。設定が `idle` かどうかは serve が決める（違えば断られる）。
+    fn auto_check_ready(&mut self) -> bool {
+        true
+    }
 }
 
 /// 本物の専用スレッド。最初の依頼まで作らない（ビルド係を使わない人には、スレッドも
@@ -127,6 +141,10 @@ struct LazyRemote(Option<RemoteClient>);
 impl RemoteLink for LazyRemote {
     fn submit(&mut self, job: RemoteJob, cx: &mut LoopCx<'_>) -> RemoteReq {
         self.0.get_or_insert_with(|| RemoteClient::new(cx.results.clone(), None)).submit(job)
+    }
+    fn auto_check_ready(&mut self) -> bool {
+        // 保存時の check でもう作ってあるか、zc-remote の設定がある人だけ
+        self.0.is_some() || crate::remote::remote_config_exists()
     }
 }
 
@@ -140,6 +158,10 @@ struct MyJob {
     started_us: u64,
     /// 試験の結果（`RemoteEvent::Tests`）を受け取った。
     got_report: bool,
+    /// 打鍵が止まったときの check（未保存の中身を重ねた）。何があっても知らせない。
+    auto: bool,
+    /// 打鍵が止まったときの check で、頼んだときの文書の版（診断の基準。保存済みの版の代わり）。
+    bases: Vec<(DocId, Version)>,
 }
 
 /// ジョブの走査が済んだ時点の、開いていたタブの「保存済みの版」（§9.3）。ビルド係の診断の
@@ -167,6 +189,8 @@ struct Progress {
 #[derive(Default)]
 struct Notices {
     unavailable: bool,
+    /// 打鍵が止まったときの check の間に分かった「使えない」理由（その場では出さず、次の保存で出す）。
+    unavailable_later: Option<String>,
     auth: bool,
     clock: bool,
     error: bool,
@@ -287,6 +311,8 @@ struct DocTab {
     shift: ShiftLog,
     /// ディスクの中身と同じだった最後の版（開いた・保存した版）。
     saved: Option<Version>,
+    /// 最後にビルド係の check を頼んだ版（保存時・打鍵が止まったとき。同じ版を重ねて頼まない）。
+    checked: Option<Version>,
     /// Markdown のライブプレビュー（.md のときだけ。モック 10・11）。
     md: Option<MdState>,
 }
@@ -352,6 +378,7 @@ impl DocTab {
             diags: Vec::new(),
             shift: ShiftLog::new(),
             saved,
+            checked: None,
             md: None,
         };
         t.detect_language();
@@ -599,6 +626,11 @@ pub struct EditorScreen {
     /// プロジェクトの根ごとの、最後に取り込んだビルド係の結果の通し番号（古い結果を捨てる）。
     applied: Vec<(PathBuf, u64)>,
     notices: Notices,
+    /// 打鍵が止まったときの check を、次の保存まで休む（断られた・届かなかった）。
+    auto_paused: bool,
+    /// ほかの相手（F5 の `zc-remote run`・CLI）の動いているジョブ（tag・根・最初に見た時刻）。
+    /// 同じプロジェクトの中では、打鍵が止まったときの check を頼まない。
+    foreign: Vec<(JobTag, PathBuf, u64)>,
     /// ステータスバーの右に出す進み具合。
     progress: Option<Progress>,
     /// 試験の結果の一覧（開いているあいだは本文の全体を覆う。モック 15）。
@@ -674,6 +706,8 @@ impl EditorScreen {
             bind_seq: 0,
             applied: Vec::new(),
             notices: Notices::default(),
+            auto_paused: false,
+            foreign: Vec::new(),
             progress: None,
             tests: None,
             test_unseen: None,
@@ -973,6 +1007,7 @@ impl EditorScreen {
     /// 打鍵を順に処理する。SKK の辞書引きの結果を待っている間に来た打鍵は取っておき、
     /// 結果が届いてから流す（「Space の直後の a」を正しく扱うため。zc-skk の使い方 3）。
     fn feed_keys(&mut self, keys: Vec<KeyEvent>, cx: &mut LoopCx<'_>) {
+        let before = self.tabs.get(self.active).map(|t| (t.id, t.doc.version()));
         let mut it = keys.into_iter();
         for k in it.by_ref() {
             if self.skk_waiting > 0 {
@@ -982,6 +1017,65 @@ impl EditorScreen {
             self.handle_key(&k, cx);
         }
         self.skk_held.extend(it);
+        self.arm_auto_check(before, cx);
+    }
+
+    /// 編集したら、打鍵が止まったときの check のタイマーを仕掛け直す（打鍵ごとの仕事はこれだけ。
+    /// 版を比べて、タイマーを置き直す）。
+    fn arm_auto_check(&mut self, before: Option<(DocId, Version)>, cx: &mut LoopCx<'_>) {
+        if self.auto_paused {
+            return;
+        }
+        let Some(t) = self.tabs.get(self.active) else { return };
+        if before == Some((t.id, t.doc.version())) || t.loading || t.path.is_none() || t.remote_lang().is_none() {
+            return;
+        }
+        cx.timers.set_after(TimerId::AutoCheck, AUTO_CHECK_IDLE);
+    }
+
+    /// 打鍵が止まった: 今のタブの未保存の中身でビルド係の check を頼む。前に頼んだ版のまま・
+    /// 同じプロジェクトでビルド・試験が動いている・休んでいる、なら頼まない（動いているなら
+    /// 少し後にもう一度見る）。
+    fn auto_check(&mut self, cx: &mut LoopCx<'_>) {
+        if self.auto_paused {
+            return;
+        }
+        let Some(t) = self.tabs.get(self.active) else { return };
+        if t.loading {
+            return;
+        }
+        let (Some(path), Some(lang)) = (t.path.clone(), t.remote_lang()) else { return };
+        let (doc, version) = (t.id, t.doc.version());
+        if t.checked == Some(version) {
+            return;
+        }
+        let now = now_us();
+        self.foreign.retain(|(_, _, at)| now.saturating_sub(*at) < FOREIGN_JOB_MAX_US);
+        let busy = self.jobs.iter().any(|j| j.kind == JobKind::Test) || self.foreign.iter().any(|(_, root, _)| path.starts_with(root));
+        if busy {
+            cx.timers.set_after(TimerId::AutoCheck, AUTO_CHECK_IDLE);
+            return;
+        }
+        if !self.remote.auto_check_ready() {
+            return;
+        }
+        // 重ねるのは未保存の文書（写しを取るだけ。バイト列にするのは専用スレッド）。基準の版は
+        // 全部のタブの今の版（保存済みのタブは、ディスクの中身 = 今の中身）
+        let mut overlay = Vec::new();
+        let mut bases = Vec::new();
+        for t in self.tabs.iter().filter(|t| !t.loading) {
+            let Some(p) = &t.path else { continue };
+            if t.doc.is_modified() {
+                overlay.push(OverlaySource::new(p.clone(), t.doc.snapshot_lines()));
+            }
+            bases.push((t.id, t.doc.version()));
+        }
+        let job = RemoteJob { kind: JobKind::Check, lang, flags: SubmitFlags::AUTO, file: path, overlay };
+        let req = self.remote.submit(job, cx);
+        if let Some(t) = self.tabs.iter_mut().find(|t| t.id == doc) {
+            t.checked = Some(version);
+        }
+        self.jobs.push(MyJob { req, kind: JobKind::Check, doc, version, started_us: now, got_report: false, auto: true, bases });
     }
 
     fn handle_key(&mut self, ev: &KeyEvent, cx: &mut LoopCx<'_>) {
@@ -1812,13 +1906,16 @@ impl EditorScreen {
     /// 無ければ実機の構文チェック。ビルド係が「対象ではない・届かない」と返したら、
     /// そのとき実機に回す（[`EditorScreen::check_done`]）。
     fn check_after_save(&mut self, doc: DocId, cx: &mut LoopCx<'_>) {
-        let Some(t) = self.tabs.iter().find(|t| t.id == doc) else { return };
+        let Some(t) = self.tabs.iter_mut().find(|t| t.id == doc) else { return };
         let (Some(path), Some(version)) = (t.path.clone(), t.saved) else { return };
         match t.remote_lang() {
             Some(lang) => {
+                t.checked = Some(version);
+                // 保存したら、休んでいた打鍵が止まったときの check もまた試す（設定を直したかもしれない）
+                self.auto_paused = false;
                 // 同じプロジェクトの前の check は serve が取り消す（その終わりの知らせで控えから消える）
-                let req = self.remote.submit(RemoteJob { kind: JobKind::Check, lang, flags: SubmitFlags::NONE, file: path }, cx);
-                self.jobs.push(MyJob { req, kind: JobKind::Check, doc, version, started_us: now_us(), got_report: false });
+                let req = self.remote.submit(RemoteJob::new(JobKind::Check, lang, SubmitFlags::NONE, path), cx);
+                self.jobs.push(MyJob { req, kind: JobKind::Check, doc, version, started_us: now_us(), got_report: false, auto: false, bases: Vec::new() });
             }
             None => self.start_local_check(doc, cx),
         }
@@ -1869,17 +1966,34 @@ impl EditorScreen {
         match ev {
             // zc-remote が入っていない・版が違う。1 回だけ、静かに知らせる。このあとの依頼は
             // 「対象ではない」で返るので、実機の構文チェックに回る
+            // 打鍵が止まったときの check しか待っていなければ、その場では出さない（次の保存で出す）
             RemoteEvent::Unavailable(why) => {
-                if !std::mem::replace(&mut self.notices.unavailable, true) {
+                if !self.jobs.iter().any(|j| !j.auto) {
+                    self.notices.unavailable_later = Some(why);
+                } else if !std::mem::replace(&mut self.notices.unavailable, true) {
                     self.say(format!("ビルド係を使えない: {why}"), false);
                 }
             }
             RemoteEvent::Phase { req, tag, root, phase, done, total } => {
-                if phase == Phase::Scanned {
-                    self.bind(tag, root);
+                let mine = req.and_then(|r| self.jobs.iter().position(|j| j.req == r));
+                if req.is_none() && tag != JobTag(0) {
+                    // ほかの相手のジョブ（F5 のビルドなど）が動いている（見た時刻は、知らせのたびに更新）
+                    match self.foreign.iter_mut().find(|(t, _, _)| *t == tag) {
+                        Some(f) => (f.1, f.2) = (root.clone(), now_us()),
+                        None => {
+                            if self.foreign.len() >= MAX_BINDINGS {
+                                self.foreign.remove(0);
+                            }
+                            self.foreign.push((tag, root.clone(), now_us()));
+                        }
+                    }
                 }
-                // 進み具合を出すのは自分の依頼だけ（F5 のビルドは端末に流れている）
-                if let Some(job) = req.and_then(|r| self.jobs.iter().find(|j| j.req == r)) {
+                if phase == Phase::Scanned {
+                    self.bind(tag, root, mine);
+                }
+                // 進み具合を出すのは自分の依頼だけ（F5 のビルドは端末に流れている）。打鍵が止まった
+                // ときの check は出さない（ステータスバーを打鍵のたびに変えない）
+                if let Some(job) = mine.map(|i| &self.jobs[i]).filter(|j| !j.auto) {
                     self.progress = Some(Progress { req: job.req, kind: job.kind, phase, done, total, started_us: job.started_us });
                     self.status_due = true;
                     if cx.timers.deadline(TimerId::Tick).is_none() {
@@ -1887,7 +2001,7 @@ impl EditorScreen {
                     }
                 }
             }
-            RemoteEvent::Diagnostics { tag, root, complete, files, .. } => self.remote_diagnostics(tag, &root, complete, files),
+            RemoteEvent::Diagnostics { req, tag, root, complete, files } => self.remote_diagnostics(req, tag, &root, complete, files),
             RemoteEvent::Tests { req, root, report } => self.tests_arrived(req, root, report),
             RemoteEvent::Done { req, tag, status, message, .. } => self.remote_done(req, tag, status, &message, cx),
             // ログは頼んでいない。成果物は F5（端末の zc-remote run）が自分で受け取る
@@ -1897,10 +2011,13 @@ impl EditorScreen {
 
     /// ジョブの走査が済んだ: `root` の下の開いているタブの「保存済みの版」を控える（§9.3）。
     /// このジョブの診断の位置が指すのは、その版の中身。
-    fn bind(&mut self, tag: JobTag, root: PathBuf) {
+    /// `mine` が打鍵が止まったときの check なら、基準は頼んだときの文書の版（重ねた中身の版）。
+    fn bind(&mut self, tag: JobTag, root: PathBuf, mine: Option<usize>) {
+        let overrides: &[(DocId, Version)] = mine.map_or(&[], |i| &self.jobs[i].bases);
         let mut bases = Vec::new();
         for t in self.tabs.iter().filter(|t| !t.loading) {
-            if let (Some(p), Some(v)) = (t.path.as_deref(), t.saved) {
+            let base = overrides.iter().find(|(d, _)| *d == t.id).map(|(_, v)| *v).or(t.saved);
+            if let (Some(p), Some(v)) = (t.path.as_deref(), base) {
                 if p.starts_with(&root) {
                     bases.push((t.id, v));
                 }
@@ -1923,7 +2040,10 @@ impl EditorScreen {
     /// - 開いているファイルの分は、控えた「保存済みの版」から今までの編集のぶんをずらす
     /// - `complete` のときは、**この根の下で**今回出てこなかったファイルのビルド係の分を消す
     ///   （置き場は作業フォルダ全体で 1 つ。ほかのプロジェクトの分を消さない）
-    fn remote_diagnostics(&mut self, tag: JobTag, root: &Path, complete: bool, files: Vec<FileDiags>) {
+    /// - 打鍵が止まったときの check の結果は、ステータスバーに知らせを出さない（波線と件数だけ。
+    ///   カーソル行のメッセージはふだんどおり右に出る）
+    fn remote_diagnostics(&mut self, req: Option<RemoteReq>, tag: JobTag, root: &Path, complete: bool, files: Vec<FileDiags>) {
+        let quiet = req.is_some_and(|r| self.jobs.iter().any(|j| j.req == r && j.auto));
         let bound = self.bindings.iter().position(|b| b.tag == tag && b.root == root);
         // 走査の知らせを受けていないジョブ（途中からつないだ）は、いちばん新しい扱い
         let seq = match bound {
@@ -1979,7 +2099,9 @@ impl EditorScreen {
             }
         }
         // 今のタブの最初の診断を右に出す（モック 13）。今のタブに関係なければ黙っている
-        if let Some(m) = loose {
+        if quiet {
+            self.status_due = true;
+        } else if let Some(m) = loose {
             self.say_right(m, true);
         } else if active_key.is_some_and(|k| changed.contains(&k)) {
             let first = self.tabs.get(self.active).and_then(|t| t.diags.first()).map(|d| format!("{} 行: {}", d.line + 1, d.message));
@@ -1996,6 +2118,7 @@ impl EditorScreen {
         // つなげなかったときの終わりの知らせは tag が 0（どのジョブでもない）。控えは消さない
         if tag != JobTag(0) {
             self.bindings.retain(|b| b.tag != tag);
+            self.foreign.retain(|(t, _, _)| *t != tag);
         }
         let Some(i) = req.and_then(|r| self.jobs.iter().position(|j| j.req == r)) else { return };
         let job = self.jobs.remove(i);
@@ -2016,8 +2139,19 @@ impl EditorScreen {
         }
     }
 
-    /// 保存時の check が終わった（§8.3・§11.1）。
+    /// 保存時の check が終わった（§8.3・§11.1）。打鍵が止まったときの check は何も知らせず、
+    /// 実機の構文チェックにも回さない。断られた・届かないなら、次の保存まで休む。
     fn check_done(&mut self, job: &MyJob, status: DoneStatus, message: &str, cx: &mut LoopCx<'_>) {
+        if job.auto && !matches!(status, DoneStatus::Ok | DoneStatus::Failed | DoneStatus::Cancelled) {
+            self.auto_paused = true;
+            return;
+        }
+        // 打鍵が止まったときの check の間に分かった「使えない」は、保存時の check の終わりに出す
+        if let Some(why) = self.notices.unavailable_later.take_if(|_| !job.auto) {
+            if !std::mem::replace(&mut self.notices.unavailable, true) {
+                self.say(format!("ビルド係を使えない: {why}"), false);
+            }
+        }
         match status {
             DoneStatus::Ok | DoneStatus::Failed => {
                 // この保存の検査はビルド係がした。前に実機の構文チェックに回したときの結果は
@@ -2087,9 +2221,9 @@ impl EditorScreen {
         let Some(tab) = self.tabs.get(self.active) else { return };
         let (Some(path), Some(lang)) = (tab.path.clone(), tab.remote_lang()) else { return };
         let (doc, version) = (tab.id, tab.saved.unwrap_or_else(|| tab.doc.version()));
-        let req = self.remote.submit(RemoteJob { kind: JobKind::Test, lang, flags: SubmitFlags::NONE, file: path }, cx);
+        let req = self.remote.submit(RemoteJob::new(JobKind::Test, lang, SubmitFlags::NONE, path), cx);
         let started_us = now_us();
-        self.jobs.push(MyJob { req, kind: JobKind::Test, doc, version, started_us, got_report: false });
+        self.jobs.push(MyJob { req, kind: JobKind::Test, doc, version, started_us, got_report: false, auto: false, bases: Vec::new() });
         self.test_unseen = None;
         self.progress = Some(Progress { req, kind: JobKind::Test, phase: Phase::Connecting, done: 0, total: 0, started_us });
         self.status_due = true;
@@ -2616,6 +2750,7 @@ impl Screen for EditorScreen {
         match id {
             TimerId::StatusDelay => self.status_due = true,
             TimerId::SkkFlush => self.flush_skk(cx),
+            TimerId::AutoCheck => self.auto_check(cx),
             TimerId::Tick => {
                 // 実行中の経過時間と、ビルド係の「実行中 n 秒」
                 if self.term.as_ref().is_some_and(|t| t.running.is_some()) || self.progress.is_some() {
