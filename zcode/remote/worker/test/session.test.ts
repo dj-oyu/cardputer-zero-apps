@@ -1129,3 +1129,122 @@ describe("費用の守り", () => {
     expect(w.meter.isOpen()).toBe(false);
   });
 });
+
+// ── LSP（docs/lsp-design.md） ──
+
+describe("LSP", () => {
+  const lspMsg = (id: number): string => JSON.stringify({ type: "lsp", id, project: "p", tree: "t", query: "hover", path: "src/main.rs", line: 1, col: 2 });
+  const warmMsg = JSON.stringify({ type: "lsp_warm", project: "p", tree: "t", path: "src/main.rs" });
+
+  it("lsp / lsp_warm と答えは中身を変えずに中継し、1 日のジョブ数には数えない", async () => {
+    const w = world(0, true);
+    const { dev, up } = await attachDevice(w);
+    await w.core.message(dev, warmMsg);
+    await w.core.message(dev, lspMsg(7));
+    expect(up.sent).toEqual([warmMsg, lspMsg(7)]);
+    const answer = '{"type":"lsp_result","cpu_ms":0,"id":7,"text":"fn main()"}';
+    up.emit(answer);
+    expect(dev.sent).toEqual([answer]);
+    expect(w.ledger.running()).toBe(0);
+  });
+
+  it("LSP の問い合わせも動きとして keep-warm を数え直す", async () => {
+    const w = world(400, true);
+    const { dev } = await attachDevice(w);
+    const t0 = w.clock.t;
+    w.clock.t = t0 + 500_000;
+    await w.core.message(dev, lspMsg(1));
+    w.clock.t = t0 + 700_000;
+    w.clock.alarm = null;
+    await w.core.alarm();
+    expect(w.builder.stops).toBe(0);
+    w.clock.t = t0 + 1_100_000;
+    w.clock.alarm = null;
+    await w.core.alarm();
+    expect(w.builder.stops).toBe(1);
+  });
+
+  it("受付の cpu_ms（rust-analyzer の CPU の通算）の増えた分を CPU として数える。/v1/status からも", async () => {
+    const w = world(400, true);
+    const { dev, up } = await attachDevice(w);
+    await w.core.message(dev, hello);
+    const before = w.meter.usage(w.clock.t).vcpuS;
+    up.emit('{"type":"lsp_state","cpu_ms":4000,"project":"p","state":"ready"}');
+    expect(w.meter.usage(w.clock.t).vcpuS - before).toBeCloseTo(4, 6);
+    // 同じ値・小さい値の行き違いでは増やさない（通算なので差だけ）
+    up.emit('{"type":"lsp_result","cpu_ms":4000,"id":1}');
+    expect(w.meter.usage(w.clock.t).vcpuS - before).toBeCloseTo(4, 6);
+    up.emit('{"type":"lsp_result","cpu_ms":6500,"id":2,"text":"x"}');
+    expect(w.meter.usage(w.clock.t).vcpuS - before).toBeCloseTo(6.5, 6);
+    // alarm の /v1/status（ジョブが無いので、メモリとディスクだけが時間で増える）
+    w.builder.statusValue = { running: 0, queued: 0, jobs: [], lspCpuMs: 9500 };
+    w.clock.t += ALARM_INTERVAL_MS;
+    w.clock.alarm = null;
+    await w.core.alarm();
+    expect(w.meter.usage(w.clock.t).vcpuS - before).toBeCloseTo(9.5, 6);
+    // 中身の中の "cpu_ms" は読まない（頭だけ）
+    up.emit('{"type":"log","job":"j","offset":0,"text":"{\\"type\\":\\"lsp_result\\",\\"cpu_ms\\":99999"}');
+    expect(w.meter.usage(w.clock.t).vcpuS - before).toBeCloseTo(9.5, 6);
+  });
+
+  it("コンテナを起こし直したら、通算は 0 から数え直す", async () => {
+    const w = world(400, true);
+    const { up } = await attachDevice(w);
+    w.meter.open(w.clock.t, DEFAULT_INSTANCE);
+    up.emit('{"type":"lsp_state","cpu_ms":3000,"project":"p","state":"ready"}');
+    w.meter.close(w.clock.t);
+    const mid = w.meter.usage(w.clock.t).vcpuS;
+    w.meter.open(w.clock.t, DEFAULT_INSTANCE);
+    up.emit('{"type":"lsp_state","cpu_ms":1000,"project":"p","state":"loading"}');
+    expect(w.meter.usage(w.clock.t).vcpuS - mid).toBeCloseTo(1, 6);
+  });
+
+  it("上限に達していたら lsp は中継せず lsp_result{limit}、lsp_warm は lsp_state{failed, limit}。接続は続く", async () => {
+    const acc = new FakeAccounts();
+    const w = world(400, true, { accounts: acc });
+    const { dev, up } = await attachDevice(w);
+    acc.view = overBudget(w.clock.t);
+    w.clock.t += ALARM_INTERVAL_MS;
+    w.clock.alarm = null;
+    await w.core.alarm();
+    expect(w.core.guard().exhausted).toBe(true);
+    await w.core.message(dev, lspMsg(9));
+    await w.core.message(dev, warmMsg);
+    expect(up.sent).toEqual([]);
+    expect(dev.json()).toEqual([
+      { type: "lsp_result", cpu_ms: 0, id: 9, error: "limit", message: expect.stringContaining("上限"), retry_after_s: secondsToNextMonth(w.clock.t) },
+      { type: "lsp_state", cpu_ms: 0, project: "p", state: "failed", message: expect.stringContaining("上限"), error: "limit" },
+    ]);
+    expect(dev.closed).toBeNull();
+  });
+
+  it("上限に達していたら、冷えたコンテナを LSP のために起こさない", async () => {
+    const acc = new FakeAccounts();
+    const w = world(400, false, { accounts: acc });
+    acc.view = overBudget(w.clock.t);
+    // 前に聞いた値を手元に持たせる（判断は手元の値で）
+    w.meter.setOthers(acc.view);
+    const dev = new FakeDevice();
+    w.core.connect(dev, "cz-1");
+    await w.core.message(dev, hello);
+    await w.core.message(dev, lspMsg(3));
+    await settle();
+    expect(w.builder.starts).toBe(0);
+    expect(dev.json().at(-1)).toMatchObject({ type: "lsp_result", id: 3, error: "limit" });
+    expect(dev.closed).toBeNull();
+  });
+
+  it("上限のときの lsp の id がおかしければ約束の間違い", async () => {
+    const acc = new FakeAccounts();
+    const w = world(400, true, { accounts: acc });
+    const { dev } = await attachDevice(w);
+    w.meter.setOthers(overBudget(w.clock.t));
+    await w.core.message(dev, JSON.stringify({ type: "lsp", id: -1, project: "p", tree: "t", query: "hover" }));
+    expect(dev.closed?.code).toBe(CLOSE.protocol);
+  });
+
+  it("parseStatus は lsp_cpu_ms を読む（無ければ無いまま）", () => {
+    expect(parseStatus({ running: 0, queued: 0, jobs: [], lsp_cpu_ms: 1234 })).toEqual({ running: 0, queued: 0, jobs: [], lspCpuMs: 1234 });
+    expect(parseStatus({ running: 0, queued: 0, jobs: [], lsp_cpu_ms: -1 })?.lspCpuMs).toBeUndefined();
+  });
+});

@@ -28,6 +28,9 @@
 //     を上限の見積もりとして数える（ビルドは CPU を使い切ることが多いので、大きく外れない）。
 //     ジョブの有無は 30 秒ごとの alarm と受付の done で見るので、区間の途中で始まった・終わった
 //     ジョブは区間の全部を「走っていた」として数える（多めに数える側）
+//   - CPU（LSP）: rust-analyzer はジョブの外で動く（索引・問い合わせ）。受付が rust-analyzer の CPU の
+//     通算（ms）を lsp_result / lsp_state と /v1/status に載せるので、増えた分をそのまま足す
+//     （addLspCpu）。ジョブの間の分は「ジョブの時間 × vCPU」と重なるが、多めに数える側なので足す
 //
 // 止まった時刻が分からないとき（DO が作り直された・眠っていた）は、最後に記録した時刻
 // （last・最後の動き）+ KEEP_WARM_S + 60 秒 と「今」の早い方で閉じる。コンテナは最後の動きから
@@ -312,12 +315,14 @@ interface MeterState {
   spec: InstanceSpec | null;
   /** ジョブが走っている（CPU を数える）。 */
   busy: boolean;
+  /** 今のコンテナで、受付から聞いた rust-analyzer の CPU の通算（ms）。コンテナを起こすと 0。 */
+  lspCpuMs: number;
   label: string;
   /** 台帳から聞いた、ほかの実機の分。 */
   others: UsageView | null;
 }
 
-const INITIAL: MeterState = { open: false, sinceMs: 0, lastMs: 0, activeMs: 0, spec: null, busy: false, label: "", others: null };
+const INITIAL: MeterState = { open: false, sinceMs: 0, lastMs: 0, activeMs: 0, spec: null, busy: false, lspCpuMs: 0, label: "", others: null };
 
 /**
  * コンテナが動いている区間を数え、暦月ごとの合計を SQLite に持つ。DO の再起動をまたぐ
@@ -372,7 +377,19 @@ export class Meter {
       this.accrue(now);
       return;
     }
-    this.st = { ...this.st, open: true, sinceMs: now, lastMs: now, activeMs: now, spec, busy: false };
+    this.st = { ...this.st, open: true, sinceMs: now, lastMs: now, activeMs: now, spec, busy: false, lspCpuMs: 0 };
+    this.save();
+  }
+
+  /**
+   * 受付から聞いた rust-analyzer の CPU の通算（ms）。前に聞いた値から増えた分を、今月の CPU に足す。
+   * 減っていたら（受付が起動し直した）、その値をそのまま 0 からの分として足す。止まっていれば数えない。
+   */
+  addLspCpu(now: number, totalMs: number): void {
+    if (!this.st.open || !Number.isFinite(totalMs) || totalMs < 0) return;
+    const delta = totalMs >= this.st.lspCpuMs ? totalMs - this.st.lspCpuMs : totalMs;
+    this.st.lspCpuMs = totalMs;
+    if (delta > 0) this.add(monthOf(now), { memGibS: 0, vcpuS: delta / 1000, diskGbS: 0 });
     this.save();
   }
 
@@ -561,7 +578,7 @@ export class BudgetBook {
       included: { memory_gib_h: INCLUDED.memGibS / 3600, vcpu_min: INCLUDED.vcpuS / 60, disk_gb_h: INCLUDED.diskGbS / 3600 },
       overage_usd: { memory: round(o.memoryUsd, 4), cpu: round(o.cpuUsd, 4), disk: round(o.diskUsd, 4), total: round(o.totalUsd, 4) },
       devices,
-      note: "CPU は「ジョブが走っていた時間 × vCPU」の見積もり（実際の使用量はこれ以下）。料金表からの計算で、請求額ではない",
+      note: "CPU は「ジョブが走っていた時間 × vCPU」と rust-analyzer の CPU の合計の見積もり（実際の使用量はこれ以下）。料金表からの計算で、請求額ではない",
     };
   }
 }
