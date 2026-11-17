@@ -247,6 +247,47 @@ time.sleep(30)
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// 同梱のコードのフォント（Cozette + PixelMplus12、`tools/fetch-fonts.sh` で `out/fonts/` に置く）の
+/// 場所。`ZCODE_FONT_DIR` で変えられる。無ければ `None`（`ZCODE_REQUIRE_FONTS=1` なら落とす。CI）。
+fn bundled_fonts() -> Option<zc_font::FontConfig> {
+    let dir = std::env::var_os("ZCODE_FONT_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../out/fonts"));
+    let mut cfg = zc_font::FontConfig::default();
+    let found = cfg.available() && zcode::fonts::apply(&mut cfg, &dir).is_some() && cfg.mono_cjk.is_some();
+    if !found {
+        assert!(std::env::var_os("ZCODE_REQUIRE_FONTS").is_none(), "同梱のフォントが {} に無い（tools/fetch-fonts.sh）", dir.display());
+        eprintln!("同梱のフォントが無いので飛ばす");
+        return None;
+    }
+    Some(cfg)
+}
+
+/// 同梱のフォントで F5 の実行中（コードと端末が Cozette 6×13、日本語は PixelMplus12、端末は 5 行）。
+#[test]
+fn codefont_running_screen() {
+    if !has_tools() {
+        return;
+    }
+    let Some(fonts) = bundled_fonts() else { return };
+    let dir = fixed_dir("zcode-golden-codefont");
+    fs::write(dir.join("main.py"), "import time  # 0.5 秒ごとに点滅（O0 l1I|）
+for i in range(4):
+    print('点灯' if i % 2 == 0 else 'off', i + 1, flush=True)
+time.sleep(30)  # {'a': [1, 2]} != ~x ^ y
+").unwrap();
+    let mut lp = Loop::new();
+    let mut ed = open(&mut lp, &dir, "main.py");
+    ed.set_code_font(zc_ui::layout::CODE_PX, zcode::fonts::LINE_H);
+    // 端末の大きさはパネルを描いたときに決まるので、一度描いてから F5
+    zcode::render_screen(&mut ed, &fonts).unwrap();
+    lp.keys(&mut ed, &[f5()]);
+    lp.until(&mut ed, "4 行の出力", |ed| ed.terminal_text().is_some_and(|rows| rows.iter().filter(|r| r.starts_with("点灯") || r.starts_with("off")).count() == 4));
+    let canvas = zcode::render_screen(&mut ed, &fonts).unwrap();
+    if let Err(e) = zc_display::png::check_golden(&canvas, golden("codefont-run.png")) {
+        panic!("{e}");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// モック 4: 全画面・エラー終了。最後にシェルのプロンプトが出る（環境で変わる）ので正解画像には
 /// しない。`cargo test -p zcode --test terminal -- --ignored` で `out/terminal-error.png` に描く。
 #[test]

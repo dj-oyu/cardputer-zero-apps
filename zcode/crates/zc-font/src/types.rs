@@ -130,6 +130,26 @@ pub struct FontConfig {
     pub cjk_sans_family: String,
     /// ビットマップフォント（BDF、ISO10646 のもの）。あれば [`Face::Bitmap`] で使える。
     pub bdf: Option<PathBuf>,
+    /// 等幅を `code_px` の大きさのときだけビットマップフォント（BDF、ISO10646 のもの）で描く。
+    /// そのときの行の寸法はこの BDF のもの。BDF に無い字は `mono` と CJK に回る。ほかの大きさ
+    /// （タブ・ツリー・ステータスバーの小さな字）は `mono` のまま。
+    pub mono_bdf: Option<PathBuf>,
+    /// 等幅の `code_px` の大きさの中の日本語（等幅のフォントに無い字）を描くフォント。無ければ
+    /// `cjk` の `cjk_mono_family`（半角 2 つぶんの大きさ）。
+    pub mono_cjk: Option<CjkFont>,
+    /// `mono_bdf` と `mono_cjk` を使う等幅の大きさ（画素。コードの字の大きさ）。
+    pub code_px: f32,
+}
+
+/// 等幅の中の日本語を描くフォント（[`FontConfig::mono_cjk`]）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct CjkFont {
+    /// TrueType / OpenType（.ttc なら 1 番目）。
+    pub path: PathBuf,
+    /// 描く大きさ（画素）。点で描いたフォント（PixelMplus など）は、その決まった大きさにする。
+    pub px: f32,
+    /// 濃度を 0 か 255 にする（点で描いたフォントのぼけを消す）。
+    pub crisp: bool,
 }
 
 impl Default for FontConfig {
@@ -140,6 +160,9 @@ impl Default for FontConfig {
             cjk_mono_family: "Noto Sans Mono CJK JP".into(),
             cjk_sans_family: "Noto Sans CJK JP".into(),
             bdf: None,
+            mono_bdf: None,
+            mono_cjk: None,
+            code_px: 10.0,
         }
     }
 }

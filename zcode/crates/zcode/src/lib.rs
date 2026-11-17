@@ -11,6 +11,7 @@ pub mod crash;
 pub mod doc;
 pub mod edbench;
 pub mod editor;
+pub mod fonts;
 pub mod fonttest;
 pub mod intel;
 pub mod keylog;

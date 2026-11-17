@@ -41,7 +41,7 @@ use zc_highlight::{Highlighter, LanguageId, LanguageInfo, Registry};
 use zc_intel::{Completion, CompletionKind, DiagStore, Diagnostic, Severity, ShiftLog, WordIndex};
 use zc_remote_ipc::{DoneStatus, FileDiags, JobKind, JobTag, Phase, RemoteLang, SubmitFlags, TestReport};
 use zc_input::{Keyboard, RawRecord};
-use zc_ui::layout::{Regions, SIDE_W, UI_PX};
+use zc_ui::layout::{Regions, CODE_LINE_H, CODE_PX, SIDE_W, UI_PX};
 use std::sync::OnceLock;
 use zc_skk::{InputMode, LearnedWord, Preedit, PreeditState, Skk, SystemDict, UserDict};
 use zc_term::{ReadBudget, Term, TermCommand, TermEvent};
@@ -49,7 +49,7 @@ use zc_markdown::MdDocument;
 use zc_ui::{ShortcutList, ShortcutRow};
 use zc_store::{BackupPolicy, DocBackup, Restore, Snapshot};
 use zc_ui::{CandidatePopup, CandidateRow, CodeLayouter, MdLayouter, MiniBuffer, PreeditStyle, PreeditView, MINI_H};
-use zc_ui::{CompletionPopup, EditorStatus, EditorView, FileTree, ImeMode, PickerList, PopupItem, RenderCx, SpanSource, StatusBar, Tab, TabBar, TerminalPanel, Widget, TERM_PANEL_H};
+use zc_ui::{CompletionPopup, EditorStatus, EditorView, FileTree, ImeMode, PickerList, PopupItem, RenderCx, SpanSource, StatusBar, Tab, TabBar, TerminalPanel, Widget};
 
 #[path = "editor_lsp.rs"]
 mod lsp;
@@ -146,6 +146,8 @@ pub trait RemoteLink {
     fn warm(&mut self, file: PathBuf, cx: &mut LoopCx<'_>) {
         let _ = (file, cx);
     }
+    /// zcode が終わる: 自分が起動した serve を終わらせる（残すと APPLaunch が待ち続ける）。
+    fn shutdown(&mut self) {}
 }
 
 /// 本物の専用スレッド。最初の依頼まで作らない（ビルド係を使わない人には、スレッドも
@@ -170,6 +172,11 @@ impl RemoteLink for LazyRemote {
     fn warm(&mut self, file: PathBuf, cx: &mut LoopCx<'_>) {
         if self.auto_check_ready() {
             self.0.get_or_insert_with(|| RemoteClient::new(cx.results.clone(), None)).warm(file);
+        }
+    }
+    fn shutdown(&mut self) {
+        if let Some(c) = &self.0 {
+            c.shutdown();
         }
     }
 }
@@ -343,6 +350,8 @@ struct DocTab {
     md: Option<MdState>,
     /// 読み込みが終わったら入れる控えの内容とカーソル（起動時の復元）。
     pending_restore: Option<(String, Pos)>,
+    /// コードの字（ソース表示に戻すときの組み方）。
+    code: CodeFont,
 }
 
 /// この行数までの Markdown は、全体の解析をメインで行う（超えたら batch）。実機で
@@ -361,12 +370,29 @@ struct MdState {
 }
 
 impl MdState {
-    fn layouter(&self) -> Box<dyn zc_ui::LineLayouter> {
+    fn layouter(&self, code: CodeFont) -> Box<dyn zc_ui::LineLayouter> {
         if self.preview {
             Box::new(MdLayouter::new(self.doc.clone()))
         } else {
-            Box::new(CodeLayouter::standard())
+            Box::new(code.layouter())
         }
+    }
+}
+
+/// コード（と端末）の字の大きさと 1 行の高さ。同梱のフォント（Cozette）を使うときは
+/// [`EditorScreen::set_code_font`] で 13px の行にする。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CodeFont {
+    pub px: f32,
+    pub line_h: u16,
+}
+
+impl CodeFont {
+    /// 既定（DejaVu Sans Mono 10px・行 12px）。
+    pub const STANDARD: CodeFont = CodeFont { px: CODE_PX, line_h: CODE_LINE_H };
+
+    fn layouter(self) -> CodeLayouter {
+        CodeLayouter::new(self.px, self.line_h)
     }
 }
 
@@ -388,7 +414,7 @@ impl SpanSource for TabSpans<'_> {
 }
 
 impl DocTab {
-    fn new(id: DocId, path: Option<PathBuf>, title: String, doc: Box<dyn TextDoc + Send>) -> DocTab {
+    fn new(id: DocId, path: Option<PathBuf>, title: String, doc: Box<dyn TextDoc + Send>, code: CodeFont) -> DocTab {
         let words = WordIndex::build(doc.as_lines(), &CancelToken::never()).unwrap_or_else(|_| WordIndex::new());
         let saved = path.is_some().then(|| doc.version());
         let mut t = DocTab {
@@ -409,7 +435,11 @@ impl DocTab {
             checked: None,
             md: None,
             pending_restore: None,
+            code,
         };
+        if code != CodeFont::STANDARD {
+            t.view.set_layouter(Box::new(code.layouter()));
+        }
         t.detect_language();
         t
     }
@@ -463,11 +493,11 @@ impl DocTab {
         if self.lang.name == "Markdown" {
             let preview = self.md.as_ref().is_none_or(|m| m.preview);
             let md = MdState { doc: Rc::new(RefCell::new(MdDocument::new())), preview, stale: true, pending: None };
-            self.view.set_layouter(md.layouter());
+            self.view.set_layouter(md.layouter(self.code));
             self.md = Some(md);
             self.parse_markdown_here();
         } else if self.md.take().is_some() {
-            self.view.set_layouter(Box::new(CodeLayouter::standard()));
+            self.view.set_layouter(Box::new(self.code.layouter()));
         }
     }
     /// 小さな Markdown なら、全体をここ（メイン）で解析し直す。大きければ何もしない
@@ -699,6 +729,8 @@ pub struct EditorScreen {
     /// 統合ターミナル（段階 3）。
     term: Option<TermState>,
     panel: TerminalPanel,
+    /// コードと端末の字（[`EditorScreen::set_code_font`]）。
+    code_font: CodeFont,
     panel_open: bool,
     panel_full: bool,
     /// 端末の大きさ（パネルの寸法から決めたもの。最初の描画までは見積もり）。
@@ -795,6 +827,7 @@ impl EditorScreen {
             mini_open: false,
             term: None,
             panel: TerminalPanel::new(),
+            code_font: CodeFont::STANDARD,
             panel_open: false,
             panel_full: false,
             term_grid: (56, 6),
@@ -834,6 +867,25 @@ impl EditorScreen {
     /// ビルド係への口を差し替える（既定は本物の専用スレッド。試験用）。
     pub fn set_remote(&mut self, remote: Box<dyn RemoteLink>) {
         self.remote = remote;
+    }
+    /// コード（と端末）の字の大きさと 1 行の高さを替える。開いているタブ（Markdown の
+    /// プレビュー以外）にも、後で開くタブにも効く。端末は同じ字で、行の高さも同じにする。
+    /// 同梱のフォント（[`crate::fonts`]）を使うとき・フォント比較（`examples/fontpreview.rs`）用。
+    pub fn set_code_font(&mut self, px: f32, line_h: u16) {
+        let code = CodeFont { px, line_h };
+        self.code_font = code;
+        for t in &mut self.tabs {
+            t.code = code;
+            if t.md.as_ref().is_some_and(|m| m.preview) {
+                continue;
+            }
+            t.view.set_layouter(Box::new(code.layouter()));
+        }
+        if code == CodeFont::STANDARD {
+            self.panel.set_font(UI_PX, zc_ui::terminal::TERM_ROW_H);
+        } else {
+            self.panel.set_font(px, line_h);
+        }
     }
     /// ファイルツリー。
     /// ツリーが開いているか・入力がツリーに向いているか（テスト用）。
@@ -1030,7 +1082,7 @@ impl EditorScreen {
     /// 代わりにそれで色を付ける。
     pub fn open_doc(&mut self, path: Option<PathBuf>, title: &str, doc: Box<dyn TextDoc + Send>, spans: Option<Box<dyn SpanSource>>) -> DocId {
         let id = self.alloc_id();
-        let mut tab = DocTab::new(id, path, title.into(), doc);
+        let mut tab = DocTab::new(id, path, title.into(), doc, self.code_font);
         tab.custom_spans = spans;
         // 開いていない間に届いていた診断を付ける
         tab.rekey(&self.cfg.root, &self.diag_store);
@@ -1050,7 +1102,7 @@ impl EditorScreen {
         }
         let id = self.alloc_id();
         let title = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "?".into());
-        let mut tab = DocTab::new(id, Some(path.clone()), title, self.cfg.backend.empty());
+        let mut tab = DocTab::new(id, Some(path.clone()), title, self.cfg.backend.empty(), self.code_font);
         tab.loading = true;
         tab.rekey(&self.cfg.root, &self.diag_store);
         self.tabs.push(tab);
@@ -2806,7 +2858,7 @@ impl EditorScreen {
             return;
         };
         m.preview = !m.preview;
-        tab.view.set_layouter(m.layouter());
+        tab.view.set_layouter(m.layouter(tab.code));
         tab.sync_cursor();
         // 補完の小窓などは描き直したビューの上に置き直す
         self.popup.forget();
@@ -3021,6 +3073,9 @@ impl Screen for EditorScreen {
     }
 
     fn stop(&mut self) {
+        // 自分が起動した zc-remote serve を終わらせる（同じプロセスグループに残ると、APPLaunch が
+        // 「loading...」のまま serve が自分で終わるまで数分待つ）
+        self.remote.shutdown();
         // 復元を尋ねている途中なら、前回の控えに手を付けない
         if self.restore_offer.is_some() {
             return;
@@ -3239,7 +3294,7 @@ impl Screen for EditorScreen {
     fn render(&mut self, cx: &mut RenderCx<'_>) -> Damage {
         let panel_h = match (self.panel_open, self.panel_full) {
             (false, _) => 0,
-            (true, false) => TERM_PANEL_H,
+            (true, false) => self.panel.panel_h(),
             (true, true) => u16::MAX,
         };
         let mut regions = Regions::compute(self.tree_open, panel_h);
@@ -3390,7 +3445,7 @@ impl Screen for EditorScreen {
         if self.panel_open {
             let (title, hint) = self.panel_header();
             self.panel.set_header(&title, hint);
-            let grid = TerminalPanel::grid_size(cx, regions.panel);
+            let grid = self.panel.grid_size(cx, regions.panel);
             self.term_grid = grid;
             // SKK の未確定はカーソルの位置に重ねて見せる（端末にはまだ送っていない）
             let pre = if self.focus == Focus::Terminal && mini_area.is_none() { preedit_text(self.skk.preedit()) } else { None };

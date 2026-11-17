@@ -48,7 +48,7 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   配色は VS Code の Dark+、等幅フォントは実機の DejaVu Sans Mono
   （日本語は Noto Sans Mono CJK にフォールバック）
 - エディタの文字は DejaVu Sans Mono 10px・行の高さ 12px（ユーザーが実機で決定。`zc-ui` の
-  `CODE_PX` / `CODE_LINE_H`）
+  `CODE_PX` / `CODE_LINE_H`）。**2026-11-18 に同梱のフォントへ変えた**（下の「コードのフォント」）
 - 作業フォルダの既定は `~/code`。終了は Ctrl+Q（Esc は終了に使わない）
 - 日本語入力: **SKK を zcode に組み込む**。uim-skk は GTK / Qt / uim-fep 経由でしか
   効かず fb0 アプリに届かないため。辞書は実機の `/usr/share/skk/SKK-JISYO.L` と
@@ -424,6 +424,11 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   方式では、走っているコンテナを差し替えない）。新しいイメージは、コンテナが眠った後（最後に使ってから
   10 分、`KEEP_WARM_S`）の次の起動から。新しいイメージでの最初の起動は 38 秒かかった（イメージを
   取ってくる分）。急ぐなら DO にコンテナを止めさせる口を足す（C4 のときに検討）
+- **zcode が起動した `serve` は、zcode が終わるときに SIGTERM で終わらせる**（`RemoteClient::shutdown`、
+  `Screen::stop` から）。serve は Esc 長押しで一緒に終わるよう zcode と同じプロセスグループにいるが、APPLaunch は
+  アプリの**プロセスグループの全員が終わるまで**「loading...」のまま待つ（ログの `external app group drained`）。
+  残すと serve の無通信での終了（180 秒 + α）まで固まった（2026-11-17、2 号機で 4 分 24 秒）。ほかが起動した
+  serve（CLI の `--detach`）には触らない
 - 環境変数（`ZC_REMOTE_URL` など）は `serve` を起動するときに読まれる。動いている `serve` には効かないので、
   試すときは先に `zc-remote stop`
 
@@ -517,3 +522,23 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - 見込みは `GET /v1/usage`（Access の内側、JSON。`month`・`usage.memory_gib_h`・`usage.vcpu_min_est`・
   `overage_usd.total`・`devices` など）。`zc-remote status` はまだ表示しない
 
+
+## コードのフォント（2026-11-18、ユーザーの決定）
+
+- コードと端末は、英字 **Cozette**（BDF 6×13、MIT）・日本語 **PixelMplus12**（M+ FONT LICENSE。点の字の
+  TrueType を 12px で、濃度を 0 か 255 に）。行の高さ 13px。DejaVu 10px は `+` の横棒などが薄く読みにくかった。
+  比べた 23 書体と理由は `docs/measurements.md` §15
+- .deb は実行ファイルの隣の `fonts/`（`/usr/share/APPLaunch/lib/zcode/fonts/`）に入れ、ライセンスは
+  `/usr/share/doc/zcode/`。フォントは git に入れず、`tools/fetch-fonts.sh` が GitHub の配布物を取って
+  SHA-256 で確かめ、`out/fonts/` に置く（`build.sh` と CI が呼ぶ）。Cozette は起動時に全部読むので、
+  `tools/subset_bdf.py` でエディタで使う範囲（1,495 字）に絞る（実機で約 40ms 短い）
+- zcode は起動時に `fonts/` を探し（`zcode::fonts`、`--font-dir` / `--no-bundled-font`）、無ければ DejaVu の
+  まま。同梱のフォントは**コードの大きさ（`FontConfig::code_px` = `CODE_PX`）のときだけ**使う。タブ・ツリー・
+  ステータスバーの小さな字は DejaVu のまま（BDF は大きさを変えられないので、全部に効かせると 13px になる）
+- 行の高さは `EditorScreen::set_code_font` で、開いているタブ・後で開くタブ・ターミナル（`TerminalPanel::set_font`）に
+  効く。下のパネルは端末の部分を既定の 66px に入る行数（13px なら 5 行）にする
+- 日本語の字は Cozette の行（ascent 10）より 1px 背が高いので、下の余り（descent）の分まで下げて上が切れない
+  ようにしている（`zc-font` の `mono_cjk`）
+- 試験: 正解画像の大半は DejaVu のまま（`FontConfig::default()`）。同梱のフォントは `codefont-run.png`
+  （`tests/terminal.rs`）だけで、`out/fonts/` が無ければ飛ばす（CI は `ZCODE_REQUIRE_FONTS=1` で落とす）。
+  フォントの見比べは `cargo run -p zcode --example fontpreview -- <out.png> --bdf <BDF> --line 13 --cjk <TTF> --cjk-px 12 --crisp 1`

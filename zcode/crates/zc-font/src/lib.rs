@@ -28,7 +28,7 @@ pub mod types;
 
 pub use cache::{GlyphCache, DEFAULT_CACHE_BYTES};
 pub use files::FontFiles;
-pub use types::{is_wide, Face, FontConfig, Glyph, GlyphKey, GlyphSource, Metrics, Size, TextStyle};
+pub use types::{is_wide, CjkFont, Face, FontConfig, Glyph, GlyphKey, GlyphSource, Metrics, Size, TextStyle};
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

@@ -24,13 +24,17 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 # 生成アセットが無ければ作る (要: Pillow、DejaVu Sans Mono Bold)
 [ -f packaging/zcode.png ] || python3 tools/make_icon.py
-mkdir -p "$STAGE/$APP/bin" "$STAGE/$APP/lib/zcode" "$STAGE/$APP/applications" "$STAGE/$APP/share/images" "$STAGE/DEBIAN"
+# コードのフォント（Cozette + PixelMplus12。SHA-256 で確かめて out/fonts/ へ）
+bash tools/fetch-fonts.sh >/dev/null
+mkdir -p "$STAGE/$APP/bin" "$STAGE/$APP/lib/zcode/fonts" "$STAGE/$APP/applications" "$STAGE/$APP/share/images" "$STAGE/DEBIAN" "$STAGE/usr/share/doc/zcode"
 sed "s/^Version:.*/Version: $VERSION/" packaging/control > "$STAGE/DEBIAN/control"
 cp packaging/postinst "$STAGE/DEBIAN/postinst"
 cp packaging/zcode "$STAGE/$APP/bin/zcode"
 cp packaging/zcode.desktop "$STAGE/$APP/applications/"
 cp packaging/zcode.png "$STAGE/$APP/share/images/zcode.png"
 cp out/zcode "$STAGE/$APP/lib/zcode/zcode"
+cp out/fonts/cozette.bdf out/fonts/PixelMplus12-Regular.ttf "$STAGE/$APP/lib/zcode/fonts/"
+cp out/fonts/LICENSE-Cozette out/fonts/LICENSE-PixelMplus out/fonts/LICENSE-PixelMplus.ja out/fonts/README-PixelMplus.txt "$STAGE/usr/share/doc/zcode/"
 find "$STAGE" -type d -exec chmod 755 {} +
 find "$STAGE" -type f -exec chmod 644 {} +
 chmod 755 "$STAGE/DEBIAN/postinst" "$STAGE/$APP/bin/zcode" "$STAGE/$APP/lib/zcode/zcode"

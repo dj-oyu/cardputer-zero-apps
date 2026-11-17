@@ -51,7 +51,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use zc_core::rt::{MainSender, Notifier};
@@ -223,13 +223,19 @@ struct Handle {
     wake: Notifier,
 }
 
-/// 専用スレッドの持ち手。メインが持つ。捨てるとソケットを閉じてスレッドを終わらせる
-/// （serve は残る。無通信が続けば自分で終わる）。
+/// 専用スレッドの持ち手。メインが持つ。捨てるとソケットを閉じてスレッドを終わらせる。
+/// 自分で起動した serve は [`RemoteClient::shutdown`]（捨てるときも呼ぶ）で終わらせる。
+///
+/// serve は zcode と同じプロセスグループにいる（APPLaunch の Esc 長押しで一緒に終わるように）。
+/// その代わり、zcode が先に終わっても serve が残ると、APPLaunch はグループの全員が終わるまで
+/// 「loading...」のまま待つ（無通信で serve が自分で終わるまで数分。2026-11-17 実機で起きた）。
 pub struct RemoteClient {
     results: MainSender<AppEvent>,
     program: Option<PathBuf>,
     socket: PathBuf,
     next_req: AtomicU32,
+    /// 専用スレッドが起動した serve のプロセス番号（動いていなければ 0）。
+    serve_pid: Arc<AtomicI32>,
     /// 最初の依頼で作る。`None` はスレッドを作れなかった。
     thread: OnceLock<Option<Handle>>,
 }
@@ -244,7 +250,29 @@ impl RemoteClient {
     /// ソケットの場所を指定して作る（試験用）。起動する serve には、`socket` が
     /// `<dir>/zcode/remote.sock` の形なら `XDG_RUNTIME_DIR=<dir>` を渡す。
     pub fn with_socket(results: MainSender<AppEvent>, program: Option<PathBuf>, socket: PathBuf) -> RemoteClient {
-        RemoteClient { results, program, socket, next_req: AtomicU32::new(1), thread: OnceLock::new() }
+        RemoteClient { results, program, socket, next_req: AtomicU32::new(1), serve_pid: Arc::new(AtomicI32::new(0)), thread: OnceLock::new() }
+    }
+
+    /// 自分が起動した serve のプロセス番号（試験用）。
+    pub fn serve_pid(&self) -> Option<u32> {
+        match self.serve_pid.load(Ordering::SeqCst) {
+            0 => None,
+            p => Some(p as u32),
+        }
+    }
+
+    /// 終わる: スレッドを止め、自分が起動した serve に SIGTERM を送る（serve は控えを書いて
+    /// すぐ終わる）。ほかが起動した serve には触らない。何度呼んでもよい。待たない。
+    pub fn shutdown(&self) {
+        if let Some(Some(h)) = self.thread.get() {
+            let _ = h.tx.send(Cmd::Quit);
+            h.wake.notify();
+        }
+        let pid = self.serve_pid.swap(0, Ordering::SeqCst);
+        if pid > 0 {
+            // SAFETY: 自分の子（まだ回収していない）にシグナルを送るだけ。
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
     }
 
     /// 先につないでおく（Rust のプロジェクトを開いた・最初の保存）。待たない。
@@ -308,7 +336,8 @@ impl RemoteClient {
     fn spawn_thread(&self) -> Option<Handle> {
         let wake = Notifier::new().ok()?;
         let (tx, rx) = mpsc::channel();
-        let worker = Worker::new(self.results.clone(), self.program.clone(), self.socket.clone(), rx, wake.clone());
+        let mut worker = Worker::new(self.results.clone(), self.program.clone(), self.socket.clone(), rx, wake.clone());
+        worker.serve_pid = self.serve_pid.clone();
         std::thread::Builder::new().name("zc-remote".into()).stack_size(THREAD_STACK).spawn(move || worker.run()).ok()?;
         Some(Handle { tx, wake })
     }
@@ -317,10 +346,7 @@ impl RemoteClient {
 impl Drop for RemoteClient {
     fn drop(&mut self) {
         // 待たない（スレッドは知らせを受けてソケットを閉じ、自分で終わる）
-        if let Some(Some(h)) = self.thread.get() {
-            let _ = h.tx.send(Cmd::Quit);
-            h.wake.notify();
-        }
+        self.shutdown();
     }
 }
 
@@ -433,6 +459,8 @@ struct Worker {
     conn_gen: u64,
     /// 自分で起動した serve（終わったら回収する）。
     child: Option<Child>,
+    /// その番号を持ち手と分け合う（終わるときに持ち手が SIGTERM を送る）。
+    serve_pid: Arc<AtomicI32>,
     /// `zc-remote` が使えない（知らせ済み）。
     unavailable: bool,
     /// 次につなぎ直しを試す時刻と、今の間隔。
@@ -460,6 +488,7 @@ impl Worker {
             conn: None,
             conn_gen: 0,
             child: None,
+            serve_pid: Arc::new(AtomicI32::new(0)),
             unavailable: false,
             reconnect: None,
             jobs: HashMap::new(),
@@ -639,6 +668,7 @@ impl Worker {
             if matches!(c.try_wait(), Ok(None)) {
                 return Ok(());
             }
+            let _ = self.serve_pid.compare_exchange(c.id() as i32, 0, Ordering::SeqCst, Ordering::SeqCst);
             self.child = None;
         }
         let program = self.program.clone().unwrap_or_else(|| PathBuf::from("zc-remote"));
@@ -649,6 +679,7 @@ impl Worker {
         }
         match cmd.spawn() {
             Ok(child) => {
+                self.serve_pid.store(child.id() as i32, Ordering::SeqCst);
                 self.child = Some(child);
                 Ok(())
             }
@@ -667,6 +698,8 @@ impl Worker {
     fn reap_child(&mut self) {
         if let Some(c) = &mut self.child {
             if !matches!(c.try_wait(), Ok(None)) {
+                // 回収した番号はほかのプロセスに使い回されうるので、持ち手に送らせない
+                let _ = self.serve_pid.compare_exchange(c.id() as i32, 0, Ordering::SeqCst, Ordering::SeqCst);
                 self.child = None;
             }
         }

@@ -34,6 +34,9 @@ zcode — CardputerZero 用コードエディタ
   終了は Ctrl+Q。ツリーは Ctrl+B で開閉、Ctrl+E で移る（↑↓ で選んで Enter）。
   --root <フォルダ>        ツリーの根（既定は ~/code。無ければ今いるフォルダ）
   --simple-buffer          文書を zc-buffer でなく、行の配列の小さな実装で持つ（開発用）
+  --font-dir <フォルダ>    コードのフォント（cozette.bdf・PixelMplus12-Regular.ttf）の場所。
+                           既定は実行ファイルの隣の fonts/。無ければ DejaVu Sans Mono
+  --no-bundled-font        同梱のフォントを使わず DejaVu Sans Mono で描く
 
 キー確認モード:
   終了は Esc を続けて 5 回。無操作が続いても終わる（--idle <秒>、既定 120）。
@@ -79,6 +82,8 @@ struct Args {
     files: Vec<PathBuf>,
     root: Option<PathBuf>,
     backend: DocBackend,
+    /// コードのフォントの場所（`None` なら実行ファイルの隣。`Some(None)` なら使わない）。
+    font_dir: Option<Option<PathBuf>>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -96,6 +101,7 @@ fn parse_args() -> Result<Args, String> {
         files: Vec::new(),
         root: None,
         backend: DocBackend::Buffer,
+        font_dir: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -113,6 +119,8 @@ fn parse_args() -> Result<Args, String> {
             }
             "--root" => a.root = Some(val("--root")?.into()),
             "--simple-buffer" => a.backend = DocBackend::Simple,
+            "--font-dir" => a.font_dir = Some(Some(val("--font-dir")?.into())),
+            "--no-bundled-font" => a.font_dir = Some(None),
             "--guide" => a.guide = true,
             "--log" => a.log = val("--log")?.into(),
             "--bdf" => a.opts.fonts.bdf = Some(val("--bdf")?.into()),
@@ -172,8 +180,13 @@ fn real_main(t_start_us: u64) -> Result<(), String> {
     if let Some(path) = path_with_local_bin(std::env::var_os("PATH").as_deref(), std::env::var_os("HOME").as_deref()) {
         std::env::set_var("PATH", path);
     }
-    let a = parse_args()?;
+    let mut a = parse_args()?;
     stats.mark("args parsed");
+    // エディタは同梱のフォントがあればそれで描く（zcode::fonts）
+    let code_line_h = match (&a.mode, a.font_dir.clone().unwrap_or_else(zcode::fonts::default_dir)) {
+        (None, Some(dir)) => zcode::fonts::apply(&mut a.opts.fonts, &dir),
+        _ => None,
+    };
     if let Some(path) = &a.keymap_from_log {
         let log = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         print!("{}", keylog::keymap_lines(&keylog::parse_guide(&log), &Keymap::builtin()));
@@ -186,6 +199,9 @@ fn real_main(t_start_us: u64) -> Result<(), String> {
             let root = a.root.clone().unwrap_or_else(EditorConfig::default_root);
             let cfg = EditorConfig { backend: a.backend, root, files: a.files.clone() };
             let mut ed = EditorScreen::new(cfg);
+            if let Some(h) = code_line_h {
+                ed.set_code_font(zc_ui::layout::CODE_PX, h);
+            }
             if rendering {
                 // 画像に描くだけのときは、その場で読む（ふつうは batch スレッドが読む）
                 for f in &a.files {
