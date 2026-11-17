@@ -9,6 +9,7 @@
 // | つなぐ回数 | device_id ごとに 60 秒 30 回 | Worker（Rate Limiting の束縛 CONNECT_LIMIT） | 429 + Retry-After: 60 |
 // | 同時の接続 | device_id ごとに 4 本 | DO | 新しい接続を 429 で断る |
 // | 1 日のジョブ数 | device_id ごとに 400（JOBS_PER_DAY）。check は数えない | DO（SQLite の台帳。UTC の日付で数える） | error {limit, retry_after_s} |
+// | 月の費用 | 超過 5 ドル（BUDGET_OVERAGE_USD）。アカウント全体 | DO と台帳の DO（budget.ts） | 新しい job に error {limit}。冷えていれば起こさず閉じる |
 // | 同時に走るジョブ | 2（build / test 1 + check 1） | 受付（zc-buildd） | 待たせる（列は 8 まで） |
 // | コンテナ | device_id ごとに 1 つ・全体で 2 つ | DO / アカウントの設定 | error {unavailable} |
 // | 1 ジョブの時間 | 15 分 | 受付 | done {timeout} |

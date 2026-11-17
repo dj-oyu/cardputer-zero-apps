@@ -184,11 +184,48 @@ curl -si --http1.1 -H "CF-Access-Client-Id: <Client ID>" -H "CF-Access-Client-Se
 - ヘッダありで 302 が返ったら、ポリシーの Action が Service Auth になっていない
 - 101 まで通ったら、実機から `zc-remote status`（4.3）
 
-### 2.6 費用の通知
+### 2.6 費用（月の上限と通知）
 
-- [ ] **予算の通知**（金額で決める。いちばん分かりやすい）: **Manage Account → Billing →
-      Billable Usage → Create budget alert**（または **Notifications → Add → Budget Alert**）。
-      2026 年の途中から、有料の従量課金のアカウントには 10 ドルの通知が自動で入っていることがある
+**Worker が自分で月の費用を抑える**（2026-11-17 決定: 月の超過は 5 ドルまで。Workers Paid の
+5 ドルと合わせて月 10 ドル前後）。設定は `remote/worker/wrangler.jsonc` の `vars` にまとめてある:
+
+| 値 | 既定 | 意味 |
+|---|---|---|
+| `INSTANCE_TYPE` | `""`（空） | 空なら下の 3 つの custom。名前つき（`lite` / `standard-1`〜`standard-4`）も書ける |
+| `INSTANCE_VCPU`・`INSTANCE_MEMORY_MIB`・`INSTANCE_DISK_MB` | `1`・`3072`・`12000` | コンテナの大きさ。メモリは 1 vCPU あたり 3072MiB 以上（Cloudflare の決まり）。外れた値は既定に戻る（ログに 1 行） |
+| `KEEP_WARM_S` | `300` | 最後のジョブ・実機のメッセージから、コンテナを起こしておく秒数。過ぎたら DO が止める |
+| `BUDGET_OVERAGE_USD` | `5.00` | **月の超過（含まれる分を超えた料金）の上限**（ドル、アカウント全体で 1 つ） |
+
+- 上限に近づくと（今の超過 + 次の 1 ジョブ 15 分と keep-warm の見込み > 上限）、新しいジョブを
+  断り、止まっているコンテナは起こさない。走っているジョブは最後まで終わり、その後すぐコンテナを
+  止める。UTC の月の 1 日 0 時に戻る
+- 実機では、`zc-remote run` などが「上限: 今月のビルド係の費用が上限に達した（超過 x.xx ドル・上限
+  5.00 ドル）。2026-12-01 0 時（UTC）に戻る」と出して終了コード 5 で終わる。zcode の保存時の check は
+  黙って何もしない（波線はそのまま）
+- 数えているのは料金表からの見込み（メモリ・ディスクは動いている時間 × 大きさ、CPU は「ジョブが
+  走っていた時間 × vCPU」で多めに見積もる）。**請求額そのものではない**
+- 変えるとき: `wrangler.jsonc` の値を書き換えて deploy し直す（2.2）。ダッシュボードで vars を
+  変えても、次の deploy で `wrangler.jsonc` の値に戻る。上限を上げれば、その月の残りもすぐ使える。
+  大きさの変更は、動いているコンテナが止まって次に起こすときから効く
+- 今月の使用量の見込みは `GET /v1/usage`（Access の内側。トークンが要る）:
+  ```sh
+  curl -s -H "CF-Access-Client-Id: <Client ID>" -H "CF-Access-Client-Secret: <Client Secret>" \
+    https://<build-host>/v1/usage
+  ```
+  返事は JSON: `month`・`resets_at`・`budget_usd`・`exhausted`・`usage`（`memory_gib_h`・
+  `vcpu_min_est`・`disk_gb_h`）・`included`・`overage_usd`（`memory`・`cpu`・`disk`・`total`）・
+  `devices`（実機ごと）。`zc-remote status` はまだこれを表示しない
+- 目安（1 vCPU・3GiB・12GB、料金表からの計算）: 動いている 1 時間でメモリ 0.027 ドル・ディスク
+  0.003 ドル、ジョブが走っている 1 時間で CPU 0.072 ドル。含まれる分（メモリ 25GiB 時間 = 約 8 時間）の
+  後、上限の 5 ドルまでで動かせるのは、メモリだけなら約 190 時間、ディスク込みで約 175 時間、
+  ジョブが 1 割の時間走るなら約 150 時間
+
+**Cloudflare 側でも 2 本目の守りを入れておく**（Worker の数え方が外れたときのため）:
+
+- [ ] **予算の通知**（金額で決める）: **Manage Account → Billing → Billable Usage → Create budget
+      alert**（または **Notifications → Add → Budget Alert**）。**8 ドル前後**にしておくと、Worker の
+      上限（プラン 5 ドル + 超過 5 ドル）の手前で知らせが来る。2026 年の途中から、有料の従量課金の
+      アカウントには 10 ドルの通知が自動で入っていることがある
 - [ ] 必要なら、製品ごとの使用量の通知: **Notifications → Add → Usage Based Billing**
       （製品に Containers を選ぶ）
 - Workers と Durable Objects には **使用額の上限**（超えたら止める）も設定できる
@@ -334,7 +371,8 @@ cd / && rm -rf /tmp/zc-hello
 | 「時計が合っていない」と出る | 実機に時計の電池が無いので、起動直後は NTP が合うまで待つ（`/run/systemd/timesync/synchronized` ができれば合っている） |
 | 「オフライン」とすぐ出る | Wi-Fi・テザリングがつながっているか |
 | PC に届かない | 3.1 の ACL、3.3 のファイアウォール、`run-pc.ps1` が動いているか、3.4 の `/healthz` |
-| 料金が気になる | Cloudflare の Containers の利用量。ビルド係を温めておく時間（既定 10 分）が長いとメモリの料金が増える |
+| 料金が気になる | 2.6 の `/v1/usage`。ビルド係を温めておく時間（`KEEP_WARM_S`、既定 5 分）とコンテナの大きさがメモリの料金を決める |
+| 「上限: 今月のビルド係の費用が上限に達した」 | 2.6 の月の上限。`/v1/usage` で見込みを見る。上げるなら `BUDGET_OVERAGE_USD` を変えて deploy |
 
 ## 6. トークンを失くした・漏れたとき、期限が来たとき
 
@@ -343,7 +381,8 @@ cd / && rm -rf /tmp/zc-hello
   `DEVICES` からその Client ID の行を消して `wrangler secret put DEVICES` で入れ直す。
   その実機には新しいトークンを作って 4.2 をやり直す
 - 漏れたトークンでできるのは「ビルド係の時間を使う」ことだけ（実機やほかのものには届かない）。
-  それでも回数と 1 日の上限（1 台 1 日 400 ジョブ、設計の値。check は数えない）で抑えている
+  それでも回数と 1 日の上限（1 台 1 日 400 ジョブ、設計の値。check は数えない）と、月の費用の上限
+  （2.6、超過 5 ドル）で抑えている
 - **期限が近い**: **Refresh** で 1 年延びる（実機の設定は変えなくてよい）
 - **秘密を入れ替えたい**: **Rotate**。古い秘密を並行して使える時間を選べるので、その間に
   実機の `remote-token.json` を書き換える
