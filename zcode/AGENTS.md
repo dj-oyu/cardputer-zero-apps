@@ -357,8 +357,10 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   （`ZC_E2E_REQUIRE=1` だと、道具が無いときに飛ばさず落ちる）
 - `zc-remote run` は `execv` で実行ファイルに置き換わる（std の exec は ENOEXEC で `/bin/sh` に
   落ちるので使わない）。実行できなければ 126
-- `zc-remote` の版は 0.1.0 のまま中身が変わるので、`runtimes.lock` の SHA-256 は作り直すたびに
-  書き換える。インストーラが「同じ版は入れ直さない」で古いものを残さないか、実機で確かめる
+- `zc-remote` の中身を変えて配るときは、`remote/Cargo.toml` の `[workspace.package] version` を上げてから
+  作り直し、`runtimes.lock` の版と SHA-256 を書き換える（同じ版のまま中身だけ変えると、実機の置き場
+  `zc-remote-<版>/` と食い違う）。開発コンテナの `remote/build.sh` は同じソースから同じ SHA-256 になる
+  （2026-11-17、0.2.0 で 2 回作って確かめた）。0.2.0 = IPC 版 3（LSP）と言語 7 つを足した版
 - 実行ファイル 1.77MB（aarch64）、待機中の RSS は x86-64 で約 3MB（実機は未計測）
 
 ## 型の情報（LSP、2026-11-17、ブランチ `zcode-lsp`、`docs/lsp-design.md`）

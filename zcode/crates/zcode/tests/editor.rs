@@ -1305,3 +1305,19 @@ fn auto_check_defers_the_unavailable_notice(backend: DocBackend) {
     assert_eq!(ed.message(), Some("ビルド係を使えない: zc-remote が無い"));
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn ctrl_e_opens_the_tree_and_closes_it_again() {
+    let mut lp = Loop::new();
+    let mut ed = editor_with(DocBackend::Simple, "x\n");
+    assert_eq!(ed.tree_state(), (false, false));
+    lp.keys(&mut ed, &[ctrl('e')]);
+    assert_eq!(ed.tree_state(), (true, true), "開いてツリーへ");
+    lp.keys(&mut ed, &[ctrl('e')]);
+    assert_eq!(ed.tree_state(), (false, false), "ツリーにいるときは閉じてエディタへ");
+    // ツリーが開いていてもエディタにいるなら、ツリーへ移るだけ
+    lp.keys(&mut ed, &[ctrl('b')]);
+    assert_eq!(ed.tree_state().0, true);
+    lp.keys(&mut ed, &[ctrl('e')]);
+    assert_eq!(ed.tree_state(), (true, true));
+}

@@ -79,7 +79,7 @@ pub const BINDINGS: &[Binding] = &[
     b("移動", "ファイル先頭まで選択", "Ctrl+Shift+Home", mv(Motion::DocStart, true)),
     b("移動", "ファイル末尾まで選択", "Ctrl+Shift+End", mv(Motion::DocEnd, true)),
     b("表示", "ツリー開閉", "Ctrl+B", Command::ToggleTree),
-    b("表示", "ツリーへ移る", "Ctrl+E", Command::FocusTree),
+    b("表示", "ツリーへ移る / 閉じる", "Ctrl+E", Command::FocusTree),
     b("表示", "閉じる / エディタへ戻る", "Esc", Command::Cancel),
     b("表示", "ツリーで選んだファイルを開く", "", Command::TreeOpen),
     b("表示", "アウトライン", "Ctrl+O", Command::ShowOutline),

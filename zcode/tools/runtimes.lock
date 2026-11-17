@@ -27,4 +27,4 @@
 llrt        0.10.0-beta  63b260768a110d1641185674aecbfa4516dcf29116f89a845ccdfef848e2733f  llrt-0.10.0-beta-linux-a53-no-sdk   -
 llrt-types  0.10.0-beta  b20627c08926071143085179d8a0e98554e3a4f18824adc888a9459df7df4a0a  llrt-types-0.10.0-beta.tar          -
 tsc         7.0.2        c83d931ac9dd7549cde6e71246aa9d6a9812843023df3e277fe3b5dcf41dd0ea  typescript-linux-arm64-7.0.2.tgz    https://registry.npmjs.org/@typescript/typescript-linux-arm64/-/typescript-linux-arm64-7.0.2.tgz
-zc-remote   0.1.0        487ffde3d7368f9e949b4a33522ac00f41e78ad0d89382dedf7b8fd8b0fd4e9c  zc-remote                           -
+zc-remote   0.2.0        c30b7df485b2878186088acf97581c6497cc2702997371246305052e62e55a46  zc-remote                           -
