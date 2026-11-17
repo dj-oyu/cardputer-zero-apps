@@ -33,7 +33,7 @@ pub fn apply(cfg: &mut FontConfig, dir: &Path) -> Option<u16> {
     cfg.mono_bdf = Some(bdf);
     cfg.code_px = CODE_PX;
     let cjk = dir.join(CJK);
-    cfg.mono_cjk = cjk.is_file().then(|| CjkFont { path: cjk, px: CJK_PX, crisp: true });
+    cfg.mono_cjk = cjk.is_file().then_some(CjkFont { path: cjk, px: CJK_PX, crisp: true });
     Some(LINE_H)
 }
 

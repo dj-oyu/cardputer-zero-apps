@@ -101,6 +101,10 @@ impl TerminalPanel {
         self.painted.clear();
         self.head_dirty = true;
     }
+    /// 見出しの行（と上の境界線）だけ描き直させる（フォーカスの縁取りを消すとき）。
+    pub fn invalidate_head(&mut self) {
+        self.head_dirty = true;
+    }
     /// 下に開いたときのパネルの高さ。端末の部分は既定の 6 行ぶん（66px）に入るだけの行数
     /// （行が 13px なら 5 行）にして、エディタの残りが字によって大きく変わらないようにする。
     pub fn panel_h(&self) -> u16 {

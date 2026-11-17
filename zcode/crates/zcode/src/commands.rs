@@ -78,8 +78,13 @@ pub const BINDINGS: &[Binding] = &[
     b("移動", "1 画面下まで選択", "Shift+PageDown", mv(Motion::PageDown, true)),
     b("移動", "ファイル先頭まで選択", "Ctrl+Shift+Home", mv(Motion::DocStart, true)),
     b("移動", "ファイル末尾まで選択", "Ctrl+Shift+End", mv(Motion::DocEnd, true)),
+    // 区画のあいだの移り方（2026-11-18 に整理）: 移る = Ctrl+1/2/3、開閉 = Ctrl+B・F12（どこにいても
+    // 同じ。開いたらそこへ移る）、いまの区画の最大化 = F11。どれもターミナルの中でも zcode が受ける
+    b("表示", "ツリーへ", "Ctrl+1", Command::FocusTree),
+    b("表示", "エディタへ", "Ctrl+2", Command::FocusEditor),
+    b("表示", "ターミナルへ", "Ctrl+3", Command::FocusTerminal),
     b("表示", "ツリー開閉", "Ctrl+B", Command::ToggleTree),
-    b("表示", "ツリーへ移る / 閉じる", "Ctrl+E", Command::FocusTree),
+    b("表示", "いまの区画を最大化 / 戻す", "F11", Command::Maximize),
     b("表示", "閉じる / エディタへ戻る", "Esc", Command::Cancel),
     b("表示", "ツリーで選んだファイルを開く", "", Command::TreeOpen),
     b("表示", "アウトライン", "Ctrl+O", Command::ShowOutline),
@@ -87,7 +92,6 @@ pub const BINDINGS: &[Binding] = &[
     // F6（Fn+6）は案。実機で押しやすいかは未確認（docs/ui-mock.html のモック 15）
     b("実行", "試験を実行", "F6", Command::RunTests),
     b("実行", "ターミナル開閉", "F12", Command::ToggleTerminal),
-    b("実行", "ターミナル全画面", "F11", Command::ToggleTerminalFullscreen),
     b("Markdown", "プレビュー ⇔ ソース", "Ctrl+Shift+V", Command::TogglePreview),
     b("Markdown", "チェックボックスを切り替え", "Ctrl+Enter", Command::ToggleCheckbox),
     b("Markdown", "太字", "Alt+B", Command::Bold),
@@ -152,7 +156,9 @@ mod tests {
         assert_eq!(lookup(&KeyEvent::new(Key::Enter, Mods::NONE)), Some(Command::Newline));
         assert_eq!(lookup(&KeyEvent::new(Key::Tab, Mods::SHIFT)), Some(Command::Outdent));
         assert_eq!(lookup(&KeyEvent::new(Key::Char('b'), Mods::CTRL)), Some(Command::ToggleTree));
-        assert_eq!(lookup(&KeyEvent::new(Key::Char('e'), Mods::CTRL)), Some(Command::FocusTree));
+        assert_eq!(lookup(&KeyEvent::new(Key::Char('1'), Mods::CTRL)), Some(Command::FocusTree));
+        assert_eq!(lookup(&KeyEvent::new(Key::Char('3'), Mods::CTRL)), Some(Command::FocusTerminal));
+        assert_eq!(lookup(&KeyEvent::new(Key::F(11), Mods::NONE)), Some(Command::Maximize));
         // 型の情報（LSP）と診断の移動
         assert_eq!(lookup(&KeyEvent::new(Key::Char('h'), Mods::CTRL)), Some(Command::Hover));
         assert_eq!(lookup(&KeyEvent::new(Key::Char('d'), Mods::CTRL)), Some(Command::GotoDefinition));

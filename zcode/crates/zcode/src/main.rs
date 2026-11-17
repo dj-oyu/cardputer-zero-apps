@@ -31,7 +31,8 @@ zcode — CardputerZero 用コードエディタ
   zcode --keymap-from-log <ログ>             キー確認のログからキー配列の行を作る
 
 エディタ:
-  終了は Ctrl+Q。ツリーは Ctrl+B で開閉、Ctrl+E で移る（↑↓ で選んで Enter）。
+  終了は Ctrl+Q。Ctrl+1 ツリー・Ctrl+2 エディタ・Ctrl+3 ターミナルへ移る。Ctrl+B / F12 で
+  ツリー / ターミナルを開閉、F11 でいまの区画を最大化（ツリーではフォルダを開く画面）。
   --root <フォルダ>        ツリーの根（既定は ~/code。無ければ今いるフォルダ）
   --simple-buffer          文書を zc-buffer でなく、行の配列の小さな実装で持つ（開発用）
   --font-dir <フォルダ>    コードのフォント（cozette.bdf・PixelMplus12-Regular.ttf）の場所。

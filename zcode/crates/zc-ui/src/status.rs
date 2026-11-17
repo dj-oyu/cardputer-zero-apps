@@ -87,6 +87,55 @@ impl EditorStatus<'_> {
     }
 }
 
+/// ステータスバーの左端の現在地の表示（区画ごとの札。ツリー・エディタ・ターミナルの順で、
+/// 番号は移るキーの Ctrl+1/2/3）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaneMap {
+    /// 打鍵が向いている区画（0 ツリー・1 エディタ・2 ターミナル）。
+    pub focus: usize,
+    /// 区画が開いているか（エディタはいつも開いている）。
+    pub open: [bool; 3],
+}
+
+/// 現在地の表示の幅（札 14 画素を 15 画素おきに 3 つ + 余白）。
+pub const PANE_MAP_W: u16 = 48;
+
+/// 札の印（7×6 以内。`#` が点）。ツリー・エディタ・ターミナル。
+const PANE_ICONS: [&[&str]; 3] = [
+    &["##.....", "#.###..", "#......", "#.###..", "#......", "#.###.."],
+    &["####...", "#..##..", "#.##.#.", "#....#.", "#.##.#.", "######."],
+    &["#......", ".#.....", "..#....", ".#.....", "#..###."],
+];
+/// 札の番号（3×5）。
+const PANE_DIGITS: [&[&str]; 3] = [&[".#.", "##.", ".#.", ".#.", "###"], &["##.", "..#", ".#.", "#..", "###"], &["##.", "..#", ".#.", "..#", "##."]];
+
+fn stamp(cx: &mut RenderCx<'_>, rows: &[&str], x: i16, y: i16, c: Color) {
+    for (j, row) in rows.iter().enumerate() {
+        for (i, ch) in row.bytes().enumerate() {
+            if ch == b'#' {
+                cx.canvas.fill_rect(Rect::new(x + i as i16, y + j as i16, 1, 1), c);
+            }
+        }
+    }
+}
+
+/// 現在地の表示を `area`（ステータスバー）の左端に描く。地は描いてある前提。
+fn draw_pane_map(cx: &mut RenderCx<'_>, area: Rect, map: PaneMap, bg: Color) {
+    for i in 0..3 {
+        let x = area.x + 2 + i as i16 * 15;
+        let c = if i == map.focus {
+            cx.canvas.fill_rect(Rect::new(x, area.y + 1, 14, area.h.saturating_sub(2)), Color::WHITE);
+            bg
+        } else if map.open[i] {
+            Color::WHITE.mix(bg, 77)
+        } else {
+            Color::WHITE.mix(bg, 173)
+        };
+        stamp(cx, PANE_ICONS[i], x + 2, area.y + 2, c);
+        stamp(cx, PANE_DIGITS[i], x + 10, area.y + 3, c);
+    }
+}
+
 /// ステータスバー（最下段、高さ 11）。左右の文字列と札。
 ///
 /// 返す `Damage` の優先度は [`Priority::Status`]（打鍵の遅延に乗せない。§5.2）。
@@ -96,6 +145,8 @@ pub struct StatusBar {
     right: String,
     chips: Vec<Chip>,
     bg: Color,
+    /// 左端の現在地の表示（`None` なら出さない）。
+    panes: Option<PaneMap>,
     dirty: bool,
 }
 
@@ -107,7 +158,7 @@ impl Default for StatusBar {
 
 impl StatusBar {
     pub fn new() -> StatusBar {
-        StatusBar { left: String::new(), right: String::new(), chips: vec![], bg: palette::STATUS, dirty: true }
+        StatusBar { left: String::new(), right: String::new(), chips: vec![], bg: palette::STATUS, panes: None, dirty: true }
     }
     /// 左側の文字列。変わったときだけ描き直す。
     pub fn set_left(&mut self, s: &str) {
@@ -139,6 +190,13 @@ impl StatusBar {
     pub fn chips(&self) -> &[Chip] {
         &self.chips
     }
+    /// 左端の現在地の表示（[`PaneMap`]）。出すと左の文字列は [`PANE_MAP_W`] だけ右から始まる。
+    pub fn set_panes(&mut self, panes: Option<PaneMap>) {
+        if self.panes != panes {
+            self.panes = panes;
+            self.dirty = true;
+        }
+    }
     /// 背景色（実行中は橙、など）。
     pub fn set_bg(&mut self, bg: Color) {
         if self.bg != bg {
@@ -168,8 +226,12 @@ impl Widget for StatusBar {
         }
         let right_area = Rect::new(inner.x, area.y, (right - inner.x as i32).max(0) as u16, area.h);
         let rx = cx.text_right(right_area, &self.right, &ts, Color::WHITE, self.bg);
-        let left_area = Rect::new(inner.x, area.y, (rx - 6 - inner.x as i32).max(0) as u16, area.h);
+        let left_x = inner.x + if self.panes.is_some() { PANE_MAP_W as i16 } else { 0 };
+        let left_area = Rect::new(left_x, area.y, (rx - 6 - left_x as i32).max(0) as u16, area.h);
         cx.text_in(left_area, &self.left, &ts, Color::WHITE, self.bg);
+        if let Some(map) = self.panes {
+            draw_pane_map(cx, area, map, self.bg);
+        }
         Damage::rect(area).with_priority(Priority::Status)
     }
     fn invalidate(&mut self) {

@@ -19,6 +19,7 @@ use zc_intel as _;
 use zc_skk as _;
 
 pub mod editor;
+pub mod folder;
 pub mod layout;
 pub mod mdlayout;
 pub mod picker;
@@ -31,12 +32,13 @@ pub mod textlayout;
 pub mod tree;
 pub mod widgets;
 
+pub use folder::FolderPicker;
 pub use editor::{EditorView, LineMark, NoSpans, PreeditSeg, PreeditStyle, PreeditView, RenderStats, SpanSource, Viewport};
 pub use mdlayout::MdLayouter;
 pub use picker::{CompletionPopup, PickRow, PickerList, PopupItem};
 pub use shortcuts::{ShortcutList, ShortcutRow};
 pub use skkui::{CandidatePopup, CandidateRow, MiniBuffer, MINI_H};
-pub use status::{Chip, EditorStatus, ImeMode, StatusBar, TitleBar};
+pub use status::{Chip, EditorStatus, ImeMode, PaneMap, StatusBar, TitleBar, PANE_MAP_W};
 pub use tabs::{Tab, TabBar};
 pub use terminal::{TermScreen, TerminalPanel, TERM_PANEL_H};
 pub use textlayout::{Caret, CodeLayouter, Deco, DecoKind, LineInput, LineLayout, LineLayouter, VisualRow, VisualRun};
