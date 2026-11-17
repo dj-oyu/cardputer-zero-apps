@@ -5,7 +5,7 @@
 //! | 種類 | 中でやること |
 //! |---|---|
 //! | （共通） | `package-lock.json` があれば `npm ci --ignore-scripts --no-audit --no-fund`、無ければ `npm install --ignore-scripts --package-lock-only` で作ってから `npm ci`（作った lock は書き戻す）。`node_modules` は `<project_dir>/node_modules` に置き、lock の SHA-256 が前回と同じなら飛ばす |
-//! | check | `tsc --noEmit --pretty false`（`tsconfig.json` があればそれ、無ければ実機と同じ既定: `--strict --target es2022 --module esnext --moduleResolution bundler --skipLibCheck`、JS は `--allowJs --checkJs`） |
+//! | check | `tsc --noEmit --pretty false`（`tsconfig.json` があればそれ、無ければ実機と同じ既定: `--strict --target es2022 --module esnext --moduleResolution bundler --skipLibCheck`、JS は `--allowJs` だけ。型は検査せず構文の誤りだけ） |
 //! | build | check と同じ型検査 → 通ったら `esbuild <entry> --bundle --platform=node --format=esm --target=es2022 --outfile=<out>/<名前>.js`（LLRT が持っている `node:*` は外に残す）。成果物の種類は `Js` |
 //! | test | `npm test`（`package.json` に `scripts.test` があるとき。**`--ignore-scripts` は install だけ**で、試験は明示して頼まれたものなので動かす）。結果は終了コードと出力だけ（件数は 0 / 1） |
 //!
@@ -116,7 +116,9 @@ fn run_inner(ctx: &JobCtx<'_>, out: &dyn JobOutput) -> Result<JobResult, Stop> {
         }
         cmd.args(TSC_DEFAULTS);
         if files.iter().any(|f| is_js(f)) {
-            cmd.arg("--allowJs").arg("--checkJs");
+            // JS は構文の誤りだけ（実機の `language.toml` の check と同じ。`--checkJs` にすると
+            // LLRT の `process` などが型の誤りになって、ビルドが通らない。2026-11-17 実機で確認）
+            cmd.arg("--allowJs");
         }
         cmd.args(files.iter().map(|f| format!("./{f}")));
     }
@@ -438,6 +440,25 @@ mod tests {
     }
 
     const PKG: &str = r#"{"name":"t","version":"1.0.0","type":"module","scripts":{"test":"node test.mjs"}}"#;
+
+    #[test]
+    fn js_is_not_type_checked() {
+        // LLRT の `process` などを使う JS も通る（JS は構文の誤りだけを見る）。構文の誤りは落ちる
+        if skip_without(&["node", "npm", "tsc", "esbuild", "zstd"]) {
+            return;
+        }
+        let (_t, src, proj, out_dir) = job(&[
+            ("package.json", PKG),
+            ("app.js", "console.log(typeof process !== 'undefined' ? process.argv.length : 0);\n"),
+        ]);
+        let (r, log) = run_job(&src, &proj, &out_dir, Kind::Build, Some("app.js"));
+        let r = r.unwrap();
+        assert_eq!(r.exit, 0, "{}", log.text());
+        assert_eq!(r.artifact.unwrap().name, "app.js");
+        std::fs::write(src.join("app.js"), "console.log((;\n").unwrap();
+        let (r, log) = run_job(&src, &proj, &out_dir, Kind::Check, Some("app.js"));
+        assert_ne!(r.unwrap().exit, 0, "{}", log.text());
+    }
 
     #[test]
     fn e2e_check_build_test_and_lock() {
