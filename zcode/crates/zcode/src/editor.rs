@@ -836,6 +836,10 @@ impl EditorScreen {
         self.remote = remote;
     }
     /// ファイルツリー。
+    /// ツリーが開いているか・入力がツリーに向いているか（テスト用）。
+    pub fn tree_state(&self) -> (bool, bool) {
+        (self.tree_open, self.focus == Focus::Tree)
+    }
     pub fn tree_mut(&mut self) -> &mut FileTree {
         &mut self.tree
     }
@@ -1771,8 +1775,14 @@ impl EditorScreen {
                 self.set_tree_open(open);
             }
             Command::FocusTree => {
-                self.set_tree_open(true);
-                self.set_focus(Focus::Tree);
+                // Ctrl+E: ツリーへ移る。ツリーにいるときにもう一度押すと、閉じてエディタへ戻る
+                // （開くのと閉じるのを同じキーで。Ctrl+B の開閉もそのまま）
+                if self.tree_open && self.focus == Focus::Tree {
+                    self.set_tree_open(false);
+                } else {
+                    self.set_tree_open(true);
+                    self.set_focus(Focus::Tree);
+                }
             }
             Command::FocusEditor | Command::Cancel => {
                 if !self.tabs.is_empty() {

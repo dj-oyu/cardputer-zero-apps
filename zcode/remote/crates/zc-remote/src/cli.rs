@@ -387,6 +387,43 @@ fn backend_text(b: ipc::Backend) -> &'static str {
     }
 }
 
+/// `check` のログの扱い。ビルド係は診断を、構造化した `Diagnostics` と、道具の出力（ログ）の
+/// 両方で送ってくる。両方出すと 1 件が 2 回（失敗の知らせも数えると 3 回）並ぶので、診断が
+/// 届いたらログは出さない。診断が 1 件も届かなかったとき（道具の出力を読めなかったなど）だけ、
+/// 終わりにログをそのまま出す。
+#[derive(Default)]
+struct CheckLog {
+    held: Vec<u8>,
+    diags: usize,
+    errors: usize,
+}
+
+impl CheckLog {
+    fn log(&mut self, bytes: &[u8]) {
+        self.held.extend_from_slice(bytes);
+    }
+    fn diags(&mut self, files: &[ipc::FileDiags]) {
+        for f in files {
+            self.diags += f.diags.len();
+            self.errors += f.diags.iter().filter(|d| d.severity == zc_core::Severity::Error).count();
+        }
+    }
+    /// 終わりに出すログ（診断が届いていれば無し）。
+    fn leftover(&self) -> Option<&[u8]> {
+        (self.diags == 0 && !self.held.is_empty()).then_some(&self.held[..])
+    }
+    /// 失敗の知らせ。診断が届いていれば件数だけ（中身はもう出してある）。
+    fn failed_text(&self, message: &str, tool_exit: i32) -> String {
+        if self.errors > 0 {
+            format!("型検査でエラーが出た（エラー {} 件）", self.errors)
+        } else if message.is_empty() {
+            format!("型検査でエラーが出た（終了コード {tool_exit}）")
+        } else {
+            format!("型検査でエラーが出た: {message}")
+        }
+    }
+}
+
 /// `check` の診断を 1 件 1 行で出す。
 fn print_diags(out: &mut impl Write, root: &Path, files: &[ipc::FileDiags]) {
     let cwd = std::env::current_dir().ok();
@@ -557,6 +594,7 @@ fn job(a: Args) -> u8 {
     let mut artifact: Option<(ipc::ArtifactKind, bool, PathBuf)> = None;
     let mut last_phase = None;
     let mut cancel_deadline: Option<Instant> = None;
+    let mut check_log = CheckLog::default();
     let done = loop {
         if INTERRUPTED.load(Ordering::SeqCst) && cancel_deadline.is_none() {
             // 取り消して、終わりの知らせを少しだけ待つ。
@@ -597,10 +635,15 @@ fn job(a: Args) -> u8 {
                     }
                 }
                 ipc::Response::Log { bytes, .. } => {
-                    let _ = stderr.lock().write_all(&bytes);
+                    if kind == ipc::JobKind::Check {
+                        check_log.log(&bytes);
+                    } else {
+                        let _ = stderr.lock().write_all(&bytes);
+                    }
                 }
                 ipc::Response::Diagnostics { root, files, .. } => {
                     if kind == ipc::JobKind::Check {
+                        check_log.diags(&files);
                         print_diags(&mut stdout.lock(), &root, &files);
                     }
                 }
@@ -612,6 +655,9 @@ fn job(a: Args) -> u8 {
         }
     };
     let (status, tool_exit, backend, elapsed_ms, message) = done;
+    if let Some(log) = check_log.leftover() {
+        let _ = stderr.lock().write_all(log);
+    }
     if a.stats {
         say(format!("{}（{}・{}ms）", status_text(status), backend_text(backend), elapsed_ms));
     }
@@ -636,7 +682,9 @@ fn job(a: Args) -> u8 {
                 ipc::JobKind::Check => "型検査でエラーが出た",
                 ipc::JobKind::Test => "試験が失敗した",
             };
-            if message.is_empty() {
+            if kind == ipc::JobKind::Check {
+                say(check_log.failed_text(&message, tool_exit));
+            } else if message.is_empty() {
                 say(format!("{what}（終了コード {tool_exit}）"));
             } else {
                 say(format!("{what}: {message}"));
@@ -771,6 +819,28 @@ fn stop() -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_log_is_dropped_when_diagnostics_arrive() {
+        use zc_core::{Diagnostic, Severity};
+        // 診断が届いた: ログ（同じ中身の行）は出さず、失敗の知らせは件数だけ
+        let mut c = CheckLog::default();
+        c.log(b"bad.py:4:10: error: int is not str\n");
+        c.diags(&[ipc::FileDiags { path: "bad.py".into(), diags: vec![Diagnostic::at_line(3, Severity::Error, "int is not str"), Diagnostic::at_line(5, Severity::Warning, "w")] }]);
+        assert_eq!(c.leftover(), None);
+        assert_eq!(c.failed_text("bad.py:4:10: error: int is not str", 1), "型検査でエラーが出た（エラー 1 件）");
+        // 警告だけ（成功）でもログは出さない
+        let mut c = CheckLog::default();
+        c.log(b"t.sh:2:6: warning[SC2086]: quote\n");
+        c.diags(&[ipc::FileDiags { path: "t.sh".into(), diags: vec![Diagnostic::at_line(1, Severity::Warning, "quote")] }]);
+        assert_eq!(c.leftover(), None);
+        // 診断が 1 件も読めなかった: 道具の出力をそのまま出し、知らせは今まで通り
+        let mut c = CheckLog::default();
+        c.log(b"something odd\n");
+        assert_eq!(c.leftover(), Some(&b"something odd\n"[..]));
+        assert_eq!(c.failed_text("", 2), "型検査でエラーが出た（終了コード 2）");
+        assert_eq!(c.failed_text("odd", 2), "型検査でエラーが出た: odd");
+    }
 
     fn args(a: &[&str]) -> Vec<OsString> {
         a.iter().map(OsString::from).collect()
