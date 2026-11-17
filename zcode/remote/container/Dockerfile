@@ -11,6 +11,7 @@
 # aarch64 のクロスの gcc）に、zstd・Node と npm・esbuild・TypeScript 7 の tsc・受付の
 # zc-buildd を足したもの。Python・フォント・git は入れない（冷えた起動で引くので小さく保つ）。
 # 大きさ（2026-11-17）: 展開後 1.52GB、レジストリに送る形（gzip の層）で約 500MB。内訳は zcode/AGENTS.md。
+# LSP のために rust-analyzer と rust-src（std の索引用）を足して 1.63GB（gzip で約 25MB 増。docs/measurements.md §13）。
 #
 # 版はここの ARG で固定し、取ってきたものは SHA-256 で確かめる:
 #   - ベースは日付つきのタグ + digest
@@ -46,9 +47,10 @@ RUN curl -fsSLo /tmp/rustup-init \
  && chmod +x /tmp/rustup-init \
  && /tmp/rustup-init -y --no-modify-path --profile minimal \
       --default-toolchain "${RUST_VERSION}" --target aarch64-unknown-linux-gnu \
+      --component rust-analyzer --component rust-src \
  && rm -rf /tmp/rustup-init /opt/rustup/downloads /opt/rustup/tmp /opt/cargo/registry \
  && chmod -R a+rX /opt/cargo /opt/rustup \
- && rustc --version && cargo --version
+ && rustc --version && cargo --version && rust-analyzer --version
 
 # ---- 受付のプログラム（zc-buildd）を作る ----
 FROM toolchain AS build
