@@ -49,6 +49,8 @@ pub enum AppEvent {
     Store(zc_store::StoreResponse),
     /// batch がハイライトの残り（行頭の文脈）を計算し終えた。
     HighlightRest { doc: DocId, rest: Versioned<zc_highlight::RestStates> },
+    /// batch が Markdown 全体を解析し終えた（版つき。古ければ捨てる）。
+    MarkdownParsed { doc: DocId, parsed: Versioned<zc_markdown::MdDocument> },
 }
 
 impl std::fmt::Debug for AppEvent {
@@ -61,6 +63,7 @@ impl std::fmt::Debug for AppEvent {
             AppEvent::Checked { doc, result } => write!(f, "Checked({doc:?}, {result:?})"),
             AppEvent::Store(r) => f.debug_tuple("Store").field(r).finish(),
             AppEvent::HighlightRest { doc, rest } => write!(f, "HighlightRest({doc:?}, {:?}, from {})", rest.version, rest.value.from_line),
+            AppEvent::MarkdownParsed { doc, parsed } => write!(f, "MarkdownParsed({doc:?}, {:?})", parsed.version),
         }
     }
 }

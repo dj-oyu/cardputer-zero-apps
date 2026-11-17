@@ -14,7 +14,7 @@
 //! x は行の本文の左端からの画素。y は論理行の上端からの画素。
 
 use core::ops::Range;
-use zc_core::{Attrs, Span, Style, Theme, TokenKind};
+use zc_core::{Attrs, Color, Span, Style, Theme, TokenKind};
 use zc_font::{Fonts, TextStyle};
 
 /// 表示行の中の、同じ書体・同じ見た目が続く区間。
@@ -24,6 +24,38 @@ pub struct VisualRun {
     pub chars: Range<u32>,
     pub font: TextStyle,
     pub style: Style,
+    /// 隠した文字（幅 0。描かない）。[`LineLayout::push_hidden`] で足した文字。
+    pub hidden: bool,
+}
+
+/// 行の飾りの形。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DecoKind {
+    /// 塗りつぶした矩形（`x`・`y` が左上）。
+    Fill { w: u16, h: u16 },
+    /// 1 字（`x` がペンの位置、`y` がベースライン）。背景は行の地の色。
+    Glyph { ch: char, font: TextStyle },
+}
+
+/// 行の飾り（行の背景・左の線・箇条書きの点・チェックボックス・見出しの下線）。
+/// レイアウトが置き、ビューが行の背景の上・選択と文字の下に描く。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Deco {
+    /// 本文の左端からの x。
+    pub x: i32,
+    /// 論理行の上端からの y。
+    pub y: i32,
+    pub kind: DecoKind,
+    pub color: Color,
+}
+
+impl Deco {
+    pub fn fill(x: i32, y: i32, w: u16, h: u16, color: Color) -> Deco {
+        Deco { x, y, kind: DecoKind::Fill { w, h }, color }
+    }
+    pub fn glyph(x: i32, baseline: i32, ch: char, font: TextStyle, color: Color) -> Deco {
+        Deco { x, y: baseline, kind: DecoKind::Glyph { ch, font }, color }
+    }
 }
 
 /// 表示行 1 つ。
@@ -67,6 +99,11 @@ pub struct LineLayout {
     /// 文字の境目の x。表示行ごとに `文字数 + 1` 個（折り返しの境目は、前の行の
     /// 右端と次の行の左端の 2 つの x を持つ）。
     xs: Vec<i32>,
+    decos: Vec<Deco>,
+    /// 文字列とトークンのほかに見た目を決めるものの印（0 なら無し）。
+    sig: u32,
+    /// 区間の背景（`Style::bg`）を、表示行の上下からこれだけ縮めて塗る。
+    bg_inset: u8,
     height: u16,
     width: i32,
     chars: u32,
@@ -81,6 +118,9 @@ impl LineLayout {
         self.rows.clear();
         self.runs.clear();
         self.xs.clear();
+        self.decos.clear();
+        self.sig = 0;
+        self.bg_inset = 0;
         self.height = 0;
         self.width = 0;
         self.chars = 0;
@@ -103,6 +143,13 @@ impl LineLayout {
     }
     /// いまの表示行に 1 文字足す。書体と見た目が直前と同じなら、同じ区間にまとめる。
     pub fn push(&mut self, advance: u16, font: TextStyle, style: Style) {
+        self.push_char(advance, font, style, false)
+    }
+    /// いまの表示行に、隠した文字を 1 つ足す（幅 0。描かないが、桁は数える）。
+    pub fn push_hidden(&mut self, font: TextStyle, style: Style) {
+        self.push_char(0, font, style, true)
+    }
+    fn push_char(&mut self, advance: u16, font: TextStyle, style: Style, hidden: bool) {
         debug_assert!(!self.rows.is_empty(), "start_row を先に呼ぶ");
         let row = self.rows.last_mut().expect("start_row を先に呼ぶ");
         let x = *self.xs.last().expect("xs は空でない") + advance as i32;
@@ -111,14 +158,39 @@ impl LineLayout {
         let c = self.chars;
         row.chars.end = c + 1;
         match self.runs.last_mut() {
-            Some(r) if row.runs.end > row.runs.start && r.font == font && r.style == style => r.chars.end = c + 1,
+            Some(r) if row.runs.end > row.runs.start && r.hidden == hidden && r.font == font && r.style == style => r.chars.end = c + 1,
             _ => {
-                self.runs.push(VisualRun { chars: c..c + 1, font, style });
+                self.runs.push(VisualRun { chars: c..c + 1, font, style, hidden });
                 row.runs.end += 1;
             }
         }
         self.chars = c + 1;
         self.width = self.width.max(x);
+    }
+    /// 飾りを足す（足した順に描く）。
+    pub fn push_deco(&mut self, deco: Deco) {
+        self.decos.push(deco);
+    }
+    /// 行の飾り。
+    pub fn decos(&self) -> &[Deco] {
+        &self.decos
+    }
+    /// 文字列とトークンが同じでも見た目が変わるレイアウト（Markdown: 上の行の ``` で
+    /// コードになる、など）は、見た目を決めるものの印を付ける。ビューは、これが
+    /// 変わった行を描き直す。
+    pub fn set_sig(&mut self, sig: u32) {
+        self.sig = sig;
+    }
+    pub fn sig(&self) -> u32 {
+        self.sig
+    }
+    /// 区間の背景（`Style::bg`）を、表示行の上下から `px` 画素ずつ縮めて塗る
+    /// （インラインコードの背景を、上下の行とくっつけない）。
+    pub fn set_bg_inset(&mut self, px: u8) {
+        self.bg_inset = px;
+    }
+    pub fn bg_inset(&self) -> u8 {
+        self.bg_inset
     }
     /// 作り終える。表示行が 1 つも無ければ、高さ `height` の空の行を 1 つ作る。
     pub fn finish(&mut self, height: u16, baseline: u16) {

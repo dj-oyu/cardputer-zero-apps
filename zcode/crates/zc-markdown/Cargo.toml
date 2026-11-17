@@ -8,3 +8,4 @@ publish.workspace = true
 
 [dependencies]
 zc-core.workspace = true
+pulldown-cmark.workspace = true
