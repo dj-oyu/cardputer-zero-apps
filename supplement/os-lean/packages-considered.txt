@@ -1,0 +1,23 @@
+# WIP: 特定版のシミュレーション・実験で削除した直接指定候補。
+# このファイルをそのまま一括purgeせず、各環境で依存と用途を確認する。
+chromium
+chromium-common
+chromium-l10n
+firefox
+rpi-chromium-mods
+firmware-atheros
+firmware-mediatek
+firmware-realtek
+fonts-noto-cjk-extra
+rpd-wallpaper
+rpd-wallpaper-trixie
+rpi-imager
+rpi-userguide
+vlc
+vlc-bin
+vlc-data
+vlc-l10n
+vlc-plugin-base
+realvnc-vnc-server
+rpi-connect
+mkvtoolnix
