@@ -38,6 +38,8 @@ encoding_rs = "0.8"
 # zc-term: エスケープシーケンスの解釈と文字幅
 vte = "0.15"
 unicode-width = "0.2"
+# zc-markdown: Markdown の解析 (HTML への変換は使わない)
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [profile.release]
 opt-level = 3

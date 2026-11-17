@@ -18,7 +18,7 @@
 //!   外から見える桁（[`EditorView::point_of`]・[`EditorView::pos_at`]・選択・波線）は
 //!   いつも文書の桁で、表示上の桁との行き来はビューの中で済ませる
 
-use crate::textlayout::{LineInput, LineLayout, LineLayouter};
+use crate::textlayout::{DecoKind, LineInput, LineLayout, LineLayouter};
 use crate::RenderCx;
 use zc_core::{palette, Attrs, BlendLut, Color, Damage, LineChange, LineSource, Pos, Priority, Rect, RowRange, Span};
 use zc_font::TextStyle;
@@ -851,6 +851,10 @@ impl EditorView {
         h.u32(line);
         h.u32(self.vp.scroll_x as u32);
         h.u32(lay.height() as u32 | (lay.rows().len() as u32) << 16);
+        if lay.sig() != 0 {
+            h.u32(0x4c41_5900);
+            h.u32(lay.sig());
+        }
         let caret = is_cur && self.focused && self.cursor_on;
         h.u32(is_cur as u32 | (caret as u32) << 1 | (has_sel as u32) << 2);
         if caret {
@@ -1000,6 +1004,25 @@ fn paint_line(cx: &mut RenderCx<'_>, lay: &LineLayout, text: &str, p: &PaintLine
         }
         let clip = Rect::new(area.x + p.gutter_w as i16, top as i16, area.w.saturating_sub(p.gutter_w), h);
         let (cl, cr) = (clip.x as i32, clip.right());
+        // 行の飾り（この表示行にかかる分だけ）
+        for d in lay.decos() {
+            let (dx, dy) = (p.origin_x + d.x, p.y + d.y);
+            match d.kind {
+                DecoKind::Fill { w, h } => {
+                    let (x0, x1) = (dx.clamp(cl, cr), (dx + w as i32).clamp(cl, cr));
+                    let (y0, y1) = (dy.clamp(top, bot), (dy + h as i32).clamp(top, bot));
+                    if x1 > x0 && y1 > y0 {
+                        cx.canvas.fill_rect(Rect::new(x0 as i16, y0 as i16, (x1 - x0) as u16, (y1 - y0) as u16), d.color);
+                    }
+                }
+                DecoKind::Glyph { ch, font } => {
+                    if dy >= ry && dy < ry + row.height as i32 {
+                        let l = lut.get(d.color, p.bg);
+                        cx.fonts.draw_char(cx.canvas, dx, dy, ch, &font, &l, clip);
+                    }
+                }
+            }
+        }
         let x_of = |col: u32| p.origin_x + xs[(col.clamp(row.chars.start, row.chars.end) - row.chars.start) as usize];
         // 選択範囲の背景
         let sel = p.sel.map(|(a, b, nl)| {
@@ -1026,10 +1049,19 @@ fn paint_line(cx: &mut RenderCx<'_>, lay: &LineLayout, text: &str, p: &PaintLine
         }
         // 文字
         for run in lay.runs(row) {
+            if run.hidden {
+                // 隠した文字: 読み進めるだけ
+                for _ in run.chars.clone() {
+                    chars.next();
+                }
+                continue;
+            }
             let (rx0, rx1) = (x_of(run.chars.start), x_of(run.chars.end));
             if let Some(bg) = run.style.bg {
-                if rx1 > cl && rx0 < cr {
-                    let r = Rect::new(rx0.clamp(cl, cr) as i16, top as i16, (rx1.clamp(cl, cr) - rx0.clamp(cl, cr)) as u16, h);
+                let inset = lay.bg_inset() as i32;
+                let (y0, y1) = ((ry + inset).max(top), (ry + row.height as i32 - inset).min(bot));
+                if rx1 > cl && rx0 < cr && y1 > y0 {
+                    let r = Rect::new(rx0.clamp(cl, cr) as i16, y0 as i16, (rx1.clamp(cl, cr) - rx0.clamp(cl, cr)) as u16, (y1 - y0) as u16);
                     cx.canvas.fill_rect(r, bg);
                 }
             }
