@@ -380,3 +380,25 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - 環境変数（`ZC_REMOTE_URL` など）は `serve` を起動するときに読まれる。動いている `serve` には効かないので、
   試すときは先に `zc-remote stop`
 
+## 打鍵が止まったときの型検査（2026-11-17、ブランチ `zcode-auto-check`）
+
+- `remote.json` の `check_on_save` に `idle` を足した（保存時に加えて、打鍵が止まったときも）。既定は
+  `always` のまま（保存時だけ）。zcode は設定を読まない: `SubmitFlags::AUTO` の依頼を serve が
+  `idle` のときだけ受け、ほかは `NotApplicable` で断る。zcode は断られた・届かない（`Ok`・`Failed`・
+  `Cancelled` 以外）ら次の保存まで休む。`remote.json` が無い人には、専用スレッドも serve も作らない
+- zcode: `remote` のある言語で編集したら `TimerId::AutoCheck` を 1200ms（`editor::AUTO_CHECK_IDLE`）で
+  仕掛け直すだけ（打鍵ごとの仕事は版の比較とタイマー）。鳴ったら、未保存のタブの写し
+  （`snapshot_lines`）を `RemoteJob::overlay` に入れて頼む。バイト列にするのは専用スレッド（合計 1MiB
+  まで。超えたら送らない）。前に頼んだ版のまま・同じプロジェクトでほかの相手のジョブ（F5 のビルド）や
+  F6 の試験が動いている間は頼まない。診断の基準は頼んだときの各タブの版（`MyJob::bases` → `bind`）。
+  進み具合・知らせ・オフラインはステータスバーに出さない（波線と `⊗ n` だけ）。「zc-remote が無い」は
+  次の保存時の check の終わりに出す
+- IPC は版 2: `Submit` の後ろに重ね（絶対パス + 中身）。serve は版 1 の相手も受ける（`Hello` を相手の
+  版で返す）。新しい zcode は古い serve とは話せない（版が違う → 実機の構文チェックに回る）ので、
+  **zc-remote を先に入れ替え、`zc-remote stop` してから zcode を入れる**
+- serve: 走査のあとで目録の同じパスを重ねの大きさと SHA-256 に差し替え（`scan::apply_overlay`）、
+  中身は RAM から送る。ハッシュの覚えはディスクのまま。目録に無いファイル（除外・まだ無い）と根の
+  外のものは捨てる。依頼は `MAX_REQUEST_FRAME`（256KiB + 1MiB）まで読む
+- Worker: 1 日の上限（400）は `check` を数えない（build / test だけ）。deploy し直すまで効かない
+- 実機では未確認: 打鍵中の遅延・Wi-Fi での往復・`idle` での電池
+

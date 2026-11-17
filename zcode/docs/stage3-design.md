@@ -457,7 +457,7 @@ zcode と同じプロセスグループ（APPLaunch の Esc 長押しで一緒�
 ```
 
 - `backend`: `auto`（PC に届けば PC）/ `pc` / `cloudflare`
-- `check_on_save`: `always` / `warm`（接続が温かいときだけ）/ `manual`
+- `check_on_save`: `always` / `idle`（保存時に加えて、打鍵が止まったときも未保存の中身で。2026-11-17 に足した）/ `warm`（接続が温かいときだけ）/ `manual`
 
 `~/.config/zcode/remote-token.json`（**権限 0600。広ければ読まない**。ログに出さない）:
 
@@ -523,7 +523,7 @@ zcode / CLI → serve:
 |---|---|---|
 | 0x0001 | Hello | `u16 version`, `u8 client`（1 = エディタ、2 = CLI） |
 | 0x0002 | Warm | `path file` |
-| 0x0003 | Submit | `u8 kind`（1 build / 2 check / 3 test）, `u8 lang`（1 rust / 2 c / 3 node）, `u16 flags`, `path file` |
+| 0x0003 | Submit | `u8 kind`（1 build / 2 check / 3 test）, `u8 lang`（1 rust / 2 c / 3 node）, `u16 flags`, `path file`, `u16 重ねの件数`, 件ごとに `path file`・`u32 長さ`・バイト列（版 2。版 1 は `file` で終わる） |
 | 0x0004 | Cancel | — |
 | 0x0005 | Status | — |
 | 0x0006 | Shutdown | — |
@@ -542,11 +542,16 @@ serve → zcode / CLI:
 | 0x8008 | FileWritten | `u32 tag`, `path path` |
 | 0x8009 | Done | `u32 tag`, `u8 status`, `i32 exit`, `u8 backend`, `u32 elapsed_ms`, `str message` |
 
-例（Submit、`req` = 7、check、rust、`/a/b.rs`）:
-`15 00 00 00 | 03 00 | 00 00 | 07 00 00 00 | 02 | 01 | 00 00 | 07 00 2f 61 2f 62 2e 72 73`
+例（Submit、`req` = 7、check、rust、`/a/b.rs`、重ね無し。版 2）:
+`17 00 00 00 | 03 00 | 00 00 | 07 00 00 00 | 02 | 01 | 00 00 | 07 00 2f 61 2f 62 2e 72 73 | 00 00`
 
 `tag` は serve が振るジョブの通し番号。同じジョブについての知らせを突き合わせる。型の正本は
 `zc-remote-ipc/src/lib.rs`。
+
+約束の版は 2（2026-11-17。`Submit` に未保存の中身の重ねと `flags` の bit4 `AUTO` を足した）。
+serve は版 1 の相手も受け、`Hello` を相手の版で返す。依頼は重ねの分だけ大きくてよい
+（`MAX_REQUEST_FRAME` = 256KiB + 1MiB）。重ねのパスは絶対パス（zcode は根を知らない。serve が
+根からの相対に直し、目録に無いものは捨てる）。
 
 ### 8.3 保存したとき
 

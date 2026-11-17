@@ -9,10 +9,11 @@ use std::time::{Duration, Instant};
 use zc_core::rt::{main_channel, poll_fds, MainReceiver};
 use zc_core::{Diagnostic, Severity};
 use zc_remote_ipc::{
-    decode_request, encode_response, Backend, ClientKind, DoneStatus, FileDiags, FrameReader, JobKind, JobTag, Phase, RemoteLang, ReqId, Request, Response, SubmitFlags, IPC_VERSION,
+    decode_request, encode_response, Backend, ClientKind, DoneStatus, FileDiags, FrameReader, JobKind, JobTag, OverlayFile, Phase, RemoteLang, ReqId, Request, Response, SubmitFlags, IPC_VERSION, MAX_OVERLAY_BYTES,
 };
 use zcode::app::AppEvent;
-use zcode::remote::{RemoteClient, RemoteEvent, RemoteJob, RemoteReq, MIN_WAKE_INTERVAL};
+use zcode::doc::{SimpleDoc, TextDoc};
+use zcode::remote::{OverlaySource, RemoteClient, RemoteEvent, RemoteJob, RemoteReq, MIN_WAKE_INTERVAL};
 
 /// 試験ごとに別の一時フォルダ（`<dir>/zcode/remote.sock` を置く）。
 struct TempDir(PathBuf);
@@ -52,7 +53,7 @@ impl Fake {
                 Ok((stream, _)) => {
                     stream.set_nonblocking(false).unwrap();
                     stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-                    return Fake { stream, reader: FrameReader::new() };
+                    return Fake { stream, reader: FrameReader::for_requests() };
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < until => std::thread::sleep(Duration::from_millis(5)),
                 Err(e) => panic!("accept: {e}"),
@@ -122,7 +123,7 @@ fn is_done(e: &RemoteEvent) -> bool {
 }
 
 fn check_job(file: &str) -> RemoteJob {
-    RemoteJob { kind: JobKind::Check, lang: RemoteLang::Rust, flags: SubmitFlags::NONE, file: file.into() }
+    RemoteJob::new(JobKind::Check, RemoteLang::Rust, SubmitFlags::NONE, file.into())
 }
 
 fn diag(line: u32) -> Diagnostic {
@@ -144,8 +145,9 @@ fn submit_yields_events_then_done() {
     let req = client.submit(check_job("/p/src/main.rs"));
     let mut fake = Fake::accept(&listener);
     fake.handshake();
-    let Some(Request::Submit { req: r, kind, lang, flags, file }) = fake.recv() else { panic!() };
+    let Some(Request::Submit { req: r, kind, lang, flags, file, overlay }) = fake.recv() else { panic!() };
     assert_eq!((r, kind, lang, flags, file.as_path()), (ReqId(req.0), JobKind::Check, RemoteLang::Rust, SubmitFlags::NONE, Path::new("/p/src/main.rs")));
+    assert!(overlay.is_empty());
 
     let tag = JobTag(77);
     fake.send(&Response::Phase { req: r, tag, root: "/p".into(), phase: Phase::Scanned, done: 0, total: 0 });
@@ -246,7 +248,7 @@ fn logs_do_not_wake_main_more_often_than_33ms() {
     let (tx, rx) = main_channel().unwrap();
     let client = RemoteClient::with_socket(tx, no_program(), dir.socket());
 
-    let req = client.submit(RemoteJob { kind: JobKind::Test, lang: RemoteLang::Rust, flags: SubmitFlags::WANT_LOG, file: "/p/a.rs".into() });
+    let req = client.submit(RemoteJob::new(JobKind::Test, RemoteLang::Rust, SubmitFlags::WANT_LOG, "/p/a.rs".into()));
     let mut fake = Fake::accept(&listener);
     fake.handshake();
     let Some(Request::Submit { req: r, .. }) = fake.recv() else { panic!() };
@@ -462,4 +464,52 @@ fn request_numbers_are_unique_and_nonzero() {
         n += is_done(e) as usize;
         n == 2
     });
+}
+
+fn overlay_of(path: &str, text: &str) -> OverlaySource {
+    OverlaySource::new(path.into(), SimpleDoc::from_text(text).snapshot_lines())
+}
+
+/// 打鍵が止まったときの check: 未保存の中身は専用スレッドでバイト列にして、Submit に重ねて送る。
+#[test]
+fn overlay_is_sent_with_the_submit() {
+    let dir = TempDir::new("overlay");
+    let listener = UnixListener::bind(dir.socket()).unwrap();
+    let (tx, rx) = main_channel().unwrap();
+    let client = RemoteClient::with_socket(tx, no_program(), dir.socket());
+    let mut job = RemoteJob::new(JobKind::Check, RemoteLang::Rust, SubmitFlags::AUTO, "/p/src/main.rs".into());
+    job.overlay = vec![overlay_of("/p/src/main.rs", "fn main() {\n    let あ: i32 = \"x\";\n}\n"), overlay_of("/p/src/lib.rs", "")];
+    let req = client.submit(job);
+    let mut fake = Fake::accept(&listener);
+    fake.handshake();
+    let Some(Request::Submit { req: r, flags, overlay, .. }) = fake.recv() else { panic!() };
+    assert_eq!((r, flags), (ReqId(req.0), SubmitFlags::AUTO));
+    // SimpleDoc は末尾の改行を落として持つので、つないだ中身にも付かない
+    assert_eq!(
+        overlay,
+        vec![
+            OverlayFile { path: "/p/src/main.rs".into(), bytes: "fn main() {\n    let あ: i32 = \"x\";\n}".into() },
+            OverlayFile { path: "/p/src/lib.rs".into(), bytes: Vec::new() },
+        ]
+    );
+    fake.send(&Response::Done { req: r, tag: JobTag(1), status: DoneStatus::Ok, exit: 0, backend: Backend::Pc, elapsed_ms: 1, message: "".into() });
+    collect(&rx, Duration::from_secs(5), is_done);
+}
+
+/// 重ねの合計が上限を超えたら、serve に送らず「対象ではない」で終わる（serve も起動しない）。
+#[test]
+fn oversized_overlay_is_not_sent() {
+    let dir = TempDir::new("overlay-big");
+    let (tx, rx) = main_channel().unwrap();
+    let client = RemoteClient::with_socket(tx, no_program(), dir.socket());
+    let half = "a".repeat(MAX_OVERLAY_BYTES / 2);
+    let mut job = RemoteJob::new(JobKind::Check, RemoteLang::Rust, SubmitFlags::AUTO, "/p/a.rs".into());
+    job.overlay = vec![overlay_of("/p/a.rs", &half), overlay_of("/p/b.rs", &half), overlay_of("/p/c.rs", "x")];
+    let req = client.submit(job);
+    let got = events(collect(&rx, Duration::from_secs(5), is_done));
+    // zc-remote が無い（no_program）のに Unavailable が来ない = つなごうとしていない
+    assert_eq!(got.len(), 1, "{got:?}");
+    let RemoteEvent::Done { req: r, status, message, .. } = &got[0] else { panic!("{got:?}") };
+    assert_eq!((*r, *status), (Some(req), DoneStatus::NotApplicable));
+    assert!(message.contains("MiB"), "{message}");
 }

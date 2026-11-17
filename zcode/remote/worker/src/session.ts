@@ -13,6 +13,7 @@
 //      DO は中継と見張りだけ（同じ実装を PC 直結でも使い、Cloudflare なしで試せるようにするため）
 //   4. 通り過ぎるテキストを見て**ジョブの台帳**（SQLite）を付ける:
 //        実機 → job      … 1 日の上限を数える。超えていたら中継せず error {limit} を返す
+//                          （check は数えない。打鍵が止まるたびに頼まれ、軽いため。build / test だけ数える）
 //        受付 → started  … running にする（始まった時刻を付け直す）
 //        受付 → done     … done にする（status・時刻を残す）
 //      バイナリは見ない。JSON として読めないテキストは中継せず error {protocol} で閉じる
@@ -127,7 +128,10 @@ export interface JobRow {
 
 /** 台帳（純粋な部分。SQLite の口だけに依存させ、試験しやすくする）。 */
 export interface Ledger {
-  /** job を数える。その日の上限を超えていたら false。同じ job id の出し直しは数えない。 */
+  /**
+   * job を数える。その日の上限を超えていたら false。同じ job id の出し直しは数えない。
+   * check は台帳に載せるが数えない（上限で断らない）。
+   */
   admit(job: string, kind: JobRow["kind"], nowMs: number, perDay: number): boolean;
   started(job: string, nowMs: number): void;
   done(job: string, status: string, nowMs: number): void;
@@ -181,8 +185,10 @@ export class SqlLedger implements Ledger {
       this.sql(`UPDATE jobs SET kind = ?, state = 'running', status = NULL, started_ms = ?, finished_ms = NULL WHERE job = ?`, kind, nowMs, job);
       return true;
     }
-    const used = Number(this.sql(`SELECT COUNT(*) AS n FROM jobs WHERE day = ?`, day)[0]?.n ?? 0);
-    if (used >= perDay) return false;
+    if (kind !== "check") {
+      const used = Number(this.sql(`SELECT COUNT(*) AS n FROM jobs WHERE day = ? AND kind != 'check'`, day)[0]?.n ?? 0);
+      if (used >= perDay) return false;
+    }
     this.sql(
       `INSERT OR REPLACE INTO jobs (job, kind, state, status, day, started_ms, finished_ms)
        VALUES (?, ?, 'running', NULL, ?, ?, NULL)`,

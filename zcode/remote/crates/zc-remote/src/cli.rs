@@ -531,7 +531,7 @@ fn job(a: Args) -> u8 {
         }
     };
     let req = ipc::ReqId(1);
-    if ipc_conn.send(&ipc::Request::Submit { req, kind, lang, flags: ipc::SubmitFlags(flags), file }).is_err() {
+    if ipc_conn.send(&ipc::Request::Submit { req, kind, lang, flags: ipc::SubmitFlags(flags), file, overlay: Vec::new() }).is_err() {
         say("serve との接続が切れた");
         return exit::ERROR;
     }

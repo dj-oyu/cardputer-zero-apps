@@ -134,6 +134,7 @@ const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 const J1 = "7f3a".repeat(8);
 const J2 = "00ff".repeat(8);
+const J3 = "a1b2".repeat(8);
 const hello = JSON.stringify({ type: "hello", v: 1, client: "zc-remote/0.1.0" });
 const jobMsg = (job: string, kind = "build"): string =>
   JSON.stringify({ type: "job", job, project: "3f9a", tree: "b1c2", kind, lang: "rust", opts: {}, log: true });
@@ -187,15 +188,28 @@ describe("SqlLedger", () => {
   });
 
   it("1 日の上限。同じ job id の出し直しは数えない", () => {
-    expect(l.admit("a1", "check", t0, 2)).toBe(true);
-    expect(l.admit("a2", "check", t0, 2)).toBe(true);
-    expect(l.admit("a3", "check", t0, 2)).toBe(false);
+    expect(l.admit("a1", "build", t0, 2)).toBe(true);
+    expect(l.admit("a2", "test", t0, 2)).toBe(true);
+    expect(l.admit("a3", "build", t0, 2)).toBe(false);
     expect(l.stateOf("a3")).toBeNull();
     // 出し直しは、上限に達していても通る
     l.done("a1", "failed", t0 + 1);
-    expect(l.admit("a1", "check", t0 + 2, 2)).toBe(true);
+    expect(l.admit("a1", "build", t0 + 2, 2)).toBe(true);
     expect(l.stateOf("a1")).toBe("running");
-    expect(l.admit("a3", "check", t0 + 3, 2)).toBe(false);
+    expect(l.admit("a3", "test", t0 + 3, 2)).toBe(false);
+  });
+
+  it("check は数えない: 上限に達していても通り、build / test の枠も減らさない", () => {
+    for (let i = 0; i < 5; i++) expect(l.admit(`c${i}`, "check", t0, 2)).toBe(true);
+    // 台帳には載る（running の見張り・lost の判定に使う）
+    expect(l.stateOf("c0")).toBe("running");
+    expect(l.running()).toBe(5);
+    expect(l.admit("b1", "build", t0, 2)).toBe(true);
+    expect(l.admit("b2", "test", t0, 2)).toBe(true);
+    expect(l.admit("b3", "build", t0, 2)).toBe(false);
+    expect(l.admit("c5", "check", t0, 2)).toBe(true);
+    // 上限 0 でも check は通る
+    expect(l.admit("c6", "check", t0, 0)).toBe(true);
   });
 
   it("日付（UTC）が変わると数え直す。前の日の job id は新しい日に数える", () => {
@@ -451,6 +465,17 @@ describe("ジョブの台帳", () => {
     w.clock.t += 86_400_000;
     await w.core.message(dev, jobMsg(J2));
     expect(up.sent).toHaveLength(3);
+  });
+
+  it("check のジョブは 1 日の上限で断らない", async () => {
+    const w = world(1);
+    const { dev, up } = await attachDevice(w);
+    await w.core.message(dev, jobMsg(J1));
+    await w.core.message(dev, jobMsg(J2, "check"));
+    await w.core.message(dev, jobMsg(J3, "check"));
+    expect(up.sent).toEqual([jobMsg(J1), jobMsg(J2, "check"), jobMsg(J3, "check")]);
+    expect(dev.json()).toEqual([]);
+    expect(w.ledger.stateOf(J3)).toBe("running");
   });
 
   it("実機が切れても、ジョブは台帳で running のまま。上流だけ閉じる。つなぎ直した接続で done が付く", async () => {

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
-use zc_remote::scan::{find_project, read_blob, HashCache, Project, ProjectError, ScanError, Shape};
+use zc_remote::scan::{apply_overlay, find_project, read_blob, resolve_overlay, HashCache, Project, ProjectError, ScanError, Shape};
 use zc_wire::limits::{CHUNK_BYTES, MAX_FILE_BYTES, MAX_TREE_FILES};
 use zc_wire::msg::Lang;
 
@@ -413,4 +413,43 @@ fn read_blob_empty_file() {
     assert!(r.unwrap());
     assert!(data.is_empty());
     assert!(offs.is_empty());
+}
+
+// ---- 未保存の中身の重ね（打鍵が止まったときの check） ----
+
+#[test]
+fn overlay_replaces_the_disk_entry_without_touching_the_cache() {
+    let t = Tmp::new("overlay");
+    t.write("Cargo.toml", "[package]\n");
+    t.write(".gitignore", "secret.rs\n");
+    let main = t.write("src/main.rs", "fn main() {}\n");
+    t.write("src/secret.rs", "x\n");
+    let p = tree(&t.0, Lang::Rust);
+    let unsaved = b"fn main() { let x: i32 = \"s\"; }\n".to_vec();
+    let files = vec![
+        (main.clone(), unsaved.clone()),
+        // 除外されたもの・ディスクに無いもの・根の外のものは使わない
+        (t.p("src/secret.rs"), b"y".to_vec()),
+        (t.p("src/new.rs"), b"z".to_vec()),
+        (std::env::temp_dir().join("outside.rs"), b"o".to_vec()),
+    ];
+    let ov = resolve_overlay(&p, files);
+    assert_eq!(ov.iter().map(|o| o.rel.as_str()).collect::<Vec<_>>(), ["src/main.rs", "src/secret.rs", "src/new.rs"]);
+    assert_eq!(ov[0].sha256, sha_hex(&unsaved));
+
+    let mut cache = HashCache::new();
+    let (m, _) = cache.scan(&p, later()).unwrap();
+    let m2 = apply_overlay(m.clone(), &ov).unwrap();
+    let entry = |m: &zc_wire::tree::Manifest, path: &str| m.files().iter().find(|f| f.path == path).cloned();
+    let e = entry(&m2, "src/main.rs").unwrap();
+    assert_eq!((e.size, e.sha256.as_str()), (unsaved.len() as u64, sha_hex(&unsaved).as_str()));
+    assert_eq!(entry(&m2, "Cargo.toml"), entry(&m, "Cargo.toml"));
+    assert!(entry(&m2, "src/secret.rs").is_none() && entry(&m2, "src/new.rs").is_none());
+    assert_ne!(m2.tree_id(), m.tree_id());
+    // 覚えはディスクの中身のまま: 次の走査（重ね無し）はディスクの SHA-256
+    let (m3, st) = cache.scan(&p, later()).unwrap();
+    assert_eq!(entry(&m3, "src/main.rs").unwrap().sha256, sha_hex(b"fn main() {}\n"));
+    assert_eq!(st.hashed_files, 0);
+    // 当たる重ねが無ければ、同じ目録をそのまま返す
+    assert!(std::sync::Arc::ptr_eq(&apply_overlay(m.clone(), &ov[1..]).unwrap(), &m));
 }
