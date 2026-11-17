@@ -56,6 +56,8 @@ pub enum AppEvent {
     Remote(crate::remote::RemoteEvent),
     /// batch がハイライトの残り（行頭の文脈）を計算し終えた。
     HighlightRest { doc: DocId, rest: Versioned<zc_highlight::RestStates> },
+    /// storage が起動時の控えを読み終えた（§8.4。復元するものが無ければ `None`）。
+    RestoreFound(Option<zc_store::Restore>),
     /// batch が Markdown 全体を解析し終えた（版つき。古ければ捨てる）。
     MarkdownParsed { doc: DocId, parsed: Versioned<zc_markdown::MdDocument> },
 }
@@ -71,6 +73,7 @@ impl std::fmt::Debug for AppEvent {
             AppEvent::Store(r) => f.debug_tuple("Store").field(r).finish(),
             AppEvent::Remote(r) => f.debug_tuple("Remote").field(r).finish(),
             AppEvent::HighlightRest { doc, rest } => write!(f, "HighlightRest({doc:?}, {:?}, from {})", rest.version, rest.value.from_line),
+            AppEvent::RestoreFound(r) => write!(f, "RestoreFound({:?})", r.as_ref().map(|r| r.snapshot.unsaved_count())),
             AppEvent::MarkdownParsed { doc, parsed } => write!(f, "MarkdownParsed({doc:?}, {:?})", parsed.version),
         }
     }
