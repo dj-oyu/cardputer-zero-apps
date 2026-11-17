@@ -25,8 +25,10 @@ use crate::doc::{DocBackend, TextDoc};
 use crate::intel::{self, CheckFail};
 use crate::remote::{RemoteClient, RemoteEvent, RemoteJob, RemoteReq};
 use crate::save::{SaveOk, SaveRequest, Saver, StoreSaver};
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::rc::Rc;
 use std::time::Duration;
 use zc_core::time::now_us;
 use zc_core::{palette, CancelToken, Color, Command, Damage, DiagSource, DiagnosticSet, DocId, FileDiagnostics, Key, KeyEvent, LineChange, Mods, Motion, Pos, Rect, Span, Version};
@@ -39,7 +41,8 @@ use zc_ui::layout::{Regions, SIDE_W, UI_PX};
 use std::sync::OnceLock;
 use zc_skk::{InputMode, LearnedWord, Preedit, PreeditState, Skk, SystemDict, UserDict};
 use zc_term::{ReadBudget, Term, TermCommand, TermEvent};
-use zc_ui::{CandidatePopup, CandidateRow, MiniBuffer, PreeditStyle, PreeditView, MINI_H};
+use zc_markdown::MdDocument;
+use zc_ui::{CandidatePopup, CandidateRow, CodeLayouter, MdLayouter, MiniBuffer, PreeditStyle, PreeditView, MINI_H};
 use zc_ui::{CompletionPopup, EditorStatus, EditorView, FileTree, ImeMode, PickerList, PopupItem, RenderCx, SpanSource, StatusBar, Tab, TabBar, TerminalPanel, Widget, TERM_PANEL_H};
 
 /// ステータスバーを遅らせる時間（§5.2）。
@@ -284,6 +287,33 @@ struct DocTab {
     shift: ShiftLog,
     /// ディスクの中身と同じだった最後の版（開いた・保存した版）。
     saved: Option<Version>,
+    /// Markdown のライブプレビュー（.md のときだけ。モック 10・11）。
+    md: Option<MdState>,
+}
+
+/// この行数までの Markdown は、全体の解析をメインで行う（超えたら batch）。実機で
+/// 1 行約 4.5µs なので 400 行で約 2ms（`docs/measurements.md` §12）。
+const MD_MAIN_PARSE_LINES: u32 = 400;
+
+/// Markdown の文書ごとの状態。解析結果はプレビューの [`MdLayouter`] と共有する。
+struct MdState {
+    doc: Rc<RefCell<MdDocument>>,
+    /// プレビュー中か（`false` ならソース表示。Ctrl+Shift+V で切り替え）。
+    preview: bool,
+    /// 全体の解析をやり直す必要がある（ブロックの境目が変わったかもしれない）。
+    stale: bool,
+    /// batch に全体の解析を頼んだ版。
+    pending: Option<Version>,
+}
+
+impl MdState {
+    fn layouter(&self) -> Box<dyn zc_ui::LineLayouter> {
+        if self.preview {
+            Box::new(MdLayouter::new(self.doc.clone()))
+        } else {
+            Box::new(CodeLayouter::standard())
+        }
+    }
 }
 
 /// 描画に渡すトークンの出どころ。
@@ -322,6 +352,7 @@ impl DocTab {
             diags: Vec::new(),
             shift: ShiftLog::new(),
             saved,
+            md: None,
         };
         t.detect_language();
         t
@@ -357,6 +388,33 @@ impl DocTab {
         self.lang = Lang::detect(self.path.as_deref(), &first);
         self.hl = self.lang.id.map(|lang| Hl { lang, hl: Highlighter::new(Some(lang)), dirty: true, rest_pending: None });
         self.view.recheck_all();
+        // Markdown はライブプレビューで開く（ソース表示にしていたら、そのまま）
+        if self.lang.name == "Markdown" {
+            let preview = self.md.as_ref().is_none_or(|m| m.preview);
+            let md = MdState { doc: Rc::new(RefCell::new(MdDocument::new())), preview, stale: true, pending: None };
+            self.view.set_layouter(md.layouter());
+            self.md = Some(md);
+            self.parse_markdown_here();
+        } else if self.md.take().is_some() {
+            self.view.set_layouter(Box::new(CodeLayouter::standard()));
+        }
+    }
+    /// 小さな Markdown なら、全体をここ（メイン）で解析し直す。大きければ何もしない
+    /// （`stale` のまま。`pump_markdown` が batch に出す）。
+    fn parse_markdown_here(&mut self) -> bool {
+        let Some(m) = self.md.as_mut() else { return false };
+        if !m.stale || self.loading || self.doc.as_lines().len_lines() > MD_MAIN_PARSE_LINES {
+            return false;
+        }
+        let token = self.doc.token();
+        let Ok(parsed) = MdDocument::parse(self.doc.as_lines(), &token) else { return false };
+        if m.doc.borrow_mut().replace(parsed, self.doc.version()) {
+            m.stale = false;
+            if m.preview {
+                self.view.recheck_all();
+            }
+        }
+        true
     }
     /// 編集のあと: ハイライトとビューに、変わった行を知らせる。診断は置き場の中でずらす。
     fn edited(&mut self, change: LineChange, store: &mut DiagStore) {
@@ -365,6 +423,15 @@ impl DocTab {
             h.dirty = true;
         }
         self.view.lines_changed(change);
+        if let Some(m) = self.md.as_mut() {
+            // 編集した行のブロックだけ直す。境目が変わったかもしれなければ、全体をやり直す
+            if m.doc.borrow_mut().edited(self.doc.as_lines(), change) {
+                m.stale = true;
+            }
+            if m.preview {
+                self.view.recheck_all();
+            }
+        }
         self.words.edited(self.doc.as_lines(), change);
         // 編集の後の版で記録する（遅れて届く診断を、今の行へずらすため。O(1)）
         self.shift.record(self.doc.version(), change);
@@ -677,6 +744,10 @@ impl EditorScreen {
     pub fn active_path(&self) -> Option<&Path> {
         self.tabs.get(self.active).and_then(|t| t.path.as_deref())
     }
+    /// 選択中の文書が Markdown なら、プレビュー中か（`false` はソース表示）。
+    pub fn markdown_preview(&self) -> Option<bool> {
+        self.tabs.get(self.active).and_then(|t| t.md.as_ref()).map(|m| m.preview)
+    }
     /// ステータスバーに出ている知らせ。
     pub fn message(&self) -> Option<&str> {
         self.message.as_ref().map(|m| m.0.as_str())
@@ -883,6 +954,7 @@ impl EditorScreen {
         }
         self.feed_keys(keys.to_vec(), cx);
         self.pump_highlight(Some(cx));
+        self.pump_markdown(cx);
         // 打鍵の直後はカーソルを点けたままにして、点滅をやり直す
         self.cursor_on = true;
         if let Some(t) = self.tabs.get_mut(self.active) {
@@ -1489,6 +1561,10 @@ impl EditorScreen {
                 }
             }
             Command::ShowOutline if !self.tabs.is_empty() => self.open_outline(),
+            Command::TogglePreview if self.focus == Focus::Editor => self.toggle_preview(),
+            Command::ToggleCheckbox if self.focus == Focus::Editor => self.toggle_checkbox(),
+            Command::Bold if self.focus == Focus::Editor => self.wrap_selection("**"),
+            Command::Italic if self.focus == Focus::Editor => self.wrap_selection("*"),
             Command::GotoLine | Command::Find if !self.tabs.is_empty() => {
                 let kind = if cmd == Command::Find { PromptKind::Find } else { PromptKind::GotoLine };
                 let text = if kind == PromptKind::Find { self.last_find.clone() } else { String::new() };
@@ -2170,6 +2246,101 @@ impl EditorScreen {
         }
     }
 
+    // --- Markdown ---
+
+    /// 全体の解析が要る Markdown を解析する。小さければメインで、大きければ batch で。
+    fn pump_markdown(&mut self, cx: &mut LoopCx<'_>) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let Some(m) = tab.md.as_ref() else { return };
+        if !m.stale || tab.loading {
+            return;
+        }
+        if tab.parse_markdown_here() {
+            return;
+        }
+        let version = tab.doc.version();
+        let m = tab.md.as_mut().expect("md");
+        if m.pending == Some(version) {
+            return;
+        }
+        m.pending = Some(version);
+        let (snap, token, tx, id) = (tab.doc.snapshot_lines(), tab.doc.token(), cx.results.clone(), tab.id);
+        cx.workers.batch.submit(move || {
+            if let Ok(parsed) = MdDocument::parse(&*snap, &token) {
+                tx.send(AppEvent::MarkdownParsed { doc: id, parsed });
+            }
+        });
+    }
+
+    /// プレビュー ⇔ ソース表示（Ctrl+Shift+V。同じバッファ、同じカーソル位置。モック 10・11）。
+    fn toggle_preview(&mut self) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let Some(m) = tab.md.as_mut() else {
+            self.say("プレビューは Markdown だけ", false);
+            return;
+        };
+        m.preview = !m.preview;
+        tab.view.set_layouter(m.layouter());
+        tab.sync_cursor();
+        // 補完の小窓などは描き直したビューの上に置き直す
+        self.popup.forget();
+        self.cand_popup.forget();
+        self.status_due = true;
+    }
+
+    /// カーソル行のチェックボックス（`- [ ]` / `- [x]`）を切り替える（Ctrl+Enter）。
+    fn toggle_checkbox(&mut self) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let Some(m) = tab.md.as_ref() else { return };
+        let (a, h) = tab.doc.selection();
+        let mut text = String::new();
+        tab.doc.line(h.line, &mut text);
+        let Some(new) = m.doc.borrow().toggle_checkbox(h.line, &text) else {
+            self.say("チェックボックスの行ではない", false);
+            return;
+        };
+        let end = Pos::new(h.line, text.chars().count() as u32);
+        tab.doc.break_undo_group();
+        if let Some(c) = tab.doc.replace_range(Pos::new(h.line, 0), end, &new) {
+            tab.edited(c, &mut self.diag_store);
+        }
+        tab.doc.break_undo_group();
+        // 記号の長さは変わらないので、カーソルはそのまま
+        let n = new.chars().count() as u32;
+        let clamp = |p: Pos| if p.line == h.line { Pos::new(p.line, p.col.min(n)) } else { p };
+        tab.doc.set_selection(clamp(a), clamp(h));
+        tab.sync_cursor();
+    }
+
+    /// 選択範囲を `mark` で囲む（Alt+B は `**`、Alt+I は `*`）。選択が無ければ記号の組を
+    /// 入れて、その間にカーソルを置く。
+    fn wrap_selection(&mut self, mark: &str) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        if tab.loading || tab.md.is_none() {
+            self.say("太字・斜体は Markdown だけ", false);
+            return;
+        }
+        let (a, h) = tab.doc.selection();
+        let (s, e) = (a.min(h), a.max(h));
+        let inner = tab.doc.selected_text();
+        let k = mark.chars().count() as u32;
+        tab.doc.break_undo_group();
+        if let Some(c) = tab.doc.replace_range(s, e, &format!("{mark}{inner}{mark}")) {
+            tab.edited(c, &mut self.diag_store);
+        }
+        tab.doc.break_undo_group();
+        // 囲んだ中身を選び直す（1 行の中なら）。複数行なら閉じの記号の後ろ
+        if s.line == e.line {
+            let (ns, ne) = (Pos::new(s.line, s.col + k), Pos::new(e.line, e.col + k));
+            if a <= h {
+                tab.doc.set_selection(ns, ne);
+            } else {
+                tab.doc.set_selection(ne, ns);
+            }
+        }
+        tab.sync_cursor();
+    }
+
     // --- ステータスバー ---
 
     fn update_status(&mut self) {
@@ -2225,6 +2396,10 @@ impl EditorScreen {
                         }),
                     };
                     st.apply(&mut self.status);
+                    if let Some(m) = &t.md {
+                        let left = format!("{}  {}", self.status.left(), if m.preview { "プレビュー" } else { "ソース" });
+                        self.status.set_left(&left);
+                    }
                     // 件数は今のタブの分（重なりは 1 つに数える。§8.6）
                     let counts = t.key.as_deref().map(|k| self.diag_store.counts(k)).unwrap_or_default();
                     if counts.errors + counts.warnings > 0 {
@@ -2417,9 +2592,24 @@ impl Screen for EditorScreen {
                 }
             }
             AppEvent::Remote(ev) => self.on_remote(ev, cx),
+            AppEvent::MarkdownParsed { doc, parsed } => {
+                let Some(t) = self.tabs.iter_mut().find(|t| t.id == doc) else { return };
+                let version = t.doc.version();
+                if let Some(m) = t.md.as_mut() {
+                    m.pending = None;
+                    // 頼んだ後に編集していたら捨てる（stale のまま。pump_markdown が頼み直す）
+                    if m.doc.borrow_mut().replace(parsed, version) {
+                        m.stale = false;
+                        if m.preview {
+                            t.view.recheck_all();
+                        }
+                    }
+                }
+            }
             AppEvent::Flushed(_) | AppEvent::Store(_) => {}
         }
         self.pump_highlight(Some(cx));
+        self.pump_markdown(cx);
     }
 
     fn on_timer(&mut self, id: TimerId, cx: &mut LoopCx<'_>) {

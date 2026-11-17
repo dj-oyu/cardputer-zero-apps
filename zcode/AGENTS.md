@@ -1,7 +1,7 @@
 # zcode
 
-VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書く。段階 2（エディタ）まで
-実装済み（`docs/design.md` §11）。実機での段階 2 の確認はまだ。
+VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書く。段階 5（Markdown のライブ
+プレビュー）まで実装済み（`docs/design.md` §11）。
 
 ## 文書
 
@@ -297,6 +297,28 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   候補一覧は ▼ の語の下（下に入らなければ上）、登録欄はステータスバーの上に 1 行で、その分エディタ・
   ツリー・ターミナルを縮める。登録中は本文に ▼ 読みを残す。ターミナルでの未確定はステータスバーの左に出す
 - 正解画像: `skk-reading.png` / `skk-converting.png` / `skk-registration.png`（`cargo test -p zcode --test skk`）
+
+## 段階 5 の組み込みで決めたこと（2026-11-17、モック 10・11）
+
+- .md（言語名が Markdown）はライブプレビュー（`zc_ui::MdLayouter`）で開く。解析結果
+  `zc_markdown::MdDocument` はタブ（`MdState`）とレイアウトで `Rc<RefCell<_>>` を共有する
+- 編集のたびに `MdDocument::edited` で編集したブロックだけ直し、プレビュー中なら
+  `EditorView::recheck_all`（見えている行を組み直し、変わった行だけ描く）。`edited` が `true`
+  （境目が変わったかもしれない）なら全体を解析し直す: `MD_MAIN_PARSE_LINES` 行まではメインで、
+  超えたら batch（版つき。古い結果は捨てて頼み直す）
+- Ctrl+Shift+V でプレビュー ⇔ ソース（`set_layouter`。同じバッファ・同じカーソル）。ソース表示は
+  コードと同じ等幅で、ハイライトは `languages/markdown`。ステータスバーの左に「プレビュー」/「ソース」
+- Ctrl+Enter でカーソル行のチェックボックスを切り替え（1 回の取り消しで戻る）。Alt+B / Alt+I で
+  選択を `**` / `*` で囲む（選択が無ければ記号の組を入れて間にカーソル）
+- 正解画像: `md-preview.png` / `md-source.png`（`cargo test -p zcode --test markdown`）
+- 実機の解析: 1 行約 4.5µs（`docs/measurements.md` §12）。`MD_MAIN_PARSE_LINES` = 400
+- 見た目でモックから変えたところ（`zc-ui` の `mdlayout.rs`）: コードと記号は等幅 9px（DejaVu Sans Mono は
+  8px 以下で `z` の斜線が消えて `=` に見える。8px 以下の等幅を使うところは同じ問題に注意）。カーソルの無い
+  空の行は 6px、``` の行は 2px につぶす。引用は自分の行に `>` がある行だけ線を引く（CommonMark の
+  遅延継続は引用として描かない）。番号付きリストの番号は青で残す
+- `zc-markdown` の `edited` はブロック単位で解析し直し、`false` のときは全体の解析と同じ結果になる
+  （ランダムな編集の試験で確かめている）。`]:`（参照リンクの定義）がある文書は毎回 `true`
+- レイアウトは解析結果を `try_borrow` で読む。`MdDocument` を `borrow_mut` したまま描画しない
 
 ## 次にやること
 

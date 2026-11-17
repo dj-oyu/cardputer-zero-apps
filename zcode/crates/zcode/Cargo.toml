@@ -27,6 +27,7 @@ zc-intel.workspace = true
 zc-term.workspace = true
 zc-remote-ipc.workspace = true
 zc-skk.workspace = true
+zc-markdown.workspace = true
 libc.workspace = true
 
 [dev-dependencies]

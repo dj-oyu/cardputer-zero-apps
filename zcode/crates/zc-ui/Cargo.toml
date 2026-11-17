@@ -15,3 +15,7 @@ zc-markdown.workspace = true
 zc-skk.workspace = true
 zc-term.workspace = true
 zc-intel.workspace = true
+
+[dev-dependencies]
+# Markdown の描画を PNG に出して目で見る (試験だけ)
+zc-display.workspace = true
