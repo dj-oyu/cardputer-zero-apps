@@ -1,4 +1,5 @@
-//! C のジョブ（docs/stage3-design.md §4.4）。課題 B4。
+//! C と C++ のジョブ（docs/stage3-design.md §4.4）。課題 B4。C++ は 2026-11-17 に足した
+//! （[`run_cpp`]。同じ流れで、道具が `aarch64-linux-gnu-g++`、ソースが `*.cpp` `*.cc` `*.cxx` `*.c++`）。
 //!
 //! 木は、ファイルのあるフォルダの `*.c` と `*.h`（下のフォルダは無い）。`opts.entry` は
 //! F5 を押したファイル。
@@ -35,14 +36,37 @@ use zc_wire::msg::{ArtifactKind, Diag, FileDiags, Kind, Severity, Status};
 
 /// クロスの gcc。
 pub const GCC: &str = "aarch64-linux-gnu-gcc";
+/// クロスの g++。
+pub const GXX: &str = "aarch64-linux-gnu-g++";
 /// 共通の引数。
 pub const CFLAGS: &[&str] = &["-mcpu=cortex-a53", "-O2", "-Wall", "-Wextra", "-fdiagnostics-format=json"];
 
+/// 言語ごとの違い（C と C++）。
+struct Flavor {
+    /// 人に見せる名前。
+    label: &'static str,
+    compiler: &'static str,
+    /// コンパイルするファイルの拡張子（ヘッダは目録には入るが、ここには入れない）。
+    sources: &'static [&'static str],
+}
+
+const C: Flavor = Flavor { label: "C", compiler: GCC, sources: &[".c"] };
+const CPP: Flavor = Flavor { label: "C++", compiler: GXX, sources: &[".cpp", ".cc", ".cxx", ".c++"] };
+
 pub fn run(ctx: &JobCtx<'_>, out: &dyn JobOutput) -> Result<JobResult, JobFailure> {
+    run_with(ctx, out, &C)
+}
+
+/// C++（`aarch64-linux-gnu-g++`）。引数・`main` の扱い・診断は C と同じ。
+pub fn run_cpp(ctx: &JobCtx<'_>, out: &dyn JobOutput) -> Result<JobResult, JobFailure> {
+    run_with(ctx, out, &CPP)
+}
+
+fn run_with(ctx: &JobCtx<'_>, out: &dyn JobOutput, fl: &Flavor) -> Result<JobResult, JobFailure> {
     if ctx.kind == Kind::Test {
-        return Err(JobFailure { status: Status::Error, message: "C の試験は未対応".into() });
+        return Err(JobFailure { status: Status::Error, message: format!("{} の試験は未対応", fl.label) });
     }
-    let gcc = which(GCC)?;
+    let gcc = which(fl.compiler)?;
     let src = ctx.src.canonicalize().map_err(|e| io_failure("作業の木が無い", e))?;
 
     // 直下の .c（名前の順）
@@ -51,11 +75,11 @@ pub fn run(ctx: &JobCtx<'_>, out: &dyn JobOutput) -> Result<JobResult, JobFailur
         .flatten()
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
         .filter_map(|e| e.file_name().to_str().map(str::to_string))
-        .filter(|n| n.ends_with(".c"))
+        .filter(|n| fl.sources.iter().any(|e| n.ends_with(e)))
         .collect();
     sources.sort();
     if sources.is_empty() {
-        return Ok(failed("C のファイルが無い"));
+        return Ok(failed(format!("{} のファイルが無い", fl.label)));
     }
     let entry = match ctx.opts.entry.as_deref() {
         Some(e) if safe_entry(e) && sources.iter().any(|s| s == e) => Some(e.to_string()),
@@ -65,7 +89,7 @@ pub fn run(ctx: &JobCtx<'_>, out: &dyn JobOutput) -> Result<JobResult, JobFailur
     };
     let with_main: Vec<&String> = sources.iter().filter(|s| std::fs::read_to_string(src.join(s)).map(|t| has_main(&t)).unwrap_or(false)).collect();
     let files: Vec<String> = if with_main.len() > 1 {
-        let Some(entry) = &entry else { return Ok(failed("main を持つ .c が複数ある。入口のファイルを指定する")) };
+        let Some(entry) = &entry else { return Ok(failed(format!("main を持つ {} のファイルが複数ある。入口のファイルを指定する", fl.label))) };
         sources.iter().filter(|s| *s == entry || !with_main.contains(s)).cloned().collect()
     } else {
         sources.clone()
@@ -74,8 +98,11 @@ pub fn run(ctx: &JobCtx<'_>, out: &dyn JobOutput) -> Result<JobResult, JobFailur
         .as_deref()
         .or(with_main.first().map(|s| s.as_str()))
         .unwrap_or(&sources[0])
-        .trim_end_matches(".c")
         .to_string();
+    let exe_name = match fl.sources.iter().find(|e| exe_name.ends_with(*e)) {
+        Some(e) => exe_name[..exe_name.len() - e.len()].to_string(),
+        None => exe_name,
+    };
 
     let mut cmd = Command::new(&gcc);
     cmd.current_dir(&src);
@@ -102,7 +129,7 @@ pub fn run(ctx: &JobCtx<'_>, out: &dyn JobOutput) -> Result<JobResult, JobFailur
     check_cancelled(ctx)?;
     // 標準エラー（JSON）は溜める。標準出力は無いはず
     let tap = Tap::capturing(out);
-    let exit = spawn_tool(cmd, &tap, &mut |_| true).map_err(|e| spawn_failure(GCC, e))?;
+    let exit = spawn_tool(cmd, &tap, &mut |_| true).map_err(|e| spawn_failure(fl.compiler, e))?;
     check_cancelled(ctx)?;
 
     let captured = tap.take();
@@ -117,7 +144,7 @@ pub fn run(ctx: &JobCtx<'_>, out: &dyn JobOutput) -> Result<JobResult, JobFailur
     }
     out.log(rest.as_bytes());
     if exit != 0 && !has_error(&diags) {
-        let msg = failure_line(&rest).unwrap_or_else(|| format!("gcc が失敗した（終了コード {exit}）"));
+        let msg = failure_line(&rest).unwrap_or_else(|| format!("{} が失敗した（終了コード {exit}）", fl.compiler));
         push_diag(&mut diags, "", note_diag(Severity::Error, msg));
     }
 
@@ -344,7 +371,7 @@ mod tests {
         // main が 2 つ・入口なし → 断る
         let r = run_job(&j, Kind::Build, None).0.unwrap();
         assert_eq!(r.exit, 1);
-        assert!(r.diagnostics[0].diags[0].message.contains("main を持つ .c が複数"));
+        assert!(r.diagnostics[0].diags[0].message.contains("main を持つ C のファイルが複数"));
         // 入口あり → hello.c と util.c だけ
         let (r, out) = run_job(&j, Kind::Build, Some("hello.c"));
         let r = r.unwrap();
@@ -370,6 +397,64 @@ mod tests {
         assert!(r.diagnostics[0].path.is_empty());
         assert!(r.diagnostics[0].diags[0].message.contains("undefined reference"), "{:?}", r.diagnostics);
         assert!(out.text().contains("undefined reference"));
+    }
+
+    /// g++ 14.2（ビルド係のイメージ）の実物（tests/data/langs/gxx.json）。形は gcc と同じ。
+    #[test]
+    fn gxx_json_is_read() {
+        let text = include_str!("../../tests/data/langs/gxx.json");
+        let mut v = Vec::new();
+        let rest = parse_gcc_output(text, Path::new("/w/src"), &mut v);
+        assert!(rest.trim().is_empty(), "{rest}");
+        let v = finish_diags(v);
+        let a = &v.iter().find(|f| f.path == "a.cpp").unwrap().diags;
+        // `int main() { std::string s = /* 日本 */ 1.5; …`: 1.5 の位置（バイト）
+        let line = "int main() { std::string s = /* 日本 */ 1.5; int unused; return s; }";
+        assert_eq!((a[0].line, a[0].col, a[0].severity), (2, Some(line.find("1.5").unwrap() as u32), Severity::Error));
+        assert!(a.iter().any(|d| d.severity == Severity::Warning && d.code.as_deref() == Some("-Wunused-variable")));
+        assert!(a.iter().any(|d| d.col == Some(line.find("s; }").unwrap() as u32)));
+    }
+
+    fn run_cpp_job(j: &Job, kind: Kind, entry: Option<&str>) -> (Result<JobResult, JobFailure>, Collect) {
+        let cancelled = AtomicBool::new(false);
+        let opts = JobOpts { entry: entry.map(str::to_string), ..Default::default() };
+        let ctx = JobCtx { job: "j", kind, lang: zc_wire::msg::Lang::Cpp, opts: &opts, src: &j.src, project_dir: &j.project, out_dir: &j.out, cancelled: &cancelled };
+        let out = Collect::default();
+        (run_cpp(&ctx, &out), out)
+    }
+
+    #[test]
+    fn e2e_cpp_check_and_build() {
+        if skip_without(&[GXX, "aarch64-linux-gnu-strip", "zstd", "file"]) {
+            return;
+        }
+        let j = job(&[
+            ("main.cpp", "#include <iostream>\n#include \"util.hpp\"\n// 日本語\nint main() { std::cout << twice(2) << \"\\n\"; return 0; }\n"),
+            ("util.cc", "#include \"util.hpp\"\nint twice(int x) { return x * 2; }\n"),
+            ("util.hpp", "int twice(int x);\n"),
+            ("plain.c", "this is not compiled\n"),
+        ]);
+        let (r, out) = run_cpp_job(&j, Kind::Check, Some("main.cpp"));
+        let r = r.unwrap();
+        assert_eq!(r.exit, 0, "{}", out.text());
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let (r, out) = run_cpp_job(&j, Kind::Build, Some("main.cpp"));
+        let r = r.unwrap();
+        assert_eq!(r.exit, 0, "{}", out.text());
+        let a = r.artifact.unwrap();
+        assert_eq!(a.name, "main");
+        let back = j.out.join("back");
+        assert!(Command::new("zstd").args(["-q", "-d", "-o"]).arg(&back).arg(&a.zpath).status().unwrap().success());
+        let f = Command::new("file").arg(&back).output().unwrap();
+        assert!(String::from_utf8_lossy(&f.stdout).contains("ARM aarch64"));
+        // 誤り（CJK の後ろ）
+        let j = job(&[("bad.cpp", "#include <string>\n// 日本語\nint main() { std::string s = /* 日本 */ 1.5; return 0; }\n")]);
+        let r = run_cpp_job(&j, Kind::Check, Some("bad.cpp")).0.unwrap();
+        assert_ne!(r.exit, 0);
+        let d = &r.diagnostics.iter().find(|f| f.path == "bad.cpp").unwrap().diags[0];
+        let line = "int main() { std::string s = /* 日本 */ 1.5; return 0; }";
+        assert_eq!((d.line, d.col), (2, Some(line.find("1.5").unwrap() as u32)));
+        assert!(run_cpp_job(&j, Kind::Test, None).0.unwrap_err().message.contains("C++ の試験は未対応"));
     }
 
     #[test]

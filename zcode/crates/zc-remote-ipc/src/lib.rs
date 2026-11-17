@@ -121,6 +121,19 @@ pub enum RemoteLang {
     C = 2,
     /// JavaScript / TypeScript（npm の依存があるプロジェクト）。
     Node = 3,
+    /// 以下は 2026-11-17 に足した（IPC の版は 2 のまま）。古い serve はこの番号を読めず接続を切る
+    /// （zcode は「切れた」= `Error` で手元の `check` に回る）。
+    /// Python（pyright で型検査だけ。実行は実機の python3）。
+    Python = 4,
+    /// Shell（shellcheck だけ。実行は実機の bash）。
+    Shell = 5,
+    /// C++（aarch64 の g++）。
+    Cpp = 6,
+    Go = 7,
+    /// Ruby（`ruby -wc` だけ。実行は実機の ruby）。
+    Ruby = 8,
+    Zig = 9,
+    MoonBit = 10,
 }
 
 impl RemoteLang {
@@ -130,8 +143,21 @@ impl RemoteLang {
             "rust" => Some(RemoteLang::Rust),
             "c" => Some(RemoteLang::C),
             "node" => Some(RemoteLang::Node),
+            "python" => Some(RemoteLang::Python),
+            "shell" => Some(RemoteLang::Shell),
+            "cpp" => Some(RemoteLang::Cpp),
+            "go" => Some(RemoteLang::Go),
+            "ruby" => Some(RemoteLang::Ruby),
+            "zig" => Some(RemoteLang::Zig),
+            "moonbit" => Some(RemoteLang::MoonBit),
             _ => None,
         }
+    }
+
+    /// ビルド係で試験（F6「試験を実行」）が動くか。C・C++・Python・Shell・Ruby は検査（と C・C++ の
+    /// ビルド）だけ（docs/stage3-design.md §4.4）。
+    pub fn has_tests(self) -> bool {
+        matches!(self, RemoteLang::Rust | RemoteLang::Node | RemoteLang::Go | RemoteLang::Zig | RemoteLang::MoonBit)
     }
 }
 
@@ -612,6 +638,13 @@ pub fn decode_request(frame: &[u8]) -> Result<Request, DecodeError> {
                 1 => RemoteLang::Rust,
                 2 => RemoteLang::C,
                 3 => RemoteLang::Node,
+                4 => RemoteLang::Python,
+                5 => RemoteLang::Shell,
+                6 => RemoteLang::Cpp,
+                7 => RemoteLang::Go,
+                8 => RemoteLang::Ruby,
+                9 => RemoteLang::Zig,
+                10 => RemoteLang::MoonBit,
                 _ => return Err(DecodeError::Invalid("lang")),
             };
             let flags = SubmitFlags(r.u16()?);
@@ -1060,7 +1093,26 @@ mod tests {
     fn lang_names_match_language_toml() {
         assert_eq!(RemoteLang::parse("rust"), Some(RemoteLang::Rust));
         assert_eq!(RemoteLang::parse("node"), Some(RemoteLang::Node));
-        assert_eq!(RemoteLang::parse("python"), None);
+        for (name, l) in [
+            ("python", RemoteLang::Python),
+            ("shell", RemoteLang::Shell),
+            ("cpp", RemoteLang::Cpp),
+            ("go", RemoteLang::Go),
+            ("ruby", RemoteLang::Ruby),
+            ("zig", RemoteLang::Zig),
+            ("moonbit", RemoteLang::MoonBit),
+        ] {
+            assert_eq!(RemoteLang::parse(name), Some(l));
+            // 往復（番号で送る）
+            let msg = Request::Submit { req: ReqId(1), kind: JobKind::Check, lang: l, flags: SubmitFlags::NONE, file: "/a".into(), overlay: vec![] };
+            let mut buf = Vec::new();
+            encode_request(&msg, &mut buf);
+            let mut r = FrameReader::new();
+            r.push(&buf);
+            assert_eq!(decode_request(r.next_frame().unwrap().unwrap()).unwrap(), msg);
+        }
+        assert_eq!(RemoteLang::parse("Python"), None);
+        assert_eq!(RemoteLang::parse("cobol"), None);
         assert!(SubmitFlags(0b101).contains(SubmitFlags::ONLY_IF_WARM));
         assert!(SubmitFlags(0b10001).contains(SubmitFlags::AUTO));
         assert!(!SubmitFlags::NONE.contains(SubmitFlags::WANT_LOG));
@@ -1454,7 +1506,10 @@ mod tests {
         b[HEADER_LEN] = 0;
         assert!(matches!(decode_request(&b[4..]), Err(DecodeError::Invalid(_))));
         let mut b = buf.clone();
-        b[HEADER_LEN + 1] = 4;
+        // 言語の番号は 1〜10（2026-11-17 に 4〜10 を足した）
+        b[HEADER_LEN + 1] = 11;
+        assert!(matches!(decode_request(&b[4..]), Err(DecodeError::Invalid(_))));
+        b[HEADER_LEN + 1] = 0;
         assert!(matches!(decode_request(&b[4..]), Err(DecodeError::Invalid(_))));
 
         let mut buf = Vec::new();

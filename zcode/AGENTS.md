@@ -449,6 +449,27 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   ステータスバーの誤り（`cannot find value ...`）が出ていた。消すと波線も消える。未確認: 打鍵中の遅延・
   `idle` での電池
 
+## ビルド係の言語を足した（2026-11-17、ブランチ `zcode-remote-langs`）
+
+- 決めたこと: Python（pyright）・Shell（shellcheck）は **check だけ**（実行は実機のまま）。C++ は C と同じ
+  形。Go・Zig・MoonBit は check・build（aarch64）・test（x86_64）。Ruby は check（`ruby -wc`）だけで、実行は
+  実機の ruby（まだ入っていない）。表と細かい決まりは `docs/stage3-design.md` §4.4、根は §7.2、イメージは §6.4
+- **MoonBit は native でクロスビルドできた**（JS + LLRT にしなかった）: `MOON_CC=aarch64-linux-gnu-gcc` を
+  渡すと、moon が x86_64 用の `libmoonbitrun.o` を使わずランタイムを C のソースから作る。この版の moon は
+  `moon.mod.json` を断り（`moon.mod` に移す）、単独の `.mbt` は check できるが build できない（`.mbtx` に
+  写して作る）。MoonBit に `/* */` のコメントは無い
+- 診断の桁の数え方（実物で確かめた。fixture は `remote/crates/zc-buildd/tests/data/langs/`、作り方は同じ所の
+  `gen.sh`）: pyright = 0 始まりの UTF-16、shellcheck・MoonBit = 1 始まりのコードポイント（タブも 1）、
+  g++・Go・Zig = 1 始まりのバイト、ruby = 桁なし（`^` の行の空白の数がバイト）
+- 古い受付（このブランチより前）は知らない `lang` で接続全体を切る。`zc-remote` は「ビルド係が go に
+  対応していない（イメージが古い）」にする。**新しい言語は deploy し直してから**。試験は
+  `ZC_E2E_OLD_BUILDD=<古い zc-buildd>` を付けると e2e で確かめる（前のイメージの `/usr/local/bin/zc-buildd`）
+- Python・Shell も保存のたびにまず `zc-remote` に頼む（届かなければ今の実機の check）。F6 は
+  `RemoteLang::has_tests` の言語だけ（C も「試験を実行できない」になった）
+- イメージ: 展開後 1.52 → 2.26GB、送る形 486 → 705MiB。手元の冷えた起動は差なし（約 0.5 秒）。Go は冷えた
+  キャッシュだと標準ライブラリから作るので、1 CPU で `go vet` 7.7 秒・`go test` 13 秒（温まれば 0.1 秒以下）。
+  標準ライブラリを前もって作ってイメージに入れると +360MB なので入れていない（C4 のスナップショットで温まる）
+
 ## ビルド係の費用の上限（2026-11-17、ブランチ `zcode-cost-cap`）
 
 - **ユーザーの決定**: 安いコンテナにし、**月の超過は 5 ドルまで**（Workers Paid の 5 ドルと合わせて

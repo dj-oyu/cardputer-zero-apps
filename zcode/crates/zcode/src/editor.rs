@@ -2384,10 +2384,18 @@ impl EditorScreen {
         if tab.loading {
             return;
         }
-        if tab.remote_lang().is_none() {
-            let msg = format!("{} は試験を実行できない（language.toml に remote が無い）", tab.lang.name);
-            self.say(msg, false);
-            return;
+        match tab.remote_lang() {
+            None => {
+                let msg = format!("{} は試験を実行できない（language.toml に remote が無い）", tab.lang.name);
+                self.say(msg, false);
+                return;
+            }
+            Some(l) if !l.has_tests() => {
+                let msg = format!("{} は試験を実行できない（ビルド係は検査だけ）", tab.lang.name);
+                self.say(msg, false);
+                return;
+            }
+            Some(_) => {}
         }
         // 結果が届くまで打鍵が無ければ、届いたときにそのまま一覧を出す
         self.test_waiting = true;

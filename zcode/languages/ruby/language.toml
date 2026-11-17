@@ -21,6 +21,9 @@ filenames = ["Rakefile", "Gemfile", "Guardfile", "Capfile", "Vagrantfile", "Podf
 first_line = '^#!.*\bruby'
 line_comment = "#"
 indent = "  "
+# ビルド係: ruby -wc（構文と警告。波線）。実行は実機の ruby（まだ入っていなければ入れ方を出す）
+remote = "ruby"
+run = '''bash -c 'command -v ruby >/dev/null || { echo "ruby が入っていない。sudo apt install ruby で入れる" >&2; exit 127; }; exec ruby "$0"' {file}'''
 keywords = [
     "alias", "and", "begin", "break", "case", "class", "def", "defined?", "do", "else", "elsif",
     "end", "ensure", "false", "for", "if", "in", "module", "next", "nil", "not", "or", "redo",

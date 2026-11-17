@@ -9,15 +9,17 @@
 #
 # 中身: 開発コンテナ（container/Dockerfile）の Rust の部分と同じもの（Debian 13・rustup・
 # aarch64 のクロスの gcc）に、zstd・Node と npm・esbuild・TypeScript 7 の tsc・受付の
-# zc-buildd を足したもの。Python・フォント・git は入れない（冷えた起動で引くので小さく保つ）。
-# 大きさ（2026-11-17）: 展開後 1.52GB、レジストリに送る形（gzip の層）で約 500MB。内訳は zcode/AGENTS.md。
-# LSP のために rust-analyzer と rust-src（std の索引用）を足して 1.63GB（gzip で約 25MB 増。docs/measurements.md §13）。
+# zc-buildd を足したもの。2026-11-17 に、pyright（Python の型検査。Node で動く）・ShellCheck・
+# aarch64 の g++・Go・Ruby・Zig・MoonBit と、LSP のための rust-analyzer と rust-src（std の索引用）を
+# 足した。Python の実行系・フォント・git は入れない。大きさは zcode/AGENTS.md と
+# docs/measurements.md §13（言語・LSP を足す前は展開後 1.52GB、送る形で約 500MB）。
 #
 # 版はここの ARG で固定し、取ってきたものは SHA-256 で確かめる:
 #   - ベースは日付つきのタグ + digest
 #   - rustup-init は static.rust-lang.org の .sha256、Rust はその版の rustup の検査に任せる
 #   - Node は nodejs.org の SHASUMS256.txt の値
-#   - esbuild・TypeScript は remote/container/tools/package-lock.json の integrity（npm ci）
+#   - esbuild・TypeScript・pyright は remote/container/tools/package-lock.json の integrity（npm ci）
+#   - ShellCheck・Go・Zig・MoonBit は配布物の SHA-256（ARG）。g++ と ruby は Debian の apt
 # 版を上げるときは、値を書き換えて run-pc.ps1 -Build で作り直し、中で試験を回す
 # （手順は zcode/AGENTS.md「ビルド係のイメージ」）。
 #
@@ -71,14 +73,80 @@ RUN curl -fsSLo /tmp/node.tar.xz \
  && mkdir -p /opt/node \
  && tar -xJf /tmp/node.tar.xz -C /opt/node --strip-components=1 --no-same-owner \
  && rm -rf /tmp/node.tar.xz /opt/node/include /opt/node/share /opt/node/*.md /opt/node/LICENSE
-ENV PATH=/opt/cargo/bin:/opt/node/bin:/opt/tools/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-# esbuild・TypeScript 7（Go 版の tsc。linux-x64 の実行ファイルは optionalDependencies）。
+ENV PATH=/opt/cargo/bin:/opt/node/bin:/opt/tools/node_modules/.bin:/opt/go/bin:/opt/zig:/opt/moon/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# ---- 2026-11-17 に足した言語（docs/stage3-design.md §4.4・§6.4） ----
+# C++（aarch64 の g++）と Ruby（ruby -wc。Debian の 3.3、版はベースの digest で決まる）
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends g++-aarch64-linux-gnu ruby \
+ && rm -rf /var/lib/apt/lists/* \
+ && aarch64-linux-gnu-g++ --version | head -1 && ruby --version
+# ShellCheck（静的リンクの実行ファイル。GitHub の Release の .tar.xz の SHA-256）
+ARG SHELLCHECK_VERSION=0.11.0
+ARG SHELLCHECK_SHA256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+RUN curl -fsSLo /tmp/sc.tar.xz \
+      "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+ && echo "${SHELLCHECK_SHA256}  /tmp/sc.tar.xz" | sha256sum -c - \
+ && tar -xJf /tmp/sc.tar.xz -C /tmp \
+ && install -m 0755 "/tmp/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck \
+ && rm -rf /tmp/sc.tar.xz "/tmp/shellcheck-v${SHELLCHECK_VERSION}" \
+ && shellcheck --version
+# Go（go.dev の配布物。SHA-256 は https://go.dev/dl/?mode=json の値）。試験・文書・道具のソースは消す
+# （`go build`・`go vet`・`go test` は pkg/tool の作り済みのもので動く。2026-11-17 に確かめた）
+ARG GO_VERSION=1.27.4
+ARG GO_SHA256=7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840
+RUN curl -fsSLo /tmp/go.tar.gz "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
+ && echo "${GO_SHA256}  /tmp/go.tar.gz" | sha256sum -c - \
+ && mkdir -p /opt/go \
+ && tar -xzf /tmp/go.tar.gz -C /opt/go --strip-components=1 --no-same-owner \
+ && rm -rf /tmp/go.tar.gz /opt/go/test /opt/go/api /opt/go/doc /opt/go/misc /opt/go/src/cmd \
+ && GOTOOLCHAIN=local go version
+# Zig（ziglang.org の配布物。SHA-256 は https://ziglang.org/download/index.json の値）。libc の
+# ヘッダは Linux の aarch64・x86_64 の分だけ残す（Windows・macOS・BSD・WASI などは消す）
+ARG ZIG_VERSION=0.17.1
+ARG ZIG_SHA256=3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a
+RUN curl -fsSLo /tmp/zig.tar.xz "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
+ && echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c - \
+ && mkdir -p /opt/zig \
+ && tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1 --no-same-owner \
+ && rm -rf /tmp/zig.tar.xz /opt/zig/doc /opt/zig/lib/libtsan \
+      /opt/zig/lib/libc/mingw /opt/zig/lib/libc/darwin /opt/zig/lib/libc/freebsd /opt/zig/lib/libc/netbsd \
+      /opt/zig/lib/libc/openbsd /opt/zig/lib/libc/wasi \
+ && cd /opt/zig/lib/libc/include \
+ && for d in *; do case "$d" in aarch64-linux-*|x86_64-linux-*|x86-linux-*|any-linux-any|generic-glibc|generic-musl) ;; *) rm -rf "$d" ;; esac; done \
+ && zig version
+# MoonBit（cli.moonbitlang.com の版つきの配布物と core。SHA-256 は取ってきて確かめた値。
+# 版の名前の + は %2B）。検査・ビルド・試験に要るもの（moon・moonc・mooncake・tcc。moonrun は
+# native では使わないが、無いと moon の一部のコマンドが落ちるので残す）だけ残し、
+# core は native の分だけ束ねる。ライセンス: 道具は無償の配布物（CREDITS.md）、core は Apache-2.0
+ARG MOONBIT_VERSION=0.10.20%2B65efd5b93
+ARG MOONBIT_SHA256=80d987523308fa490eba9f1baf98df996a5a7891e118357553b7c2608c0597c5
+ARG MOONBIT_CORE_SHA256=8ec2a2c01335501d703867bb4eef5f92d3cd7e1ae1ee5f7f14d54d16d2c7c2b5
+RUN curl -fsSLo /tmp/moon.tar.gz "https://cli.moonbitlang.com/binaries/${MOONBIT_VERSION}/moonbit-linux-x86_64.tar.gz" \
+ && curl -fsSLo /tmp/core.tar.gz "https://cli.moonbitlang.com/cores/core-${MOONBIT_VERSION}.tar.gz" \
+ && echo "${MOONBIT_SHA256}  /tmp/moon.tar.gz" | sha256sum -c - \
+ && echo "${MOONBIT_CORE_SHA256}  /tmp/core.tar.gz" | sha256sum -c - \
+ && mkdir -p /opt/moon \
+ && tar -xzf /tmp/moon.tar.gz -C /opt/moon --no-same-owner \
+ && tar -xzf /tmp/core.tar.gz -C /opt/moon/lib --no-same-owner \
+ && rm -rf /tmp/moon.tar.gz /tmp/core.tar.gz /opt/moon/share /opt/moon/lib/prelude_proof /opt/moon/lib/prelude_proof_machine_int \
+ && cd /opt/moon/bin \
+ && chmod 0755 * internal/tcc \
+ && MOON_HOME=/opt/moon ./moon -C /opt/moon/lib/core bundle --warn-list -a --target native \
+ && rm -f moonc-prove moondoc moon-lsp moon-ide mooninfo moon_cove_report moon_cove.wasm moon-cram mooncram.wasm moonfmt moon-wasm-opt \
+ && chmod -R a+rX,go-w /opt/moon \
+ && MOON_HOME=/opt/moon moon version --all
+ENV MOON_HOME=/opt/moon \
+    GOTOOLCHAIN=local \
+    GOTELEMETRY=off
+
+# esbuild・TypeScript 7（Go 版の tsc。linux-x64 の実行ファイルは optionalDependencies）・pyright。
 # インストールスクリプトは動かさない（esbuild の postinstall は確かめるだけで、無くても動く）
 COPY remote/container/tools/package.json remote/container/tools/package-lock.json /opt/tools/
 RUN cd /opt/tools \
  && npm ci --ignore-scripts --no-audit --no-fund --cache /tmp/npm-cache \
  && rm -rf /tmp/npm-cache \
- && node --version && npm --version && tsc --version && esbuild --version
+ && node --version && npm --version && tsc --version && esbuild --version && pyright --version
 # sccache（docs/stage3-design.md §6.5 の段 3）は、スナップショット（段 2）を測ってから決める。
 
 COPY --from=build /usr/local/bin/zc-buildd /usr/local/bin/zc-buildd
@@ -91,7 +159,10 @@ USER builder
 ENV HOME=/home/builder \
     LANG=C.UTF-8 \
     CARGO_HOME=/var/lib/zc-buildd/cargo-home \
-    npm_config_cache=/var/lib/zc-buildd/npm-cache
+    npm_config_cache=/var/lib/zc-buildd/npm-cache \
+    GOPATH=/var/lib/zc-buildd/go \
+    GOCACHE=/var/lib/zc-buildd/go-build \
+    ZIG_GLOBAL_CACHE_DIR=/var/lib/zc-buildd/zig-global
 WORKDIR /var/lib/zc-buildd
 EXPOSE 7411
 # SIGTERM で、走っているジョブを止めてから終わる（Cloudflare は SIGTERM の最大 15 分後に SIGKILL）

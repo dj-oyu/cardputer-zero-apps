@@ -1,0 +1,10 @@
+{"Time":"2026-11-17T02:40:45.025728049Z","Action":"start","Package":"example.com/hello"}
+{"Time":"2026-11-17T02:40:45.026090437Z","Action":"output","Package":"example.com/hello","Output":"?   \texample.com/hello\t[no test files]\n"}
+{"Time":"2026-11-17T02:40:45.026222466Z","Action":"skip","Package":"example.com/hello","Elapsed":0}
+{"ImportPath":"example.com/hello/sub [example.com/hello/sub.test]","Action":"build-output","Output":"# example.com/hello/sub\n"}
+{"ImportPath":"example.com/hello/sub [example.com/hello/sub.test]","Action":"build-output","Output":"# [example.com/hello/sub]\n"}
+{"ImportPath":"example.com/hello/sub [example.com/hello/sub.test]","Action":"build-output","Output":"sub/sub.go:5:24: fmt.Printf format %d has arg \"x\" of wrong type string\n"}
+{"ImportPath":"example.com/hello/sub [example.com/hello/sub.test]","Action":"build-fail"}
+{"Time":"2026-11-17T02:40:45.115722112Z","Action":"start","Package":"example.com/hello/sub"}
+{"Time":"2026-11-17T02:40:45.115969481Z","Action":"output","Package":"example.com/hello/sub","Output":"FAIL\texample.com/hello/sub [build failed]\n","OutputType":"frame"}
+{"Time":"2026-11-17T02:40:45.116068408Z","Action":"fail","Package":"example.com/hello/sub","Elapsed":0,"FailedBuild":"example.com/hello/sub [example.com/hello/sub.test]"}

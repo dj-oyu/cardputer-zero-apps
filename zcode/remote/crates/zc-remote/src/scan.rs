@@ -12,6 +12,16 @@
 //! | Rust | いちばん近い `Cargo.toml`。そこから上に `[workspace]` のある `Cargo.toml` があればそちら | **1 ファイルだけ**（そのファイルだけを送り、受付が `rustc` で作る。`entry` = ファイル名） |
 //! | C | ファイルのあるフォルダ（そのフォルダの `*.c` `*.h` だけ。下のフォルダは見ない）。`entry` = ファイル名 | — |
 //! | Node | いちばん近い `package.json` で、`dependencies` か `devDependencies` が空でないもの | [`ProjectError::NotApplicable`]（実機の `tsc` に回す） |
+//! | Python | いちばん近い `pyproject.toml` か `setup.cfg` | 1 ファイルだけ |
+//! | Shell | — | いつも 1 ファイルだけ（`source` 先は送らない。shellcheck は追わない） |
+//! | C++ | C と同じ（そのフォルダの `*.cpp` `*.cc` `*.cxx` `*.hpp` `*.hh` `*.hxx` `*.h` など） | — |
+//! | Go | いちばん近い `go.mod` | 1 ファイルだけ |
+//! | Ruby | いちばん近い `Gemfile` | 1 ファイルだけ |
+//! | Zig | いちばん近い `build.zig` | 1 ファイルだけ |
+//! | MoonBit | いちばん近い `moon.mod.json`（新しい形の `moon.mod` も） | 1 ファイルだけ（受付が仮のモジュールを作る） |
+//!
+//! 2026-11-17 に Python 以下を足した。根の印のファイルを `stat` で探すだけなので、Rust・C・Node の
+//! 走査の手間は変わらない。どの言語でも `entry` は根からの相対パス。
 //!
 //! 根の外を指す `path = "../x"` の依存は送らない（受付でビルドが失敗し、その診断が出る）。
 //!
@@ -28,14 +38,15 @@
 //!
 //! # 送らないもの
 //!
-//! `target/`・`node_modules/`・`.git/`・`dist/`・`build/`・名前が `.` で始まるフォルダ
+//! `target/`・`node_modules/`・`__pycache__/`・`zig-cache/`・`.git/`・`dist/`・`build/`・`zig-out/`・
+//! `_build/`（MoonBit）・名前が `.` で始まるフォルダ
 //! （`.cargo/` と `.github/` は送る）、根の `.gitignore` に書かれたもの（`*`・`?`・`**`・
 //! `[…]`・先頭と末尾の `/`・`!` の打ち消しに対応。入れ子の `.gitignore` は見ない）、
 //! シンボリックリンク（たどらない・送らない）、ふつうのファイルでないもの。
 //! 上限（[`zc_wire::limits`]）を超えたら [`ScanError::TooLarge`]（何が超えたかを添える）。
 //!
-//! - `target`・`node_modules`・`.` で始まるフォルダはどの深さでも除く。`dist`・`build` は
-//!   **根の直下だけ**（Rust の `src/build/` のようなモジュールのフォルダを落とさない。
+//! - `target`・`node_modules`・`__pycache__`・`zig-cache`・`.` で始まるフォルダはどの深さでも除く。
+//!   `dist`・`build`・`zig-out`・`_build` は **根の直下だけ**（Rust の `src/build/` のようなモジュールのフォルダを落とさない。
 //!   下の階層の生成物は、ふつう `.gitignore` に書いてある）
 //! - 名前が UTF-8 でない・`\` や制御文字を含むファイルは送れないので、黙って落とさず
 //!   [`ScanError::Io`] で断る（落とすと、受付でのビルドの失敗の理由が分からなくなる）
@@ -83,7 +94,7 @@ pub struct Project {
 pub enum Shape {
     /// 根から下を全部（除外を除く）。
     Tree,
-    /// 根のフォルダの直下だけ（C）。
+    /// 根のフォルダの直下だけ（C・C++。拡張子は [`flat_exts`]）。
     Flat,
     /// `entry` の 1 ファイルだけ。
     SingleFile,
@@ -153,7 +164,7 @@ fn find_project_below(file: &Path, lang: Lang, stop: &Path) -> Result<Project, P
                 .to_path_buf();
             Ok(project(root.clone(), &root, None, Shape::Tree))
         }
-        Lang::C => Ok(project(dir.clone(), &dir, Some(name), Shape::Flat)),
+        Lang::C | Lang::Cpp => Ok(project(dir.clone(), &dir, Some(name), Shape::Flat)),
         Lang::Node => {
             let root = ancestors()
                 .find(|d| has_npm_deps(&d.join("package.json")))
@@ -164,6 +175,39 @@ fn find_project_below(file: &Path, lang: Lang, stop: &Path) -> Result<Project, P
             let rel = rel.to_str().map(str::to_owned);
             Ok(project(root.clone(), &root, rel, Shape::Tree))
         }
+        // 根の印のファイルがあれば木、無ければ 1 ファイルだけ（Rust の 1 ファイルと同じく、
+        // project id はファイルの絶対パスから作る）。
+        Lang::Python | Lang::Shell | Lang::Go | Lang::Ruby | Lang::Zig | Lang::Moonbit => {
+            let marks: &[&str] = match lang {
+                Lang::Python => &["pyproject.toml", "setup.cfg"],
+                Lang::Go => &["go.mod"],
+                Lang::Ruby => &["Gemfile"],
+                Lang::Zig => &["build.zig"],
+                Lang::Moonbit => &["moon.mod.json", "moon.mod"],
+                _ => &[],
+            };
+            match ancestors().find(|d| marks.iter().any(|m| d.join(m).is_file())) {
+                Some(root) => {
+                    let root = root.to_path_buf();
+                    let rel = dir.join(&name);
+                    let rel = rel.strip_prefix(&root).unwrap_or(Path::new(&name)).to_str().map(str::to_owned);
+                    Ok(project(root.clone(), &root, rel, Shape::Tree))
+                }
+                None => {
+                    let path = dir.join(&name);
+                    Ok(project(dir.clone(), &path, Some(name), Shape::SingleFile))
+                }
+            }
+        }
+        Lang::Unknown => Err(ProjectError::NotApplicable),
+    }
+}
+
+/// [`Shape::Flat`] で送るファイルの拡張子。
+fn flat_exts(lang: Lang) -> &'static [&'static str] {
+    match lang {
+        Lang::Cpp => &[".cpp", ".cc", ".cxx", ".c++", ".hpp", ".hh", ".hxx", ".h", ".inl", ".ipp", ".tpp"],
+        _ => &[".c", ".h"],
     }
 }
 
@@ -269,7 +313,8 @@ impl HashCache {
             }
             Shape::Flat | Shape::Tree => {
                 let ignore = Gitignore::load(&project.root.join(".gitignore"));
-                let mut walker = Walker { ignore: &ignore, found: &mut found, total: &mut total, flat: project.shape == Shape::Flat };
+                let flat = (project.shape == Shape::Flat).then(|| flat_exts(project.lang));
+                let mut walker = Walker { ignore: &ignore, found: &mut found, total: &mut total, flat };
                 walker.walk(&project.root, "", 0)?;
             }
         }
@@ -390,8 +435,8 @@ struct Walker<'a> {
     ignore: &'a Gitignore,
     found: &'a mut Vec<Found>,
     total: &'a mut u64,
-    /// 根の直下だけ・`*.c` `*.h` だけ（C）。
-    flat: bool,
+    /// 根の直下だけ・この拡張子のファイルだけ（C・C++）。
+    flat: Option<&'static [&'static str]>,
 }
 
 impl Walker<'_> {
@@ -414,12 +459,12 @@ impl Walker<'_> {
             };
             let rel = if rel_dir.is_empty() { name.to_owned() } else { format!("{rel_dir}/{name}") };
             if ft.is_dir() {
-                if self.flat || skip_dir(name, depth == 0) || self.ignore.ignored(&rel, true) {
+                if self.flat.is_some() || skip_dir(name, depth == 0) || self.ignore.ignored(&rel, true) {
                     continue;
                 }
                 self.walk(&ent.path(), &rel, depth + 1)?;
             } else {
-                if self.flat && !(name.ends_with(".c") || name.ends_with(".h")) {
+                if self.flat.is_some_and(|exts| !exts.iter().any(|e| name.ends_with(e))) {
                     continue;
                 }
                 if self.ignore.ignored(&rel, false) {
@@ -443,9 +488,9 @@ impl Walker<'_> {
 /// 送らないフォルダか（`.gitignore` とは別の決まり）。
 fn skip_dir(name: &str, at_root: bool) -> bool {
     match name {
-        "target" | "node_modules" => true,
+        "target" | "node_modules" | "__pycache__" | "zig-cache" => true,
         ".cargo" | ".github" => false,
-        "dist" | "build" => at_root,
+        "dist" | "build" | "zig-out" | "_build" => at_root,
         _ => name.starts_with('.'),
     }
 }

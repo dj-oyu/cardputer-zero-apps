@@ -530,6 +530,28 @@ fn full_flow_then_cached_and_no_reupload() {
 
 // ───────────── 約束の間違い ─────────────
 
+/// これより新しい実機が知らない言語を頼んでも、そのジョブだけを断り、接続は続く
+/// （2026-11-17。前の版の受付は接続全体の error {protocol} で切っていた）。
+#[test]
+fn unknown_language_is_refused_per_job() {
+    let sv = Server::start("unknown-lang");
+    let mut c = Client::open(sv.addr());
+    let t = project("fn main() {}\n");
+    t.upload(&mut c);
+    c.send_text(&format!(r#"{{"type":"job","job":"{}","project":"{PROJECT}","tree":"{}","kind":"check","lang":"cobol"}}"#, "ab".repeat(16), t.id));
+    match c.msg() {
+        ServerMsg::Error { job: Some(j), code: ErrorCode::Protocol, message, .. } => {
+            assert_eq!(j, "ab".repeat(16));
+            assert!(message.contains(msg::UNSUPPORTED_LANG), "{message}");
+        }
+        other => panic!("ジョブの error のはず: {other:?}"),
+    }
+    // 同じ接続でふつうのジョブが通る
+    c.send(&t.job(Kind::Check, false));
+    assert!(matches!(c.until_done().last(), Some(Ev::Msg(ServerMsg::Done { .. }))));
+    assert_eq!(sv.fake.runs.load(Ordering::SeqCst), 1, "知らない言語は実行しない");
+}
+
 #[test]
 
 fn hello_rules() {

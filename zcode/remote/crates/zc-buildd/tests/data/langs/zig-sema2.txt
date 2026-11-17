@@ -1,0 +1,8 @@
+sema.zig:4:20: error: expected type 'u32', found '[]const u8'
+    const n: u32 = s;
+                   ^
+referenced by:
+    callMain [inlined]: /opt/zig/lib/std/start.zig:788:64
+    callMainWithArgs [inlined]: /opt/zig/lib/std/start.zig:729:20
+    posixCallMainAndExit: /opt/zig/lib/std/start.zig:681:38
+    2 reference(s) hidden; use '-freference-trace=5' to see all references

@@ -15,6 +15,10 @@ name = "Zig"
 extensions = ["zig", "zon"]
 line_comment = "//"
 indent = "    "
+# ビルド係: ast-check とビルドの誤り（波線）、aarch64 向けのビルド、F6 の zig test（x86_64）
+remote = "zig"
+# ビルド係で aarch64（Cortex-A53）向けにビルドして、その場で実行する（F5。stage3-design.md §4.4）
+run = "zc-remote run {file}"
 keywords = [
     "addrspace", "align", "allowzero", "and", "anyframe", "anytype", "asm", "async", "await",
     "break", "callconv", "catch", "comptime", "const", "continue", "defer", "else", "enum",

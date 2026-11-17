@@ -1,0 +1,5 @@
+e1.rb:2: warning: assigned but unused variable - x
+ruby: e1.rb:2: syntax error, unexpected integer literal, expecting end-of-input (SyntaxError)
+x = "日本" 1
+             ^
+

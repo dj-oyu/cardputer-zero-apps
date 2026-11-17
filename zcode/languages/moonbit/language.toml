@@ -15,6 +15,10 @@ name = "MoonBit"
 extensions = ["mbt", "mbti"]
 line_comment = "//"
 indent = "  "
+# ビルド係: moon check（波線）、aarch64 のネイティブへのクロスビルド、F6 の moon test（x86_64）
+remote = "moonbit"
+# ビルド係で aarch64（Cortex-A53）向けにビルドして、その場で実行する（F5。stage3-design.md §4.4）
+run = "zc-remote run {file}"
 keywords = [
     "as", "async", "await", "break", "catch", "const", "continue", "derive", "else", "enum",
     "extern", "false", "fn", "for", "guard", "if", "impl", "in", "is", "let", "letrec", "loop",

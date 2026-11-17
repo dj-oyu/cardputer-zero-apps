@@ -127,11 +127,7 @@ pub fn job_id(tree_id: &str, kind: Kind, lang: Lang, opts: &JobOpts) -> String {
         Kind::Check => "check",
         Kind::Test => "test",
     };
-    let lang = match lang {
-        Lang::Rust => "rust",
-        Lang::C => "c",
-        Lang::Node => "node",
-    };
+    let lang = lang.name();
     let mut h = Sha256::new();
     h.update(b"zc-job-v1\0");
     h.update(tree_id.as_bytes());
@@ -250,7 +246,7 @@ mod tests {
         let d = JobOpts::default();
         let mut ids = std::collections::HashSet::new();
         for k in [Kind::Build, Kind::Check, Kind::Test] {
-            for l in [Lang::Rust, Lang::C, Lang::Node] {
+            for l in Lang::ALL {
                 assert!(ids.insert(job_id(&t, k, l, &d)));
             }
         }

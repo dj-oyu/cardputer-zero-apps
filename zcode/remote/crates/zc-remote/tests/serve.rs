@@ -127,8 +127,11 @@ fn applies_decides_without_talking() {
     let js_deps = sb.write("code/n/x.mjs", "export {};\n");
     sb.write("code/e/package.json", r#"{ "name": "e" }"#);
     let ts_nodeps = sb.write("code/e/x.ts", "export {};\n");
+    // Python・Go などは根が無くても 1 ファイルで対象（2026-11-17）。拡張子の分からないものは対象でない
     let py = sb.write("code/a/x.py", "pass\n");
-    for (file, want) in [(&rs, 0), (&c, 0), (&ts_deps, 0), (&js_deps, 0), (&ts_alone, 1), (&ts_nodeps, 1), (&py, 1), (&sb.home().join("code/none.ts"), 1)] {
+    let go = sb.write("code/g/hello.go", "package main\n");
+    let txt = sb.write("code/a/x.txt", "\n");
+    for (file, want) in [(&rs, 0), (&c, 0), (&ts_deps, 0), (&js_deps, 0), (&ts_alone, 1), (&ts_nodeps, 1), (&py, 0), (&go, 0), (&txt, 1), (&sb.home().join("code/none.ts"), 1)] {
         // language.toml と同じ呼び方（作業フォルダはファイルのフォルダ、引数はファイル名）
         let mut cmd = sb.cmd(&[]);
         cmd.current_dir(file.parent().unwrap()).arg("applies").arg(file.file_name().unwrap());

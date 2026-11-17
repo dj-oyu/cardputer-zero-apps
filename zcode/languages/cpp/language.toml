@@ -19,6 +19,10 @@ name = "C++"
 extensions = ["cpp", "cc", "cxx", "hpp", "hh", "hxx"]
 line_comment = "//"
 indent = "    "
+# ビルド係: 型・構文の検査（波線）と、aarch64 向けのビルド（C と同じ形）
+remote = "cpp"
+# ビルド係で aarch64（Cortex-A53）向けにビルドして、その場で実行する（F5。stage3-design.md §4.4）
+run = "zc-remote run {file}"
 # 実機に g++ があれば構文だけ確かめる（出力の形は gcc と同じ）。ビルド係（remote）は後で足す
 check = "g++ -fsyntax-only -std=c++20 {file}"
 # g++ の出力: `ファイル:行:桁: error: メッセージ`

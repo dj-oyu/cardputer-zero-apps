@@ -1,0 +1,4 @@
+ruby: e3.rb:2: syntax error, unexpected integer literal, expecting ')' (SyntaxError)
+p(2 3)
+    ^
+
