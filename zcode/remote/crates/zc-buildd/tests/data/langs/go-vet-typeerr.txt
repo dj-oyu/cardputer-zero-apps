@@ -1,0 +1,3 @@
+# example.com/hello
+# [example.com/hello]
+vet: ./main.go:7:30: cannot use 1 (untyped int constant) as string value in variable declaration

@@ -221,7 +221,63 @@ fn c_file_is_built_remotely_and_placed() {
     assert!(text(&out.stderr).contains("undeclared"), "{}", text(&out.stderr));
 }
 
-const BROKEN_RS: &str = "fn main() {\n    let name = \"あ\";\n    let _s = \"日本語\"; let x: i32 = \"str\";\n    println!(\"{name} {x}\");\n}\n";
+/// 2026-11-17 に足した言語の通し: Go の 1 ファイルを `run` 相当の `build` で受け取り、`check` の
+/// 診断が 1 始まりの「パス:行:桁」（桁はバイト + 1）で出る。
+#[test]
+fn go_file_is_checked_and_built_remotely() {
+    if skip_without(&["go", "aarch64-linux-gnu-strip", "zstd"]) {
+        return;
+    }
+    let sb = Sandbox::new("go");
+    let buildd = Buildd::start(&sb);
+    let env = pc(buildd.port);
+    let file = sb.write("code/g/hello.go", "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"hello from Go\") }\n");
+    let out = run({ let mut c = sb.cmd(&env); c.current_dir(file.parent().unwrap()).args(["build", "hello.go"]); c }, WAIT);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let placed = PathBuf::from(text(&out.stdout).trim());
+    assert_aarch64_exe(&placed);
+    if let Some(out) = run_under_qemu(&placed, &[]) {
+        assert_eq!(out, "hello from Go\n");
+    }
+    let src = "package main\n\n// 日本語\nfunc main() {\n\tvar s string = /* 日本 */ 1\n\t_ = s\n}\n";
+    std::fs::write(&file, src).unwrap();
+    let col = src.lines().nth(4).unwrap().rfind('1').unwrap() + 1;
+    let out = run({ let mut c = sb.cmd(&env); c.current_dir(file.parent().unwrap()).args(["check", "hello.go"]); c }, WAIT);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains(&format!("hello.go:5:{col}: error: cannot use 1")), "{}", text(&out.stdout));
+}
+
+/// 古い受付（2026-11-17 より前。知らない `lang` で接続全体の `error {protocol}` を返す）に新しい
+/// 言語を頼むと、落ちずに「受付が古い」の 1 行で終わる。古い受付の実行ファイルを
+/// `ZC_E2E_OLD_BUILDD` で渡したときだけ回す（イメージ `cz-builder:latest` の `/usr/local/bin/zc-buildd`）。
+#[test]
+fn old_builder_reports_unsupported_language() {
+    let Some(old) = std::env::var_os("ZC_E2E_OLD_BUILDD") else {
+        eprintln!("e2e: ZC_E2E_OLD_BUILDD が無いので飛ばす");
+        return;
+    };
+    let sb = Sandbox::new("old");
+    let data = sb.root.join("buildd");
+    let mut child = Command::new(old).args(["--listen", "127.0.0.1:0", "--data"]).arg(&data).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut err = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    err.read_line(&mut line).unwrap();
+    let port: u16 = line.split_whitespace().nth(1).and_then(|a| a.rsplit(':').next()).and_then(|p| p.parse().ok()).unwrap();
+    let buildd = Buildd { child, port };
+    let env = pc(buildd.port);
+    let file = sb.write("code/g/hello.go", "package main\n\nfunc main() {}\n");
+    let out = run({ let mut c = sb.cmd(&env); c.current_dir(file.parent().unwrap()).args(["check", "hello.go"]); c }, WAIT);
+    assert_eq!(out.status.code(), Some(6), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("ビルド係が go に対応していない"), "{}", text(&out.stderr));
+    // 同じ serve で、Rust はそのまま通る（受付は生きている）
+    let rs = sb.write("code/r/main.rs", "fn main() {}\n");
+    if have("cargo") {
+        let out = run({ let mut c = sb.cmd(&env); c.current_dir(rs.parent().unwrap()).args(["check", "main.rs"]); c }, WAIT);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    }
+}
+
+const BROKEN_RS: &str ="fn main() {\n    let name = \"あ\";\n    let _s = \"日本語\"; let x: i32 = \"str\";\n    println!(\"{name} {x}\");\n}\n";
 
 /// 型エラーのある crate の check: 診断が UNIX ソケット（`zc_remote_ipc`）で届く。
 /// 行は 0 始まり、桁は行の中の UTF-8 のバイト位置。F5（CLI の `run`）の診断は、zcode の

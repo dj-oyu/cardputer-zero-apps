@@ -1,0 +1,15 @@
+test
++- run test 1 pass, 1 fail (2 total)
+error: 'root.test.zc fails' failed:
+       /opt/zig/lib/std/testing.zig:584:14: 0x124ee29 in expect (std.zig)
+           if (!ok) return error.TestUnexpectedResult;
+                    ^
+       /tmp/fxw2/zig/proj/src/root.zig:21:5: 0x124ee99 in test.zc fails (root.zig)
+           try std.testing.expect(1 + 1 == 3);
+           ^
+failed command: ./.zig-cache/o/7ced6d2438b27f5dcbe5f23c09a2194f/test --cache-dir=./.zig-cache --seed=0x721a886f --listen=-
+
+Build Summary: 3/5 steps succeeded (1 failed); 3/4 tests passed (1 failed)
+test transitive failure
++- run test 1 pass, 1 fail (2 total)
+

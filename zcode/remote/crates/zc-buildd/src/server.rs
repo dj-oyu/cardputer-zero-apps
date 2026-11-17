@@ -737,6 +737,10 @@ impl Conn<'_> {
 
     #[allow(clippy::too_many_arguments)]
     fn on_job(&mut self, job: String, project: String, tree: String, kind: Kind, lang: Lang, opts: JobOpts, log: bool) {
+        if lang == Lang::Unknown {
+            // これより新しい実機の言語。そのジョブだけ断り、接続は続ける。
+            return self.job_error(&job, ErrorCode::Protocol, zc_wire::msg::UNSUPPORTED_LANG, None);
+        }
         let Some(manifest) = self.ready.iter().find(|r| r.tree == tree && r.project == project).map(|r| r.manifest.clone()) else {
             return self.job_error(&job, ErrorCode::BadTree, "この接続で ready を受けた木ではない", None);
         };

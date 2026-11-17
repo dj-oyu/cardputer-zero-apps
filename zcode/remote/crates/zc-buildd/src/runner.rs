@@ -3,7 +3,10 @@
 //! 台帳（[`crate::jobs`]）は [`Runner::run`] を、ジョブごとのスレッドで呼ぶ。実行する側は
 //! 道具を [`spawn_tool`] で起動し、出力を [`JobOutput`] に流し、終わり方を返す。
 //!
-//! 言語ごとの中身: [`rust`]（課題 B3）、[`c`]・[`node`]（課題 B4）。
+//! 言語ごとの中身: [`rust`]（課題 B3）、[`c`]・[`node`]（課題 B4）。2026-11-17 に [`python`]・
+//! [`shell`]・C++（[`c::run_cpp`]）・[`go`]・[`ruby`]・[`zig`]・[`moonbit`] を足した。どの言語も
+//! 診断は「0 始まりの行・行の中の UTF-8 のバイト位置・木の根からの相対パス」に直して返す
+//! （道具ごとの数え方は各ファイルの先頭）。
 //!
 //! # 道具の起動（[`spawn_tool`]）の決まり
 //!
@@ -21,8 +24,14 @@
 //! - 台帳の時間切れ（15 分）とは別に、[`MAX_TOOL_TIME`] の最後の守りを持つ
 
 pub mod c;
+pub mod go;
+pub mod moonbit;
 pub mod node;
+pub mod python;
+pub mod ruby;
 pub mod rust;
+pub mod shell;
+pub mod zig;
 
 use crate::pack::Packed;
 use std::ffi::OsString;
@@ -109,8 +118,27 @@ impl Runner for Tools {
             Lang::Rust => rust::run(ctx, out),
             Lang::C => c::run(ctx, out),
             Lang::Node => node::run(ctx, out),
+            Lang::Python => python::run(ctx, out),
+            Lang::Shell => shell::run(ctx, out),
+            Lang::Cpp => c::run_cpp(ctx, out),
+            Lang::Go => go::run(ctx, out),
+            Lang::Ruby => ruby::run(ctx, out),
+            Lang::Zig => zig::run(ctx, out),
+            Lang::Moonbit => moonbit::run(ctx, out),
+            // 受付が断るので来ない（来ても実行しない）
+            Lang::Unknown => Err(JobFailure { status: Status::Error, message: zc_wire::msg::UNSUPPORTED_LANG.into() }),
         }
     }
+}
+
+/// その言語では無い種類のジョブ（Python の build など）。
+pub(crate) fn unsupported(label: &str, kind: Kind, hint: &str) -> JobFailure {
+    let what = match kind {
+        Kind::Build => "ビルド",
+        Kind::Check => "検査",
+        Kind::Test => "試験",
+    };
+    JobFailure { status: Status::Error, message: format!("{label} の{what}は未対応（{hint}）") }
 }
 
 /// 1 行の上限。超えた分は捨てる（cargo の JSON の 1 行でも数十 KB まで）。
@@ -133,6 +161,15 @@ const KEEP_ENV: &[&str] = &[
     "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER",
     "RUSTC_WRAPPER",
     "npm_config_cache",
+    // Go・Zig・MoonBit（イメージの ENV。置き場の中のキャッシュと、道具の場所）
+    "GOPATH",
+    "GOCACHE",
+    "GOMODCACHE",
+    "GOTOOLCHAIN",
+    "GOTELEMETRY",
+    "GOPROXY",
+    "ZIG_GLOBAL_CACHE_DIR",
+    "MOON_HOME",
 ];
 
 fn keep_env(name: &std::ffi::OsStr) -> bool {
@@ -142,7 +179,7 @@ fn keep_env(name: &std::ffi::OsStr) -> bool {
 
 /// 道具に渡す環境変数を絞る: `PATH`・`HOME`・`LANG`・`CARGO_HOME`・`RUSTUP_HOME`・
 /// `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER`・`RUSTC_WRAPPER`・`SCCACHE_*`・
-/// `npm_config_cache` だけを残し、あとは消す（受付の環境に何かあっても、`build.rs` や
+/// `npm_config_cache`・Go の `GOPATH` など・`ZIG_GLOBAL_CACHE_DIR`・`MOON_HOME` だけを残し、あとは消す（受付の環境に何かあっても、`build.rs` や
 /// `postinstall` に渡さない）。`CARGO_TERM_COLOR=never`・`NO_COLOR=1`・`CI=1` を足す。
 ///
 /// 呼ぶ前に `cmd` に明示して入れた変数（`CARGO_TARGET_DIR` など）はそのまま残る。
@@ -634,6 +671,102 @@ pub(crate) fn read_line(path: &Path, line: u32) -> Option<String> {
     text.split('\n').nth(line as usize).map(|l| l.trim_end_matches('\r').to_string())
 }
 
+/// 桁の直しに使う、ソースの行の読み手（木の根からの相対パス・0 始まりの行 → その行の中身）。
+/// 試験では、ファイルを置かずに中身を渡せるように分けてある。
+pub(crate) type LineSource<'a> = dyn Fn(&str, u32) -> Option<String> + 'a;
+
+/// 作業の木から行を読む [`LineSource`]。
+pub(crate) fn lines_from(src: &Path) -> impl Fn(&str, u32) -> Option<String> + '_ {
+    move |rel: &str, line: u32| read_line(&src.join(rel), line)
+}
+
+/// `パス:行:桁: 本文` か `パス:行: 本文` の 1 行を分ける（Go・Zig・Ruby の出力）。行・桁は
+/// 道具の出したまま（1 始まり）。パスの中の `:` は、後ろが「数字:」でなければパスの一部とみなす。
+pub(crate) fn split_loc(line: &str) -> Option<(&str, u32, Option<u32>, &str)> {
+    let mut from = 0;
+    while let Some(off) = line[from..].find(':') {
+        let at = from + off;
+        let rest = &line[at + 1..];
+        let n = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if at > 0 && n > 0 && rest.as_bytes().get(n) == Some(&b':') {
+            let path = &line[..at];
+            let lno: u32 = rest[..n].parse().ok()?;
+            let rest2 = &rest[n + 1..];
+            let m = rest2.bytes().take_while(u8::is_ascii_digit).count();
+            if m > 0 && rest2.as_bytes().get(m) == Some(&b':') {
+                return Some((path, lno, rest2[..m].parse().ok(), rest2[m + 1..].trim_start()));
+            }
+            return Some((path, lno, None, rest2.trim_start()));
+        }
+        from = at + 1;
+    }
+    None
+}
+
+/// 1 始まりの行を 0 始まりに。
+pub(crate) fn line0(line_1based: u32) -> u32 {
+    line_1based.max(1) - 1
+}
+
+/// 1 始まりの「バイト」の桁を 0 始まりに（gcc・Go・Zig）。行の長さを超えたら行末に寄せる。
+pub(crate) fn byte_col0(lines: &LineSource<'_>, rel: &str, line0: u32, col_1based: u32) -> u32 {
+    let c = col_1based.max(1) - 1;
+    match lines(rel, line0) {
+        Some(text) => {
+            let mut c = (c as usize).min(text.len());
+            while !text.is_char_boundary(c) {
+                c -= 1;
+            }
+            c as u32
+        }
+        None => c,
+    }
+}
+
+/// 1 始まりの「文字（コードポイント）」の桁を、0 始まりのバイト位置に（shellcheck・MoonBit）。
+pub(crate) fn char_col0(lines: &LineSource<'_>, rel: &str, line0: u32, col_1based: u32) -> u32 {
+    match lines(rel, line0) {
+        Some(text) => rust::char_col_to_byte(&text, col_1based),
+        None => col_1based.saturating_sub(1),
+    }
+}
+
+/// 0 始まりの「UTF-16 の単位」の桁を、0 始まりのバイト位置に（pyright。LSP と同じ数え方）。
+pub(crate) fn utf16_col0(lines: &LineSource<'_>, rel: &str, line0: u32, col_0based: u32) -> u32 {
+    match lines(rel, line0) {
+        Some(text) => node::utf16_col_to_byte(&text, col_0based + 1),
+        None => col_0based,
+    }
+}
+
+/// 木の中の、拡張子が `exts` のファイル（相対パス・名前の順）。`.` で始まるフォルダと `skip` の
+/// 名前のフォルダには入らない。`max` 個で打ち切る（2 つ目は打ち切ったか）。
+pub(crate) fn files_with_ext(src: &Path, exts: &[&str], skip: &[&str], max: usize) -> (Vec<String>, bool) {
+    fn walk(dir: &Path, prefix: &str, exts: &[&str], skip: &[&str], out: &mut Vec<String>, depth: usize) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let Some(name) = e.file_name().to_str().map(str::to_string) else { continue };
+            let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+            match e.file_type() {
+                Ok(t) if t.is_dir() && depth < 32 && !name.starts_with('.') && !skip.contains(&name.as_str()) => walk(&e.path(), &rel, exts, skip, out, depth + 1),
+                Ok(t) if t.is_file() && exts.iter().any(|x| name.ends_with(x)) => out.push(rel),
+                _ => {}
+            }
+        }
+    }
+    let mut all = Vec::new();
+    walk(src, "", exts, skip, &mut all, 0);
+    all.sort();
+    let cut = all.len() > max;
+    all.truncate(max);
+    (all, cut)
+}
+
+/// 失敗の結果（位置なしの 1 件の error だけ）。
+pub(crate) fn failed_result(exit: i32, msg: impl Into<String>) -> JobResult {
+    JobResult { exit, complete: true, diagnostics: vec![FileDiags { path: String::new(), diags: vec![note_diag(Severity::Error, msg)] }], ..Default::default() }
+}
+
 #[cfg(test)]
 pub(crate) mod testutil {
     use super::JobOutput;
@@ -878,6 +1011,23 @@ mod tests {
         assert_eq!(v[0].path, "");
         // 800 件のうち 499 件を残し、301 件を省いた
         assert!(v[0].diags[0].message.contains("301"), "{}", v[0].diags[0].message);
+    }
+
+    #[test]
+    fn locations_and_columns() {
+        assert_eq!(split_loc("./main.go:7:30: cannot use"), Some(("./main.go", 7, Some(30), "cannot use")));
+        assert_eq!(split_loc("e.rb:3: syntax error"), Some(("e.rb", 3, None, "syntax error")));
+        assert_eq!(split_loc("a b/x:y.zig:1:2: error: z"), Some(("a b/x:y.zig", 1, Some(2), "error: z")));
+        assert_eq!(split_loc("no location here"), None);
+        assert_eq!(split_loc("x.go:12"), None, "本文の前の : が要る");
+        let lines = |_: &str, _: u32| Some("日本x".to_string());
+        // バイトの桁が字の途中を指したら字の頭、行より先なら行末
+        assert_eq!(byte_col0(&lines, "a", 0, 3), 0);
+        assert_eq!(byte_col0(&lines, "a", 0, 7), 6);
+        assert_eq!(byte_col0(&lines, "a", 0, 99), 7);
+        assert_eq!(char_col0(&lines, "a", 0, 3), 6);
+        assert_eq!(utf16_col0(&lines, "a", 0, 2), 6);
+        assert_eq!(char_col0(&|_, _| None, "a", 0, 3), 2);
     }
 
     #[test]

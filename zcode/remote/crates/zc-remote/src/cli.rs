@@ -9,7 +9,7 @@
 //! zc-remote serve [--stats]            UNIX ソケットで待つ（ふつうは自動で起動される）
 //! zc-remote status                     設定・つながるビルド係・走っているジョブ
 //! zc-remote stop                       serve を終わらせる
-//! 共通: --lang rust|c|node（省略すると拡張子から）  --stats  --version  --help
+//! 共通: --lang rust|c|node|python|shell|cpp|go|ruby|zig|moonbit（省略すると拡張子から）  --stats  --version  --help
 //! ```
 //!
 //! - どれも serve に頼むだけ（無ければ切り離して起動する）。ログは標準エラーへそのまま流す
@@ -69,7 +69,7 @@ const USAGE: &str = "\
   zc-remote status                     設定・つながるビルド係・走っているジョブ
   zc-remote stop                       serve を終わらせる
   zc-remote serve [--stats]            UNIX ソケットで待つ（ふつうは自動で起動される）
-共通: --lang rust|c|node（省略すると拡張子から）  --stats  --version  --help
+共通: --lang rust|c|node|python|shell|cpp|go|ruby|zig|moonbit（省略すると拡張子から）  --stats  --version  --help
 設定: ~/.config/zcode/remote.json と remote-token.json（権限 0600）
 終了コード: 0 成功 / 1 ビルド・型検査・試験の失敗 / 2 使い方 / 3 オフライン / 4 認証・設定 /
             5 上限 / 6 そのほか / 126 実行できない / 130 取り消し";
@@ -119,15 +119,31 @@ pub fn lang_of(file: &Path) -> Option<ipc::RemoteLang> {
         "rs" => Some(ipc::RemoteLang::Rust),
         "c" | "h" => Some(ipc::RemoteLang::C),
         "js" | "mjs" | "cjs" | "ts" | "mts" | "cts" => Some(ipc::RemoteLang::Node),
+        "py" | "pyi" => Some(ipc::RemoteLang::Python),
+        "sh" | "bash" => Some(ipc::RemoteLang::Shell),
+        "cpp" | "cc" | "cxx" | "c++" | "hpp" | "hh" | "hxx" => Some(ipc::RemoteLang::Cpp),
+        "go" => Some(ipc::RemoteLang::Go),
+        "rb" => Some(ipc::RemoteLang::Ruby),
+        "zig" => Some(ipc::RemoteLang::Zig),
+        "mbt" => Some(ipc::RemoteLang::MoonBit),
         _ => None,
     }
 }
 
-fn wire_lang(l: ipc::RemoteLang) -> zc_wire::msg::Lang {
+/// UNIX ソケットの約束の言語 → ビルド係との約束の言語。
+pub fn wire_lang(l: ipc::RemoteLang) -> zc_wire::msg::Lang {
+    use zc_wire::msg::Lang;
     match l {
-        ipc::RemoteLang::Rust => zc_wire::msg::Lang::Rust,
-        ipc::RemoteLang::C => zc_wire::msg::Lang::C,
-        ipc::RemoteLang::Node => zc_wire::msg::Lang::Node,
+        ipc::RemoteLang::Rust => Lang::Rust,
+        ipc::RemoteLang::C => Lang::C,
+        ipc::RemoteLang::Node => Lang::Node,
+        ipc::RemoteLang::Python => Lang::Python,
+        ipc::RemoteLang::Shell => Lang::Shell,
+        ipc::RemoteLang::Cpp => Lang::Cpp,
+        ipc::RemoteLang::Go => Lang::Go,
+        ipc::RemoteLang::Ruby => Lang::Ruby,
+        ipc::RemoteLang::Zig => Lang::Zig,
+        ipc::RemoteLang::MoonBit => Lang::Moonbit,
     }
 }
 
@@ -164,7 +180,7 @@ fn parse(args: &[OsString]) -> Result<Args, String> {
             }
             "--lang" => {
                 let v = it.next().and_then(|v| v.to_str()).and_then(ipc::RemoteLang::parse);
-                a.lang = Some(v.ok_or("--lang は rust / c / node のどれか")?);
+                a.lang = Some(v.ok_or("--lang は rust / c / node / python / shell / cpp / go / ruby / zig / moonbit のどれか")?);
             }
             "--release" => a.release = true,
             "--stats" => a.stats = true,
@@ -497,7 +513,7 @@ fn job(a: Args) -> u8 {
         return exit::USAGE;
     }
     let Some(lang) = a.lang.or_else(|| lang_of(&file)) else {
-        return usage_error(format!("言語が分からない（--lang rust|c|node を付ける）: {}", file.display()));
+        return usage_error(format!("言語が分からない（--lang rust|c|node|go|… を付ける）: {}", file.display()));
     };
     let (kind, is_run) = match a.command.as_str() {
         "build" => (ipc::JobKind::Build, false),
@@ -769,7 +785,7 @@ mod tests {
         assert_eq!((a.command.as_str(), a.lang, a.stats), ("check", Some(ipc::RemoteLang::C), true));
         let a = parse(&args(&["serve", "--socket", "/tmp/s", "--idle-exit", "0.5", "--keep-warm", "2", "--detach"])).unwrap();
         assert_eq!((a.socket.as_deref(), a.idle_exit, a.keep_warm, a.detach), (Some(Path::new("/tmp/s")), Some(Duration::from_millis(500)), Some(Duration::from_secs(2)), true));
-        for bad in [&["run", "a.rs", "b.rs"][..], &["test", "a.rs", "filter"], &["run", "--frob"], &["--lang", "go", "run", "a"], &["serve", "--idle-exit", "soon"], &["serve", "--socket"]] {
+        for bad in [&["run", "a.rs", "b.rs"][..], &["test", "a.rs", "filter"], &["run", "--frob"], &["--lang", "cobol", "run", "a"], &["serve", "--idle-exit", "soon"], &["serve", "--socket"]] {
             assert!(parse(&args(bad)).is_err(), "{bad:?}");
         }
     }
@@ -782,7 +798,19 @@ mod tests {
         for f in ["a.js", "a.mjs", "a.cjs", "a.ts", "a.mts", "a.cts"] {
             assert_eq!(lang_of(Path::new(f)), Some(ipc::RemoteLang::Node), "{f}");
         }
-        assert_eq!(lang_of(Path::new("a.py")), None);
+        for (f, l) in [
+            ("a.py", ipc::RemoteLang::Python),
+            ("a.sh", ipc::RemoteLang::Shell),
+            ("a.cpp", ipc::RemoteLang::Cpp),
+            ("a.hpp", ipc::RemoteLang::Cpp),
+            ("a.go", ipc::RemoteLang::Go),
+            ("a.rb", ipc::RemoteLang::Ruby),
+            ("a.zig", ipc::RemoteLang::Zig),
+            ("a.mbt", ipc::RemoteLang::MoonBit),
+        ] {
+            assert_eq!(lang_of(Path::new(f)), Some(l), "{f}");
+        }
+        assert_eq!(lang_of(Path::new("a.txt")), None);
         assert_eq!(lang_of(Path::new("Makefile")), None);
     }
 

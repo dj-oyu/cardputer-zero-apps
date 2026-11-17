@@ -1,0 +1,3 @@
+a.zig:4:41: error: expected ';' after statement
+    const x: u32 = "日本"; const y = 1
+                                        ^

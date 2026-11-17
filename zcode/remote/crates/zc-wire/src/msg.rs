@@ -18,13 +18,57 @@ pub enum Kind {
 }
 
 /// 言語の扱い。
+///
+/// 2026-11-17 に Python・Shell・C++・Go・Ruby・Zig・MoonBit を足した（JSON の名前は
+/// `python` / `shell` / `cpp` / `go` / `ruby` / `zig` / `moonbit`）。**古い受付はこれらを読めず、
+/// 接続全体の `error {protocol}`（「unknown variant」）を返して切る**。実機側（zc-remote）は
+/// それを「受付が古い」の 1 行に直す。この版からの受付は、知らない名前を [`Lang::Unknown`] として
+/// 読み、そのジョブだけを断る（接続は続ける）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Lang {
     Rust,
     C,
     Node,
+    Python,
+    Shell,
+    Cpp,
+    Go,
+    Ruby,
+    Zig,
+    Moonbit,
+    /// 読めなかった名前（これより新しい実機が送ってきた言語）。送ることは無い。
+    #[serde(other)]
+    Unknown,
 }
+
+impl Lang {
+    /// JSON での名前（job id の計算にも使う）。
+    pub fn name(self) -> &'static str {
+        match self {
+            Lang::Rust => "rust",
+            Lang::C => "c",
+            Lang::Node => "node",
+            Lang::Python => "python",
+            Lang::Shell => "shell",
+            Lang::Cpp => "cpp",
+            Lang::Go => "go",
+            Lang::Ruby => "ruby",
+            Lang::Zig => "zig",
+            Lang::Moonbit => "moonbit",
+            Lang::Unknown => "unknown",
+        }
+    }
+
+    /// 送ることのある全部（[`Lang::Unknown`] を除く）。
+    ///
+    /// 2026-11-17 から。
+    pub const ALL: [Lang; 10] = [Lang::Rust, Lang::C, Lang::Node, Lang::Python, Lang::Shell, Lang::Cpp, Lang::Go, Lang::Ruby, Lang::Zig, Lang::Moonbit];
+}
+
+/// 受付が知らない言語のジョブを断るときの `error {job, code: "protocol"}` の `message` の頭
+/// （実機はこれを見て「受付が古い」と表示する）。
+pub const UNSUPPORTED_LANG: &str = "このビルド係は対応していない言語";
 
 /// ジョブのオプション。**job id の計算に入る**ので、項目を足すときは既定値を
 /// 「書かない」（`skip_serializing_if`）にして、古い id を変えない。
@@ -516,6 +560,19 @@ mod tests {
     }
 
     #[test]
+    fn lang_names_and_unknown() {
+        for l in Lang::ALL {
+            let json = format!(r#"{{"type":"job","job":"j","project":"p","tree":"t","kind":"check","lang":"{}"}}"#, l.name());
+            let Some(ClientMsg::Job { lang, .. }) = decode::<ClientMsg>(&json).unwrap() else { panic!("{json}") };
+            assert_eq!(lang, l);
+            assert_eq!(serde_json::to_string(&l).unwrap(), format!("\"{}\"", l.name()));
+        }
+        // これより新しい実機の言語は Unknown として読む（接続全体の失敗にしない）
+        let m = decode::<ClientMsg>(r#"{"type":"job","job":"j","project":"p","tree":"t","kind":"build","lang":"cobol"}"#).unwrap();
+        assert!(matches!(m, Some(ClientMsg::Job { lang: Lang::Unknown, .. })), "{m:?}");
+    }
+
+    #[test]
     fn defaults_and_extra_fields() {
         // 省いてよい項目
         assert_eq!(
@@ -569,7 +626,8 @@ mod tests {
             // 中の項目の知らない値（type と同じ綴りでも、知らない type と取り違えない）
             r#"{"type":"job","job":"j","project":"p","tree":"t","kind":"job","lang":"rust"}"#,
             r#"{"type":"job","job":"j","project":"p","tree":"t","kind":"deploy","lang":"rust"}"#,
-            r#"{"type":"job","job":"j","project":"p","tree":"t","kind":"build","lang":"go"}"#,
+            // （知らない lang は 2026-11-17 から Lang::Unknown として読む。lang_names_and_unknown）
+            r#"{"type":"job","job":"j","project":"p","tree":"t","kind":"build","lang":5}"#,
             // 数の範囲
             r#"{"type":"attach","job":"j","log":-1}"#,
             r#"{"type":"hello","v":4294967296,"client":"c"}"#,

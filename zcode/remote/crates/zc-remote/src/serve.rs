@@ -604,11 +604,7 @@ impl Core {
                 ipc::JobKind::Check => wire::Kind::Check,
                 ipc::JobKind::Test => wire::Kind::Test,
             },
-            match lang {
-                ipc::RemoteLang::Rust => wire::Lang::Rust,
-                ipc::RemoteLang::C => wire::Lang::C,
-                ipc::RemoteLang::Node => wire::Lang::Node,
-            },
+            crate::cli::wire_lang(lang),
         );
         // 根を先に探す（対象でないファイルは、設定が無くても「対象ではない」）。
         let project = match scan::find_project(&file, wlang) {
@@ -832,6 +828,9 @@ impl Core {
             },
             Outcome::Rejected { code, message } => match code {
                 wire::ErrorCode::Limit | wire::ErrorCode::TooLarge => (S::Limit, 0, message),
+                _ if unsupported_lang(code, &message, ctx.request.lang) => {
+                    (S::Error, 0, format!("ビルド係が {} に対応していない（ビルド係のイメージが古い。deploy し直す）", ctx.request.lang.name()))
+                }
                 _ => (S::Error, 0, format!("ビルド係に断られた（{code:?}）: {message}")),
             },
             Outcome::GaveUp => match &self.last_err {
@@ -957,6 +956,13 @@ struct Serve {
     _lock: std::fs::File,
     idle_since: Option<u64>,
     scratch: Box<[u8]>,
+}
+
+/// ビルド係がその言語を知らないという断りか。古い受付（2026-11-17 より前）は知らない `lang` を
+/// 読めず、接続全体の `error {protocol, "読めないメッセージ: unknown variant `go`, …"}` を返して
+/// 切る。新しい受付は、そのジョブだけに [`wire::UNSUPPORTED_LANG`] を含む `error {protocol}` を返す。
+fn unsupported_lang(code: wire::ErrorCode, message: &str, lang: wire::Lang) -> bool {
+    code == wire::ErrorCode::Protocol && (message.contains(&format!("unknown variant `{}`", lang.name())) || message.contains(wire::UNSUPPORTED_LANG))
 }
 
 fn io_err(what: &str) -> io::Error {
@@ -1742,6 +1748,17 @@ mod tests {
         // メッセージは文字の境目で切る
         let d = convert_diag(diag(&long));
         assert!(d.message.len() <= MESSAGE_MAX && d.message.chars().all(|c| c == 'あ'));
+    }
+
+    #[test]
+    fn old_builder_lang_error_is_recognised() {
+        // 2026-11-17 より前の zc-buildd が "go" を読めなかったときの実物（serde_json の文）
+        let old = "読めないメッセージ: unknown variant `go`, expected one of `rust`, `c`, `node` at line 1 column 103";
+        assert!(unsupported_lang(wire::ErrorCode::Protocol, old, wire::Lang::Go));
+        assert!(!unsupported_lang(wire::ErrorCode::Protocol, old, wire::Lang::Zig));
+        assert!(!unsupported_lang(wire::ErrorCode::Internal, old, wire::Lang::Go));
+        assert!(unsupported_lang(wire::ErrorCode::Protocol, &format!("{}: cobol", wire::UNSUPPORTED_LANG), wire::Lang::Moonbit));
+        assert!(!unsupported_lang(wire::ErrorCode::Protocol, "最初のメッセージは hello", wire::Lang::Rust));
     }
 
     #[test]
