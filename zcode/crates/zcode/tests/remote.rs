@@ -566,3 +566,40 @@ fn lsp_without_zc_remote_answers_not_applicable() {
     let got = events(collect(&rx, Duration::from_secs(5), |e| matches!(e, RemoteEvent::LspResult { .. })));
     assert!(matches!(got.last(), Some(RemoteEvent::LspResult { req: r, status: DoneStatus::NotApplicable, .. }) if *r == req), "{got:?}");
 }
+
+/// 自分が起動した serve は、shutdown（zcode が終わるとき）で終わらせる。残すと同じプロセス
+/// グループに居続け、APPLaunch が「loading...」のまま待つ（2026-11-17 実機）。
+#[test]
+fn shutdown_terminates_the_serve_it_started() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new("shutdown");
+    // ソケットを作らずに居座る serve の代わり
+    let prog = dir.0.join("fake-serve");
+    std::fs::write(&prog, "#!/bin/sh\nexec sleep 60\n").unwrap();
+    std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (tx, _rx) = main_channel().unwrap();
+    let client = RemoteClient::with_socket(tx, Some(prog), dir.socket());
+    let _ = client.submit(check_job("/p/a.rs"));
+    let until = Instant::now() + Duration::from_secs(5);
+    let pid = loop {
+        if let Some(p) = client.serve_pid() {
+            break p;
+        }
+        assert!(Instant::now() < until, "serve を起動しない");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let alive = |p: u32| {
+        // 終わって回収待ち（Z）も「終わった」に数える
+        std::fs::read_to_string(format!("/proc/{p}/stat")).ok().is_some_and(|s| s.rsplit(')').next().is_some_and(|r| !r.trim_start().starts_with('Z')))
+    };
+    assert!(alive(pid));
+    client.shutdown();
+    assert_eq!(client.serve_pid(), None);
+    let until = Instant::now() + Duration::from_secs(3);
+    while alive(pid) {
+        assert!(Instant::now() < until, "serve（{pid}）が終わらない");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // 何度呼んでもよい（もう送らない）
+    client.shutdown();
+}

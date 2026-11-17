@@ -41,15 +41,15 @@ use zc_highlight::{Highlighter, LanguageId, LanguageInfo, Registry};
 use zc_intel::{Completion, CompletionKind, DiagStore, Diagnostic, Severity, ShiftLog, WordIndex};
 use zc_remote_ipc::{DoneStatus, FileDiags, JobKind, JobTag, Phase, RemoteLang, SubmitFlags, TestReport};
 use zc_input::{Keyboard, RawRecord};
-use zc_ui::layout::{Regions, SIDE_W, UI_PX};
+use zc_ui::layout::{Regions, CODE_LINE_H, CODE_PX, SIDE_W, UI_PX};
 use std::sync::OnceLock;
 use zc_skk::{InputMode, LearnedWord, Preedit, PreeditState, Skk, SystemDict, UserDict};
 use zc_term::{ReadBudget, Term, TermCommand, TermEvent};
 use zc_markdown::MdDocument;
 use zc_ui::{ShortcutList, ShortcutRow};
 use zc_store::{BackupPolicy, DocBackup, Restore, Snapshot};
-use zc_ui::{CandidatePopup, CandidateRow, CodeLayouter, MdLayouter, MiniBuffer, PreeditStyle, PreeditView, MINI_H};
-use zc_ui::{CompletionPopup, EditorStatus, EditorView, FileTree, ImeMode, PickerList, PopupItem, RenderCx, SpanSource, StatusBar, Tab, TabBar, TerminalPanel, Widget, TERM_PANEL_H};
+use zc_ui::{CandidatePopup, CandidateRow, CodeLayouter, FolderPicker, MdLayouter, MiniBuffer, PaneMap, PreeditStyle, PreeditView, MINI_H};
+use zc_ui::{CompletionPopup, EditorStatus, EditorView, FileTree, ImeMode, PickerList, PopupItem, RenderCx, SpanSource, StatusBar, Tab, TabBar, TerminalPanel, Widget};
 
 #[path = "editor_lsp.rs"]
 mod lsp;
@@ -146,6 +146,8 @@ pub trait RemoteLink {
     fn warm(&mut self, file: PathBuf, cx: &mut LoopCx<'_>) {
         let _ = (file, cx);
     }
+    /// zcode が終わる: 自分が起動した serve を終わらせる（残すと APPLaunch が待ち続ける）。
+    fn shutdown(&mut self) {}
 }
 
 /// 本物の専用スレッド。最初の依頼まで作らない（ビルド係を使わない人には、スレッドも
@@ -170,6 +172,11 @@ impl RemoteLink for LazyRemote {
     fn warm(&mut self, file: PathBuf, cx: &mut LoopCx<'_>) {
         if self.auto_check_ready() {
             self.0.get_or_insert_with(|| RemoteClient::new(cx.results.clone(), None)).warm(file);
+        }
+    }
+    fn shutdown(&mut self) {
+        if let Some(c) = &self.0 {
+            c.shutdown();
         }
     }
 }
@@ -343,6 +350,8 @@ struct DocTab {
     md: Option<MdState>,
     /// 読み込みが終わったら入れる控えの内容とカーソル（起動時の復元）。
     pending_restore: Option<(String, Pos)>,
+    /// コードの字（ソース表示に戻すときの組み方）。
+    code: CodeFont,
 }
 
 /// この行数までの Markdown は、全体の解析をメインで行う（超えたら batch）。実機で
@@ -361,12 +370,41 @@ struct MdState {
 }
 
 impl MdState {
-    fn layouter(&self) -> Box<dyn zc_ui::LineLayouter> {
+    fn layouter(&self, code: CodeFont) -> Box<dyn zc_ui::LineLayouter> {
         if self.preview {
             Box::new(MdLayouter::new(self.doc.clone()))
         } else {
-            Box::new(CodeLayouter::standard())
+            Box::new(code.layouter())
         }
+    }
+}
+
+/// 区画のあいだを移る・開閉する・最大化する操作か（どこにフォーカスがあっても受ける）。
+fn is_pane_command(c: Command) -> bool {
+    matches!(c, Command::FocusTree | Command::FocusEditor | Command::FocusTerminal | Command::ToggleTree | Command::ToggleTerminal | Command::Maximize)
+}
+
+/// フォーカスを移した区画の上の辺の光: 太さ・段の数・1 段の長さ・色（ステータスバーの青を少し明るく）。
+/// 液晶は行の範囲で送るので、横の辺だけなら 1 段あたり数行の転送で済む。
+const FLASH_H: u16 = 3;
+const FLASH_STEPS: u8 = 3;
+const FLASH_STEP: Duration = Duration::from_millis(100);
+const FLASH_COLOR: Color = palette::STATUS.mix(Color::WHITE, 31);
+
+/// コード（と端末）の字の大きさと 1 行の高さ。同梱のフォント（Cozette）を使うときは
+/// [`EditorScreen::set_code_font`] で 13px の行にする。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CodeFont {
+    pub px: f32,
+    pub line_h: u16,
+}
+
+impl CodeFont {
+    /// 既定（DejaVu Sans Mono 10px・行 12px）。
+    pub const STANDARD: CodeFont = CodeFont { px: CODE_PX, line_h: CODE_LINE_H };
+
+    fn layouter(self) -> CodeLayouter {
+        CodeLayouter::new(self.px, self.line_h)
     }
 }
 
@@ -388,7 +426,7 @@ impl SpanSource for TabSpans<'_> {
 }
 
 impl DocTab {
-    fn new(id: DocId, path: Option<PathBuf>, title: String, doc: Box<dyn TextDoc + Send>) -> DocTab {
+    fn new(id: DocId, path: Option<PathBuf>, title: String, doc: Box<dyn TextDoc + Send>, code: CodeFont) -> DocTab {
         let words = WordIndex::build(doc.as_lines(), &CancelToken::never()).unwrap_or_else(|_| WordIndex::new());
         let saved = path.is_some().then(|| doc.version());
         let mut t = DocTab {
@@ -409,7 +447,11 @@ impl DocTab {
             checked: None,
             md: None,
             pending_restore: None,
+            code,
         };
+        if code != CodeFont::STANDARD {
+            t.view.set_layouter(Box::new(code.layouter()));
+        }
         t.detect_language();
         t
     }
@@ -463,11 +505,11 @@ impl DocTab {
         if self.lang.name == "Markdown" {
             let preview = self.md.as_ref().is_none_or(|m| m.preview);
             let md = MdState { doc: Rc::new(RefCell::new(MdDocument::new())), preview, stale: true, pending: None };
-            self.view.set_layouter(md.layouter());
+            self.view.set_layouter(md.layouter(self.code));
             self.md = Some(md);
             self.parse_markdown_here();
         } else if self.md.take().is_some() {
-            self.view.set_layouter(Box::new(CodeLayouter::standard()));
+            self.view.set_layouter(Box::new(self.code.layouter()));
         }
     }
     /// 小さな Markdown なら、全体をここ（メイン）で解析し直す。大きければ何もしない
@@ -530,8 +572,9 @@ impl DocTab {
     }
 }
 
+/// 打鍵が向いている場所。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Focus {
+pub enum Focus {
     Editor,
     Tree,
     /// ターミナルのパネル（打鍵は、決まったショートカットを除いて端末へ送る）。
@@ -699,6 +742,16 @@ pub struct EditorScreen {
     /// 統合ターミナル（段階 3）。
     term: Option<TermState>,
     panel: TerminalPanel,
+    /// コードと端末の字（[`EditorScreen::set_code_font`]）。
+    code_font: CodeFont,
+    /// エディタを最大化している（F11。ツリーとパネルを隠す。開閉の状態はそのまま）。
+    editor_max: bool,
+    /// フォルダを開く画面（ツリーで F11）。
+    folder: Option<FolderPicker>,
+    /// フォーカスを移した区画の上の辺の光（区画・段 0〜2）。
+    flash: Option<(Focus, u8)>,
+    /// 光をこの描画で重ねる（段が進んだとき・始めたときだけ。同じ段で重ねると濃くなる）。
+    flash_paint: bool,
     panel_open: bool,
     panel_full: bool,
     /// 端末の大きさ（パネルの寸法から決めたもの。最初の描画までは見積もり）。
@@ -795,6 +848,11 @@ impl EditorScreen {
             mini_open: false,
             term: None,
             panel: TerminalPanel::new(),
+            code_font: CodeFont::STANDARD,
+            editor_max: false,
+            folder: None,
+            flash: None,
+            flash_paint: false,
             panel_open: false,
             panel_full: false,
             term_grid: (56, 6),
@@ -835,6 +893,25 @@ impl EditorScreen {
     pub fn set_remote(&mut self, remote: Box<dyn RemoteLink>) {
         self.remote = remote;
     }
+    /// コード（と端末）の字の大きさと 1 行の高さを替える。開いているタブ（Markdown の
+    /// プレビュー以外）にも、後で開くタブにも効く。端末は同じ字で、行の高さも同じにする。
+    /// 同梱のフォント（[`crate::fonts`]）を使うとき・フォント比較（`examples/fontpreview.rs`）用。
+    pub fn set_code_font(&mut self, px: f32, line_h: u16) {
+        let code = CodeFont { px, line_h };
+        self.code_font = code;
+        for t in &mut self.tabs {
+            t.code = code;
+            if t.md.as_ref().is_some_and(|m| m.preview) {
+                continue;
+            }
+            t.view.set_layouter(Box::new(code.layouter()));
+        }
+        if code == CodeFont::STANDARD {
+            self.panel.set_font(UI_PX, zc_ui::terminal::TERM_ROW_H);
+        } else {
+            self.panel.set_font(px, line_h);
+        }
+    }
     /// ファイルツリー。
     /// ツリーが開いているか・入力がツリーに向いているか（テスト用）。
     pub fn tree_state(&self) -> (bool, bool) {
@@ -851,9 +928,196 @@ impl EditorScreen {
             self.tabs_dirty = true;
             self.completion = None;
             self.popup.forget();
-            if !open {
+            if !open && self.focus == Focus::Tree {
                 self.set_focus(Focus::Editor);
             }
+            self.status_due = true;
+        }
+    }
+    /// エディタを最大化する / 戻す（ツリーとパネルを隠すだけ。開閉の状態は変えない）。
+    fn set_editor_max(&mut self, on: bool) {
+        if self.editor_max != on {
+            self.editor_max = on;
+            self.invalidate_layout();
+        }
+    }
+    /// 割り付けが変わったので、全部を描き直させる。
+    fn invalidate_layout(&mut self) {
+        self.tabs_dirty = true;
+        self.tabbar.invalidate();
+        self.tree.invalidate();
+        self.panel.invalidate();
+        self.status.invalidate();
+        self.empty_drawn = None;
+        self.completion = None;
+        self.popup.forget();
+        if let Some(t) = self.tabs.get_mut(self.active) {
+            t.view.invalidate();
+        }
+        self.status_due = true;
+    }
+    /// フォルダを開く画面を開く / 閉じる。
+    fn set_folder_open(&mut self, open: bool) {
+        if self.folder.is_some() == open {
+            return;
+        }
+        if open {
+            let mut f = FolderPicker::new(&self.cfg.root);
+            f.set_font(self.code_font.px, self.code_font.line_h);
+            self.folder = Some(f);
+        } else {
+            self.folder = None;
+        }
+        self.invalidate_layout();
+    }
+    /// ツリーの根を `root` にする（フォルダを開く画面で Space）。開いているタブはそのまま。
+    fn set_root(&mut self, root: &Path) {
+        self.cfg.root = root.to_path_buf();
+        let mut tree = FileTree::new(root);
+        tree.set_focused(self.focus == Focus::Tree);
+        let current = self.tabs.get(self.active).and_then(|t| t.path.clone());
+        tree.set_current(current.as_deref());
+        self.tree = tree;
+        for t in &mut self.tabs {
+            t.rekey(&self.cfg.root, &self.diag_store);
+        }
+        self.say(format!("ツリーの根: {}", zc_ui::tree::display_path(root)), false);
+        self.invalidate_layout();
+    }
+    /// いまのツリーの根（試験用）。
+    pub fn root(&self) -> &Path {
+        &self.cfg.root
+    }
+    /// エディタを最大化しているか・フォルダを開く画面を開いているか（試験用）。
+    pub fn maximized(&self) -> (bool, bool) {
+        (self.editor_max, self.folder.is_some())
+    }
+
+    /// 区画のあいだの移り方（Ctrl+1/2/3・Ctrl+B・F12・F11）。フォーカスがどこでも同じに効く。
+    /// 移った先の区画の上の辺を一瞬光らせる。
+    fn pane_command(&mut self, cmd: Command, cx: &mut LoopCx<'_>) {
+        let before = self.focus;
+        self.prompt = None;
+        match cmd {
+            Command::FocusTree => {
+                if !(self.focus == Focus::Tree && self.tree_open) {
+                    self.set_editor_max(false);
+                    self.set_panel(self.panel_open, false);
+                    self.set_tree_open(true);
+                    self.set_focus(Focus::Tree);
+                }
+            }
+            Command::FocusEditor => {
+                self.set_folder_open(false);
+                self.set_panel(self.panel_open, false);
+                self.set_focus(Focus::Editor);
+            }
+            Command::FocusTerminal => {
+                self.set_editor_max(false);
+                self.set_folder_open(false);
+                if self.panel_open {
+                    self.set_focus(Focus::Terminal);
+                } else {
+                    self.open_terminal();
+                }
+            }
+            Command::ToggleTree => {
+                self.set_editor_max(false);
+                self.set_folder_open(false);
+                self.set_panel(self.panel_open, false);
+                if self.tree_open {
+                    self.set_tree_open(false);
+                } else {
+                    self.set_tree_open(true);
+                    self.set_focus(Focus::Tree);
+                }
+            }
+            Command::ToggleTerminal => {
+                self.set_editor_max(false);
+                self.set_folder_open(false);
+                if self.panel_open {
+                    self.set_panel(false, false);
+                } else {
+                    self.open_terminal();
+                }
+            }
+            Command::Maximize => match self.focus {
+                Focus::Editor => {
+                    let on = !self.editor_max;
+                    self.set_editor_max(on);
+                }
+                Focus::Terminal => {
+                    let full = !self.panel_full;
+                    self.set_panel(true, full);
+                }
+                Focus::Tree => {
+                    let open = self.folder.is_none();
+                    self.set_folder_open(open);
+                }
+            },
+            _ => return,
+        }
+        self.status_due = true;
+        if self.focus != before {
+            self.start_flash(cx);
+        }
+    }
+
+    /// フォーカスした区画の上の辺を光らせ始める（前の光が残っていれば消す）。
+    fn start_flash(&mut self, cx: &mut LoopCx<'_>) {
+        if let Some((pane, _)) = self.flash.take() {
+            self.invalidate_pane_head(pane);
+        }
+        self.flash = Some((self.focus, 0));
+        self.flash_paint = true;
+        cx.timers.set_after(TimerId::FocusFlash, FLASH_STEP);
+    }
+    /// 区画の見出しの行を描き直させる（光を消す・薄めるとき。本文は描き直さない）。
+    fn invalidate_pane_head(&mut self, pane: Focus) {
+        match pane {
+            Focus::Tree => self.tree.invalidate_head(),
+            Focus::Editor => self.tabbar.invalidate(),
+            Focus::Terminal => self.panel.invalidate_head(),
+        }
+    }
+    /// 光の段を進める（[`TimerId::FocusFlash`]）。3 段目で消す。
+    fn step_flash(&mut self, cx: &mut LoopCx<'_>) {
+        let Some((pane, step)) = self.flash else { return };
+        self.invalidate_pane_head(pane);
+        if step + 1 >= FLASH_STEPS {
+            self.flash = None;
+        } else {
+            self.flash = Some((pane, step + 1));
+            self.flash_paint = true;
+            cx.timers.set_after(TimerId::FocusFlash, FLASH_STEP);
+        }
+    }
+
+    /// フォルダを開く画面の打鍵。
+    fn folder_key(&mut self, ev: &KeyEvent) {
+        let Some(f) = self.folder.as_mut() else { return };
+        match commands::lookup(ev) {
+            Some(Command::Move { motion, .. }) => match motion {
+                Motion::Up => f.move_sel(-1),
+                Motion::Down => f.move_sel(1),
+                Motion::PageUp => f.move_sel(-10),
+                Motion::PageDown => f.move_sel(10),
+                Motion::DocStart | Motion::LineStart => f.move_sel(i32::MIN / 2),
+                Motion::DocEnd | Motion::LineEnd => f.move_sel(i32::MAX / 2),
+                Motion::Left => f.up(),
+                Motion::Right => f.enter(),
+                _ => {}
+            },
+            Some(Command::Newline) => f.enter(),
+            Some(Command::Backspace) => f.up(),
+            Some(Command::Cancel) => self.set_folder_open(false),
+            Some(Command::InsertChar(' ')) => {
+                if let Some(root) = f.selected().map(Path::to_path_buf) {
+                    self.set_folder_open(false);
+                    self.set_root(&root);
+                }
+            }
+            _ => {}
         }
     }
     /// 押している / ロック中のモディファイア（ステータスバーの札）。
@@ -1030,7 +1294,7 @@ impl EditorScreen {
     /// 代わりにそれで色を付ける。
     pub fn open_doc(&mut self, path: Option<PathBuf>, title: &str, doc: Box<dyn TextDoc + Send>, spans: Option<Box<dyn SpanSource>>) -> DocId {
         let id = self.alloc_id();
-        let mut tab = DocTab::new(id, path, title.into(), doc);
+        let mut tab = DocTab::new(id, path, title.into(), doc, self.code_font);
         tab.custom_spans = spans;
         // 開いていない間に届いていた診断を付ける
         tab.rekey(&self.cfg.root, &self.diag_store);
@@ -1050,7 +1314,7 @@ impl EditorScreen {
         }
         let id = self.alloc_id();
         let title = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "?".into());
-        let mut tab = DocTab::new(id, Some(path.clone()), title, self.cfg.backend.empty());
+        let mut tab = DocTab::new(id, Some(path.clone()), title, self.cfg.backend.empty(), self.code_font);
         tab.loading = true;
         tab.rekey(&self.cfg.root, &self.diag_store);
         self.tabs.push(tab);
@@ -1228,6 +1492,18 @@ impl EditorScreen {
         }
         // 打鍵があったら、試験の結果が届いても一覧で打鍵を奪わない（F6 は exec で立て直す）
         self.test_waiting = false;
+        // 区画のあいだの移り方（Ctrl+1/2/3・Ctrl+B・F12・F11）は、ターミナル・フォルダを開く画面の
+        // 中でも先に受ける（一覧の小窓を開いている間はその小窓が受ける）
+        if self.outline.is_none() && self.tests.is_none() && self.lsp.locs.is_none() {
+            if let Some(c) = commands::lookup(ev).filter(|c| is_pane_command(*c)) {
+                self.exec(c, cx);
+                return;
+            }
+        }
+        if self.folder.is_some() {
+            self.folder_key(ev);
+            return;
+        }
         // SKK: エディタとターミナルの打鍵はまず SKK へ（入力欄・アウトラインは英数のまま）
         if matches!(self.focus, Focus::Editor | Focus::Terminal) && self.prompt.is_none() && self.outline.is_none() {
             let out = self.skk.handle_key(ev);
@@ -1403,7 +1679,7 @@ impl EditorScreen {
     /// ターミナルに入力があるときの打鍵。ターミナルの開閉・全画面・実行・終了だけは
     /// zcode が受け、ほかは全部端末へ送る（Ctrl+C は端末の中で実行を止める）。
     fn terminal_key(&mut self, ev: &KeyEvent, cx: &mut LoopCx<'_>) {
-        if let Some(c @ (Command::ToggleTerminal | Command::ToggleTerminalFullscreen | Command::Quit | Command::Run)) = commands::lookup(ev) {
+        if let Some(c @ (Command::Quit | Command::Run)) = commands::lookup(ev) {
             self.exec(c, cx);
             return;
         }
@@ -1411,8 +1687,9 @@ impl EditorScreen {
             self.set_focus(Focus::Editor);
             return;
         };
-        // Shift+PgUp / PgDn でスクロールバックを見る
-        if ev.mods.shift() && matches!(ev.key, Key::PageUp | Key::PageDown) {
+        // PgUp / PgDn（Fn+L / Fn+M。Shift を付けても同じ）でスクロールバックを見る。2 つ押しで
+        // 済ませるため。代替画面（less・vim など）では、そのプログラムへ送る
+        if matches!(ev.key, Key::PageUp | Key::PageDown) && !ev.mods.ctrl() && !ev.mods.alt() && !t.term.alt_screen() {
             let (_, rows) = t.term.size();
             let page = rows.saturating_sub(1).max(1) as i32;
             t.term.scroll_view(if ev.key == Key::PageUp { page } else { -page });
@@ -1462,17 +1739,6 @@ impl EditorScreen {
             self.set_focus(Focus::Editor);
         }
         self.status_due = true;
-    }
-
-    /// F12: 閉じていれば開いて端末へ、端末にいれば閉じてエディタへ、エディタにいれば端末へ。
-    fn toggle_terminal(&mut self) {
-        if !self.panel_open {
-            self.open_terminal();
-        } else if self.focus == Focus::Terminal {
-            self.set_panel(false, false);
-        } else {
-            self.set_focus(Focus::Terminal);
-        }
     }
 
     /// F5: 保存してから、言語の `run` を新しい端末で実行する。
@@ -1770,21 +2036,8 @@ impl EditorScreen {
                     cx.quit = true;
                 }
             }
-            Command::ToggleTree => {
-                let open = !self.tree_open;
-                self.set_tree_open(open);
-            }
-            Command::FocusTree => {
-                // Ctrl+E: ツリーへ移る。ツリーにいるときにもう一度押すと、閉じてエディタへ戻る
-                // （開くのと閉じるのを同じキーで。Ctrl+B の開閉もそのまま）
-                if self.tree_open && self.focus == Focus::Tree {
-                    self.set_tree_open(false);
-                } else {
-                    self.set_tree_open(true);
-                    self.set_focus(Focus::Tree);
-                }
-            }
-            Command::FocusEditor | Command::Cancel => {
+            c if is_pane_command(c) => self.pane_command(c, cx),
+            Command::Cancel => {
                 if !self.tabs.is_empty() {
                     self.set_focus(Focus::Editor);
                 }
@@ -1830,16 +2083,6 @@ impl EditorScreen {
             Command::Complete => {}
             Command::Run => self.run_active(cx),
             Command::RunTests => self.run_tests(cx),
-            Command::ToggleTerminal => self.toggle_terminal(),
-            Command::ToggleTerminalFullscreen => {
-                if self.panel_open {
-                    let full = !self.panel_full;
-                    self.set_panel(true, full);
-                } else {
-                    self.panel_full = true;
-                    self.open_terminal();
-                }
-            }
             Command::ShowOutline if !self.tabs.is_empty() => self.open_outline(),
             Command::Hover | Command::GotoDefinition | Command::FindReferences | Command::FindSymbol | Command::NextDiagnostic | Command::PrevDiagnostic => {
                 if !self.tabs.is_empty() {
@@ -2806,7 +3049,7 @@ impl EditorScreen {
             return;
         };
         m.preview = !m.preview;
-        tab.view.set_layouter(m.layouter());
+        tab.view.set_layouter(m.layouter(tab.code));
         tab.sync_cursor();
         // 補完の小窓などは描き直したビューの上に置き直す
         self.popup.forget();
@@ -2872,6 +3115,20 @@ impl EditorScreen {
     fn update_status(&mut self) {
         self.status_due = false;
         let mut bg = palette::STATUS;
+        let pane = match self.focus {
+            Focus::Tree => 0,
+            Focus::Editor => 1,
+            Focus::Terminal => 2,
+        };
+        let map = PaneMap { focus: pane, open: [self.tree_open, true, self.panel_open] };
+        self.status.set_panes((self.restore_offer.is_none() && self.shortcuts.is_none()).then_some(map));
+        if self.folder.is_some() {
+            self.status.set_left("Enter 入る  BS 上へ  Space ここを開く");
+            self.status.set_right("F11 戻る");
+            self.status.set_chips(Vec::new());
+            self.status.set_bg(palette::STATUS);
+            return;
+        }
         if let Some(r) = &self.restore_offer {
             let n = r.unsaved_docs().count();
             let names: Vec<&str> = r.unsaved_docs().map(|d| d.title.as_str()).take(2).collect();
@@ -2965,7 +3222,7 @@ impl EditorScreen {
                 }
                 None => {
                     self.status.set_left("zcode");
-                    self.status.set_right("Ctrl+E ツリー  Ctrl+N 新規  Ctrl+Q 終了");
+                    self.status.set_right("Ctrl+1 ツリー  Ctrl+N 新規  Ctrl+Q 終了");
                     self.status.set_chips(Vec::new());
                 }
             }
@@ -3021,6 +3278,9 @@ impl Screen for EditorScreen {
     }
 
     fn stop(&mut self) {
+        // 自分が起動した zc-remote serve を終わらせる（同じプロセスグループに残ると、APPLaunch が
+        // 「loading...」のまま serve が自分で終わるまで数分待つ）
+        self.remote.shutdown();
         // 復元を尋ねている途中なら、前回の控えに手を付けない
         if self.restore_offer.is_some() {
             return;
@@ -3204,6 +3464,7 @@ impl Screen for EditorScreen {
                     cx.timers.set_after(TimerId::Tick, RUN_TICK);
                 }
             }
+            TimerId::FocusFlash => self.step_flash(cx),
             TimerId::CursorBlink => {
                 if self.blinks_left > 0 {
                     self.blinks_left -= 1;
@@ -3223,6 +3484,9 @@ impl Screen for EditorScreen {
     }
 
     fn on_glyphs_ready(&mut self) {
+        if let Some(f) = self.folder.as_mut() {
+            f.invalidate();
+        }
         self.tabbar.invalidate();
         self.tree.invalidate();
         self.status.invalidate();
@@ -3237,12 +3501,24 @@ impl Screen for EditorScreen {
     }
 
     fn render(&mut self, cx: &mut RenderCx<'_>) -> Damage {
-        let panel_h = match (self.panel_open, self.panel_full) {
+        // エディタの最大化（F11）はツリーとパネルを隠すだけ
+        let tree_shown = self.tree_open && !self.editor_max;
+        let panel_shown = self.panel_open && !self.editor_max;
+        let panel_h = match (panel_shown, self.panel_full) {
             (false, _) => 0,
-            (true, false) => TERM_PANEL_H,
+            (true, false) => self.panel.panel_h(),
             (true, true) => u16::MAX,
         };
-        let mut regions = Regions::compute(self.tree_open, panel_h);
+        let mut regions = Regions::compute(tree_shown, panel_h);
+        // フォルダを開く画面（ツリーで F11）: ステータスバーの上を全部使う
+        if let Some(f) = self.folder.as_mut() {
+            let mut damage = f.render(cx, Rect::new(0, 0, Rect::SCREEN.w, regions.status.y as u16));
+            if self.status_due {
+                self.update_status();
+            }
+            damage |= self.status.render(cx, regions.status);
+            return damage;
+        }
         // SKK の辞書登録欄（モック 9）: ステータスバーの上に 1 行。その分ほかを縮める
         let mini_area = self.skk.registration().map(|_| Rect::new(0, (regions.status.y as i32 - MINI_H as i32) as i16, Rect::SCREEN.w, MINI_H));
         if let Some(m) = mini_area {
@@ -3276,7 +3552,7 @@ impl Screen for EditorScreen {
                 tabs.push(Tab { doc: DocId(u32::MAX), title: "ショートカット".into(), modified: false, error: false });
             }
             self.tabbar.set_tabs(tabs, active);
-            self.tabbar.set_inset(if self.tree_open { SIDE_W } else { 0 });
+            self.tabbar.set_inset(if tree_shown { SIDE_W } else { 0 });
             self.status_due = true;
         }
         damage |= self.tabbar.render(cx, regions.tabs);
@@ -3300,7 +3576,7 @@ impl Screen for EditorScreen {
             damage |= self.status.render(cx, regions.status);
             return damage;
         }
-        if self.tree_open {
+        if tree_shown {
             damage |= self.tree.render(cx, regions.side);
         }
         self.pump_highlight(None);
@@ -3387,10 +3663,10 @@ impl Screen for EditorScreen {
             }
         }
         // ターミナルのパネル（大きさが変わったら端末にも知らせる）
-        if self.panel_open {
+        if panel_shown {
             let (title, hint) = self.panel_header();
             self.panel.set_header(&title, hint);
-            let grid = TerminalPanel::grid_size(cx, regions.panel);
+            let grid = self.panel.grid_size(cx, regions.panel);
             self.term_grid = grid;
             // SKK の未確定はカーソルの位置に重ねて見せる（端末にはまだ送っていない）
             let pre = if self.focus == Focus::Terminal && mini_area.is_none() { preedit_text(self.skk.preedit()) } else { None };
@@ -3426,6 +3702,26 @@ impl Screen for EditorScreen {
             let pre = self.skk.registration_preedit().and_then(preedit_text);
             self.mini.set(&label, &reg.text, pre.as_ref().map(|(s, c)| (s.as_str(), *c)));
             damage |= self.mini.render(cx, area);
+        }
+        // フォーカスを移した区画の上の辺の光（3 画素。段ごとに下の絵へ寄せる）
+        if let (Some((pane, step)), true) = (self.flash, std::mem::take(&mut self.flash_paint)) {
+            let edge = match pane {
+                Focus::Tree if tree_shown => Some(regions.side),
+                Focus::Editor => Some(Rect::new(regions.editor.x, regions.tabs.y, regions.editor.w, regions.editor.bottom() as u16)),
+                Focus::Terminal if panel_shown => Some(regions.panel),
+                _ => None,
+            };
+            if let Some(r) = edge {
+                let bar = Rect::new(r.x, r.y, r.w, FLASH_H.min(r.h));
+                let t = (step as u32 * 255 / FLASH_STEPS as u32) as u8;
+                for y in bar.y.max(0) as u16..bar.bottom().max(0) as u16 {
+                    let row = cx.canvas.row_mut(y);
+                    for x in bar.x.max(0) as usize..(bar.right().max(0) as usize).min(row.len()) {
+                        row[x] = FLASH_COLOR.mix(Color(row[x]), t).0;
+                    }
+                }
+                damage.add(bar.rows(), zc_core::Priority::Normal);
+            }
         }
         if self.status_due {
             self.update_status();

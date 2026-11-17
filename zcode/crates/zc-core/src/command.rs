@@ -73,9 +73,16 @@ pub enum Command {
     Move { motion: Motion, select: bool },
 
     // --- 表示 ---
+    /// ツリーの開閉（Ctrl+B。どこにいても。開いたらツリーへ移る）。
     ToggleTree,
+    /// ツリーへ移る（Ctrl+1。閉じていれば開く）。
     FocusTree,
+    /// エディタへ移る（Ctrl+2）。
     FocusEditor,
+    /// ターミナルへ移る（Ctrl+3。閉じていれば開く）。
+    FocusTerminal,
+    /// いまの区画を最大化 / 戻す（F11。ツリーではフォルダを開く画面）。
+    Maximize,
     /// ツリーで選んでいる項目を開く。
     TreeOpen,
     /// アウトライン（§10.2）。
@@ -101,8 +108,8 @@ pub enum Command {
     StopRun,
     /// 試験をビルド係で実行し、結果を一覧に出す（F6。docs/stage3-design.md §8.5）。
     RunTests,
+    /// ターミナルの開閉（F12。どこにいても。開いたらターミナルへ移る）。
     ToggleTerminal,
-    ToggleTerminalFullscreen,
 
     // --- Markdown ---
     /// ライブプレビュー ⇔ ソース表示。

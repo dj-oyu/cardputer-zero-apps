@@ -310,6 +310,10 @@ impl Term {
     pub fn scroll_view(&mut self, delta: i32) {
         self.screen.scroll_view(delta);
     }
+    /// 代替画面（`less`・`vim`・`top` など）を表示中か。
+    pub fn alt_screen(&self) -> bool {
+        self.screen.alt_screen()
+    }
     /// 子プロセスが終わっていれば、その終わり方（待たない）。
     pub fn try_wait(&mut self) -> Option<ExitStatus> {
         if self.status.is_none() {

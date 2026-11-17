@@ -403,12 +403,12 @@ fn tree_toggle_and_focus(backend: DocBackend) {
     g.render(&mut ed);
     // ファイルを渡して起動: ツリーは閉じていて、エディタは全幅
     assert_eq!(ed.active_view().unwrap().point_of(Pos::new(0, 0)).unwrap().x, 23);
+    // Ctrl+B で開くと、ツリーへ移る。文字は文書に入らない。↓ Enter で b.py
     lp.keys(&mut ed, &[ctrl('b')]);
     let d = g.render(&mut ed);
-    assert_eq!(d.bounds(), RowRange::new(0, 159));
+    assert_eq!(d.bounds(), RowRange::new(0, 170));
     assert_eq!(ed.active_view().unwrap().point_of(Pos::new(0, 0)).unwrap().x, 84 + 23);
-    // Ctrl+E でツリーへ。文字は文書に入らない。↓ Enter で b.py
-    lp.keys(&mut ed, &[ctrl('e')]);
+    assert_eq!(ed.tree_state(), (true, true));
     lp.type_str(&mut ed, "zz");
     lp.keys(&mut ed, &[key(Key::Down), key(Key::Enter)]);
     lp.pump(&mut ed);
@@ -1307,17 +1307,79 @@ fn auto_check_defers_the_unavailable_notice(backend: DocBackend) {
 }
 
 #[test]
-fn ctrl_e_opens_the_tree_and_closes_it_again() {
+fn pane_keys_move_toggle_and_maximize() {
     let mut lp = Loop::new();
     let mut ed = editor_with(DocBackend::Simple, "x\n");
     assert_eq!(ed.tree_state(), (false, false));
-    lp.keys(&mut ed, &[ctrl('e')]);
-    assert_eq!(ed.tree_state(), (true, true), "開いてツリーへ");
-    lp.keys(&mut ed, &[ctrl('e')]);
-    assert_eq!(ed.tree_state(), (false, false), "ツリーにいるときは閉じてエディタへ");
-    // ツリーが開いていてもエディタにいるなら、ツリーへ移るだけ
-    lp.keys(&mut ed, &[ctrl('b')]);
-    assert_eq!(ed.tree_state().0, true);
-    lp.keys(&mut ed, &[ctrl('e')]);
+    // Ctrl+1: 閉じていれば開いてツリーへ。Ctrl+2: エディタへ（ツリーは開いたまま）
+    lp.keys(&mut ed, &[ctrl('1')]);
     assert_eq!(ed.tree_state(), (true, true));
+    lp.keys(&mut ed, &[ctrl('2')]);
+    assert_eq!(ed.tree_state(), (true, false));
+    // Ctrl+B はどこにいても開閉。開いていれば閉じる（エディタにいるならそのまま）
+    lp.keys(&mut ed, &[ctrl('b')]);
+    assert_eq!(ed.tree_state(), (false, false));
+    lp.keys(&mut ed, &[ctrl('b')]);
+    assert_eq!(ed.tree_state(), (true, true), "開いたらツリーへ移る");
+    lp.keys(&mut ed, &[ctrl('b')]);
+    assert_eq!(ed.tree_state(), (false, false), "ツリーにいて閉じたらエディタへ");
+    // F11: エディタを最大化 / 戻す（ツリーの開閉の状態はそのまま）
+    lp.keys(&mut ed, &[ctrl('1'), ctrl('2'), key(Key::F(11))]);
+    assert_eq!((ed.maximized(), ed.tree_state()), ((true, false), (true, false)));
+    // 最大化の中で Ctrl+1: 最大化をやめてツリーへ
+    lp.keys(&mut ed, &[ctrl('1')]);
+    assert_eq!((ed.maximized(), ed.tree_state()), ((false, false), (true, true)));
+    // もう居る区画の番号は何もしない
+    lp.keys(&mut ed, &[ctrl('1')]);
+    assert_eq!(ed.tree_state(), (true, true));
+}
+
+#[test]
+fn f11_on_the_tree_picks_a_new_root() {
+    let dir = tmp_dir("folder");
+    fs::create_dir_all(dir.join("proj/src")).unwrap();
+    fs::create_dir_all(dir.join("other")).unwrap();
+    fs::write(dir.join("proj/a.py"), "a = 1\n").unwrap();
+    let mut lp = Loop::new();
+    let mut ed = EditorScreen::new(EditorConfig { backend: DocBackend::Simple, root: dir.join("proj"), files: vec![] });
+    lp.with(|cx| ed.start(cx));
+    lp.pump(&mut ed);
+    lp.keys(&mut ed, &[ctrl('1'), key(Key::F(11))]);
+    assert_eq!(ed.maximized(), (false, true));
+    // BS で上へ（いた proj を選んだまま）→ ↑ で other → Space でそこを根にする
+    lp.keys(&mut ed, &[key(Key::Backspace), key(Key::Up)]);
+    lp.type_str(&mut ed, " ");
+    assert_eq!(ed.maximized(), (false, false));
+    assert_eq!(ed.root(), dir.join("other"));
+    assert_eq!(ed.tree_state(), (true, true));
+    // F11 → Esc は何もせず戻る
+    lp.keys(&mut ed, &[key(Key::F(11)), key(Key::Esc)]);
+    assert_eq!((ed.maximized(), ed.root()), ((false, false), dir.join("other").as_path()));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// 正解画像: フォルダを開く画面と、移った瞬間の上の辺の光（決まったフォルダで描く）。
+#[test]
+fn folder_picker_and_focus_flash_pictures() {
+    let dir = PathBuf::from("/tmp/zcode-golden-folder");
+    let _ = fs::remove_dir_all(&dir);
+    for p in ["blink/lib", "qr-test", "rust-hello"] {
+        fs::create_dir_all(dir.join(p)).unwrap();
+    }
+    fs::write(dir.join("blink/main.py"), "import time\n").unwrap();
+    fs::write(dir.join("todo.md"), "").unwrap();
+    let mut lp = Loop::new();
+    let mut ed = EditorScreen::new(EditorConfig { backend: DocBackend::Simple, root: dir.join("blink"), files: vec![] });
+    lp.with(|cx| ed.start(cx));
+    lp.pump(&mut ed);
+    lp.with(|cx| ed.open_path(&dir.join("blink/main.py"), cx));
+    lp.pump(&mut ed);
+    // エディタから Ctrl+1 でツリーへ: ツリーの上の辺が光る（最初の段）
+    lp.keys(&mut ed, &[ctrl('2'), ctrl('1')]);
+    assert_eq!(ed.tree_state(), (true, true));
+    check_golden(&mut ed, "focus-flash.png");
+    // F11 → BS: ひとつ上のフォルダ（いた blink を選んだまま、いま開いている印）
+    lp.keys(&mut ed, &[key(Key::F(11)), key(Key::Backspace)]);
+    check_golden(&mut ed, "folder-picker.png");
+    let _ = fs::remove_dir_all(&dir);
 }

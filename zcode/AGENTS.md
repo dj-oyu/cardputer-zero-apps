@@ -48,7 +48,7 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   配色は VS Code の Dark+、等幅フォントは実機の DejaVu Sans Mono
   （日本語は Noto Sans Mono CJK にフォールバック）
 - エディタの文字は DejaVu Sans Mono 10px・行の高さ 12px（ユーザーが実機で決定。`zc-ui` の
-  `CODE_PX` / `CODE_LINE_H`）
+  `CODE_PX` / `CODE_LINE_H`）。**2026-11-18 に同梱のフォントへ変えた**（下の「コードのフォント」）
 - 作業フォルダの既定は `~/code`。終了は Ctrl+Q（Esc は終了に使わない）
 - 日本語入力: **SKK を zcode に組み込む**。uim-skk は GTK / Qt / uim-fep 経由でしか
   効かず fb0 アプリに届かないため。辞書は実機の `/usr/share/skk/SKK-JISYO.L` と
@@ -191,9 +191,10 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 
 - パネル（`zc-ui` の `TerminalPanel`）は下に 6 行、F11（Fn+O）で全画面（Ctrl+Shift+` は Sym も要る 4 つ押しで、実機で押せなかった）。中身が変わった行だけ
   描く（端末の dirty の印には頼らず、前回描いた行と比べる）。全角の右半分の空白は飛ばす
-- キー: F12（Fn+P）は「閉じていれば開いて端末へ / 端末にいれば閉じてエディタへ / エディタに
-  いれば端末へ」。端末にいる間は、F12 / F11 / F5 / Ctrl+Q 以外は全部端末へ送る
-  （Ctrl+C も）。Shift+PgUp / PgDn でスクロールバック
+- キー: F12（Fn+P）は開閉（2026-11-18 から、下の「区画のあいだの移り方」）。端末にいる間は、区画のキー・
+  F5 / Ctrl+Q 以外は全部端末へ送る
+  （Ctrl+C も）。PgUp / PgDn（Fn+L / Fn+M。2026-11-18 に Shift+ の 3 つ押しから変えた）でスクロールバック。
+  代替画面（less・vim など）の表示中は PgUp / PgDn をそのプログラムへ送る
 - F5: 未保存なら保存が終わってから（`Saved` を待つ）、言語の `run` を新しい端末で実行する。
   作業フォルダはファイルのフォルダ、`{file}` はファイル名。前の端末は閉じる。`run` の無い
   言語は知らせるだけ。実行中はステータスバーが橙、終わったら終了コード（0 は緑、それ以外は赤）。
@@ -424,6 +425,11 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   方式では、走っているコンテナを差し替えない）。新しいイメージは、コンテナが眠った後（最後に使ってから
   10 分、`KEEP_WARM_S`）の次の起動から。新しいイメージでの最初の起動は 38 秒かかった（イメージを
   取ってくる分）。急ぐなら DO にコンテナを止めさせる口を足す（C4 のときに検討）
+- **zcode が起動した `serve` は、zcode が終わるときに SIGTERM で終わらせる**（`RemoteClient::shutdown`、
+  `Screen::stop` から）。serve は Esc 長押しで一緒に終わるよう zcode と同じプロセスグループにいるが、APPLaunch は
+  アプリの**プロセスグループの全員が終わるまで**「loading...」のまま待つ（ログの `external app group drained`）。
+  残すと serve の無通信での終了（180 秒 + α）まで固まった（2026-11-17、2 号機で 4 分 24 秒）。ほかが起動した
+  serve（CLI の `--detach`）には触らない
 - 環境変数（`ZC_REMOTE_URL` など）は `serve` を起動するときに読まれる。動いている `serve` には効かないので、
   試すときは先に `zc-remote stop`
 
@@ -517,3 +523,51 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - 見込みは `GET /v1/usage`（Access の内側、JSON。`month`・`usage.memory_gib_h`・`usage.vcpu_min_est`・
   `overage_usd.total`・`devices` など）。`zc-remote status` はまだ表示しない
 
+
+## コードのフォント（2026-11-18、ユーザーの決定）
+
+- コードと端末は、英字 **Cozette**（BDF 6×13、MIT）・日本語 **PixelMplus12**（M+ FONT LICENSE。点の字の
+  TrueType を 12px で、濃度を 0 か 255 に）。行の高さ 13px。DejaVu 10px は `+` の横棒などが薄く読みにくかった。
+  比べた 23 書体と理由は `docs/measurements.md` §15
+- .deb は実行ファイルの隣の `fonts/`（`/usr/share/APPLaunch/lib/zcode/fonts/`）に入れ、ライセンスは
+  `/usr/share/doc/zcode/`。フォントは git に入れず、`tools/fetch-fonts.sh` が GitHub の配布物を取って
+  SHA-256 で確かめ、`out/fonts/` に置く（`build.sh` と CI が呼ぶ）。Cozette は起動時に全部読むので、
+  `tools/subset_bdf.py` でエディタで使う範囲（1,495 字）に絞る（実機で約 40ms 短い）
+- zcode は起動時に `fonts/` を探し（`zcode::fonts`、`--font-dir` / `--no-bundled-font`）、無ければ DejaVu の
+  まま。同梱のフォントは**コードの大きさ（`FontConfig::code_px` = `CODE_PX`）のときだけ**使う。タブ・ツリー・
+  ステータスバーの小さな字は DejaVu のまま（BDF は大きさを変えられないので、全部に効かせると 13px になる）
+- 行の高さは `EditorScreen::set_code_font` で、開いているタブ・後で開くタブ・ターミナル（`TerminalPanel::set_font`）に
+  効く。下のパネルは端末の部分を既定の 66px に入る行数（13px なら 5 行）にする
+- 日本語の字は Cozette の行（ascent 10）より 1px 背が高いので、下の余り（descent）の分まで下げて上が切れない
+  ようにしている（`zc-font` の `mono_cjk`）
+- 試験: 正解画像の大半は DejaVu のまま（`FontConfig::default()`）。同梱のフォントは `codefont-run.png`
+  （`tests/terminal.rs`）だけで、`out/fonts/` が無ければ飛ばす（CI は `ZCODE_REQUIRE_FONTS=1` で落とす）。
+  フォントの見比べは `cargo run -p zcode --example fontpreview -- <out.png> --bdf <BDF> --line 13 --cjk <TTF> --cjk-px 12 --crisp 1`
+
+## 区画のあいだの移り方とフォーカスの見せ方（2026-11-18、ユーザーの決定）
+
+- 役を 3 つに分けた（`commands.rs` の「表示」、`EditorScreen::pane_command`）:
+  - 移る: Ctrl+1 ツリー・Ctrl+2 エディタ・Ctrl+3 ターミナル。ツリーとターミナルは閉じていれば開く。
+    もう居る区画の番号は何もしない
+  - 開閉: Ctrl+B（ツリー）・F12（ターミナル）。**フォーカスがどこでも同じ**に開閉し、開いたらそこへ移る。
+    フォーカスのある区画を閉じたらエディタへ。F12 をエディタから押しても、開いていれば閉じる（前は移った）
+  - 最大化: F11 でいまの区画を最大化 / 戻す。エディタはツリーとパネルを隠すだけ（開閉の状態はそのまま、
+    `editor_max`）、ターミナルは前からの全画面、ツリーは**フォルダを開く画面**（`zc_ui::FolderPicker`。
+    Enter 入る・BS 上へ・Space で選んだフォルダをツリーの根にする・Esc / F11 で戻る）。最大化の中で別の区画へ
+    移る・開閉すると、最大化をやめてから動く
+  - Ctrl+E は外した（Ctrl+1 と Ctrl+B で足りる）。Ctrl+B を押し違えた勘違いから Ctrl+E を案にしたが、ユーザーは
+    今の Ctrl+B を残すと決めた
+- これらのキーは**ターミナルの中・フォルダを開く画面でも zcode が先に受ける**（`is_pane_command`。一覧の小窓
+  ＝アウトライン・試験・LSP の一覧を開いている間は小窓が受ける）。シェルの Ctrl+B（1 字戻る）は使えない（← で代わる）
+- フォーカスの見せ方は、6 案（見出し・減光・現在地・広げる・印・縁取り）をモックで比べて **C（現在地）+ F（縁取り、
+  上の一辺）** に決めた（モックは Artifact「zcode フォーカスの見せ方」「zcode 現在地と縁取り」）
+  - 現在地: ステータスバーの左端 48 画素に、区画の札（印 7×6 と番号 3×5）を 3 つ（`zc_ui::PaneMap`）。いまの区画は
+    白地にバーの色で抜く、開いている区画は薄い白、閉じている区画はさらに薄く。ショートカット一覧・控えを戻すかの
+    問いの間は出さない
+  - 縁取り: 移った先の区画の上の辺を 3 画素、ステータスバーの青を少し明るくした色で光らせ、100ms ごとに 3 段で薄めて
+    消す（`TimerId::FocusFlash`）。段ごとに区画の見出しだけ描き直させ（`FileTree::invalidate_head`・
+    `TerminalPanel::invalidate_head`・タブバー）、その上に重ねる。液晶は行の範囲で送るので、横の辺だけにして
+    1 段あたり見出しの 10〜13 行の転送で済ませた。同じ段の間に見出しがほかの理由で描き直されると、その段は光が消える
+- 正解画像: `focus-flash.png`（最初の段）と `folder-picker.png`。ステータスバーの現在地で、ステータスバーの出る
+  正解画像は全部描き直した
+- 未確認: 実機での光の見え方と速さ、Ctrl+数字が実機のキーボードで届くか（ドライバの通常レイヤーの 1〜0）

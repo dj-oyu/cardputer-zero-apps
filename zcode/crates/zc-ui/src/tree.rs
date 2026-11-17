@@ -28,7 +28,7 @@ pub struct TreeNode {
 }
 
 /// フォルダの中身を読む（フォルダ → ファイル、名前順）。
-fn list_dir(dir: &Path, depth: u16) -> Vec<TreeNode> {
+pub(crate) fn list_dir(dir: &Path, depth: u16) -> Vec<TreeNode> {
     let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut v: Vec<TreeNode> = rd
         .flatten()
@@ -47,6 +47,21 @@ fn list_dir(dir: &Path, depth: u16) -> Vec<TreeNode> {
     v
 }
 
+/// 見出しに出すパス（ホームの下なら `~/code` の形）。
+pub fn display_path(p: &Path) -> String {
+    match std::env::var_os("HOME").map(PathBuf::from) {
+        Some(home) if p.starts_with(&home) => {
+            let rest = p.strip_prefix(&home).unwrap_or(p);
+            if rest.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{}", rest.display())
+            }
+        }
+        _ => p.display().to_string(),
+    }
+}
+
 /// ファイルツリー。
 pub struct FileTree {
     root: PathBuf,
@@ -62,22 +77,14 @@ pub struct FileTree {
     /// 描いてある項目の印（行ごと）。
     painted: Vec<u64>,
     dirty_all: bool,
+    /// 見出し（EXPLORER の行）だけ描き直す。
+    head_dirty: bool,
 }
 
 impl FileTree {
     /// `root` を根にして、その直下を読む。
     pub fn new(root: &Path) -> FileTree {
-        let title = match std::env::var_os("HOME").map(PathBuf::from) {
-            Some(home) if root.starts_with(&home) => {
-                let rest = root.strip_prefix(&home).unwrap_or(root);
-                if rest.as_os_str().is_empty() {
-                    "~".to_string()
-                } else {
-                    format!("~/{}", rest.display())
-                }
-            }
-            _ => root.display().to_string(),
-        };
+        let title = display_path(root);
         FileTree {
             root: root.to_path_buf(),
             title,
@@ -88,6 +95,7 @@ impl FileTree {
             current: None,
             painted: Vec::new(),
             dirty_all: true,
+            head_dirty: false,
         }
     }
     pub fn root(&self) -> &Path {
@@ -255,17 +263,25 @@ impl Widget for FileTree {
         }
         self.scroll = self.scroll.min(self.nodes.len().saturating_sub(rows.min(self.nodes.len())));
         let mut damage = Damage::none();
-        if self.dirty_all || self.painted.len() != rows {
+        let all = self.dirty_all || self.painted.len() != rows;
+        if all {
             self.dirty_all = false;
             self.painted.clear();
             self.painted.resize(rows, 0);
             cx.canvas.fill_rect(area, palette::SIDE);
             cx.canvas.vline(area.right() - 1, area.y as i32, area.h, Color::hex(0x333333));
+            damage = Damage::rect(area);
+        }
+        if all || std::mem::take(&mut self.head_dirty) {
+            let head_row = Rect::new(area.x, area.y, inner_w, TREE_HEAD_H.min(area.h));
+            if !all {
+                cx.canvas.fill_rect(head_row, palette::SIDE);
+                damage.add(head_row.rows(), zc_core::Priority::Normal);
+            }
             let head = Rect::new(area.x + 4, area.y, inner_w.saturating_sub(4), TREE_HEAD_H);
             let mut title = String::from("EXPLORER: ");
             title.push_str(&self.title);
             cx.text_in(head, &title, &TextStyle::mono(7.0), palette::DIM, palette::SIDE);
-            damage = Damage::rect(area);
         }
         let cell = cx.metrics(&ts).cell_w as i16;
         for slot in 0..rows {
@@ -304,6 +320,13 @@ impl Widget for FileTree {
     }
     fn invalidate(&mut self) {
         self.dirty_all = true;
+    }
+}
+
+impl FileTree {
+    /// 見出しの行だけ描き直させる（フォーカスの縁取りを消すとき）。
+    pub fn invalidate_head(&mut self) {
+        self.head_dirty = true;
     }
 }
 

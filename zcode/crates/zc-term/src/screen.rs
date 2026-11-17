@@ -381,6 +381,10 @@ impl Screen {
         d
     }
 
+    pub(crate) fn alt_screen(&self) -> bool {
+        self.alt
+    }
+
     pub(crate) fn scrollback_len(&self) -> usize {
         self.sb.len()
     }

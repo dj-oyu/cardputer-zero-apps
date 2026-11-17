@@ -202,6 +202,35 @@ fn ctrl_backtick_opens_a_shell_and_toggles_focus() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// PgUp / PgDn（Fn+L / Fn+M の 2 つ押し）でスクロールバックを見る。代替画面ではプログラムへ送る。
+#[test]
+fn page_keys_scroll_back_and_go_to_alt_screen_programs() {
+    if !has_tools() {
+        return;
+    }
+    let dir = tmp_dir("scroll");
+    fs::write(dir.join("a.py"), "x = 1\n").unwrap();
+    let mut lp = Loop::new();
+    let mut ed = open(&mut lp, &dir, "a.py");
+    lp.keys(&mut ed, &[f12()]);
+    lp.type_str(&mut ed, "seq -f 'line-%g' 1 60\n");
+    lp.until(&mut ed, "60 行の出力", |ed| screen_has(ed, "line-60"));
+    let (pgup, pgdn) = (KeyEvent::new(Key::PageUp, Mods::NONE), KeyEvent::new(Key::PageDown, Mods::NONE));
+    lp.keys(&mut ed, &[pgup]);
+    assert!(!screen_has(&ed, "line-60"), "さかのぼっていない: {:#?}", ed.terminal_text());
+    assert!(screen_has(&ed, "line-5"));
+    // Shift を付けても同じ（前の割り当て）
+    lp.keys(&mut ed, &[KeyEvent::new(Key::PageUp, Mods::SHIFT)]);
+    lp.keys(&mut ed, &[pgdn, pgdn]);
+    assert!(screen_has(&ed, "line-60"), "戻っていない: {:#?}", ed.terminal_text());
+    // 代替画面のプログラムには PgUp を送る（cat -v は ^[[5~ と表示する）
+    lp.type_str(&mut ed, "printf '\\033[?1049h'; cat -v\n");
+    lp.until(&mut ed, "代替画面", |ed| !screen_has(ed, "line-60"));
+    lp.keys(&mut ed, &[pgup, KeyEvent::new(Key::Enter, Mods::NONE)]);
+    lp.until(&mut ed, "cat に届いた PgUp", |ed| screen_has(ed, "^[[5~"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// 決まった名前のフォルダ（正解画像に出るパスを、どの環境でも同じにする）。
 fn fixed_dir(name: &str) -> PathBuf {
     let d = PathBuf::from("/tmp").join(name);
@@ -243,6 +272,47 @@ time.sleep(30)
         if let Err(e) = zc_display::png::check_golden(&canvas, golden("terminal-run.png")) {
             panic!("{e}");
         }
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// 同梱のコードのフォント（Cozette + PixelMplus12、`tools/fetch-fonts.sh` で `out/fonts/` に置く）の
+/// 場所。`ZCODE_FONT_DIR` で変えられる。無ければ `None`（`ZCODE_REQUIRE_FONTS=1` なら落とす。CI）。
+fn bundled_fonts() -> Option<zc_font::FontConfig> {
+    let dir = std::env::var_os("ZCODE_FONT_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../out/fonts"));
+    let mut cfg = zc_font::FontConfig::default();
+    let found = cfg.available() && zcode::fonts::apply(&mut cfg, &dir).is_some() && cfg.mono_cjk.is_some();
+    if !found {
+        assert!(std::env::var_os("ZCODE_REQUIRE_FONTS").is_none(), "同梱のフォントが {} に無い（tools/fetch-fonts.sh）", dir.display());
+        eprintln!("同梱のフォントが無いので飛ばす");
+        return None;
+    }
+    Some(cfg)
+}
+
+/// 同梱のフォントで F5 の実行中（コードと端末が Cozette 6×13、日本語は PixelMplus12、端末は 5 行）。
+#[test]
+fn codefont_running_screen() {
+    if !has_tools() {
+        return;
+    }
+    let Some(fonts) = bundled_fonts() else { return };
+    let dir = fixed_dir("zcode-golden-codefont");
+    fs::write(dir.join("main.py"), "import time  # 0.5 秒ごとに点滅（O0 l1I|）
+for i in range(4):
+    print('点灯' if i % 2 == 0 else 'off', i + 1, flush=True)
+time.sleep(30)  # {'a': [1, 2]} != ~x ^ y
+").unwrap();
+    let mut lp = Loop::new();
+    let mut ed = open(&mut lp, &dir, "main.py");
+    ed.set_code_font(zc_ui::layout::CODE_PX, zcode::fonts::LINE_H);
+    // 端末の大きさはパネルを描いたときに決まるので、一度描いてから F5
+    zcode::render_screen(&mut ed, &fonts).unwrap();
+    lp.keys(&mut ed, &[f5()]);
+    lp.until(&mut ed, "4 行の出力", |ed| ed.terminal_text().is_some_and(|rows| rows.iter().filter(|r| r.starts_with("点灯") || r.starts_with("off")).count() == 4));
+    let canvas = zcode::render_screen(&mut ed, &fonts).unwrap();
+    if let Err(e) = zc_display::png::check_golden(&canvas, golden("codefont-run.png")) {
+        panic!("{e}");
     }
     let _ = fs::remove_dir_all(&dir);
 }

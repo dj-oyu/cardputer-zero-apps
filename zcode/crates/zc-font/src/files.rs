@@ -52,6 +52,12 @@ pub struct FontFiles {
     cjk_mono: Option<FontRef<'static>>,
     cjk_sans: Option<FontRef<'static>>,
     bdf: Option<BdfFont>,
+    /// 等幅をビットマップで描くときの BDF（[`FontConfig::mono_bdf`]）。
+    mono_bdf: Option<BdfFont>,
+    /// 等幅の中の日本語のフォント（[`FontConfig::mono_cjk`]）と、その大きさ・点にするか。
+    mono_cjk: Option<(FontRef<'static>, f32, bool)>,
+    /// `mono_bdf` と `mono_cjk` を使う等幅の大きさ（[`FontConfig::code_px`]）。
+    code_size: Size,
 }
 
 /// 読み込みで起きた、致命的でない問題（CJK が無い、など）。
@@ -88,7 +94,21 @@ impl FontFiles {
                 Err(e) => warn.push(format!("{}: {e}", p.display())),
             }
         }
-        Ok((FontFiles { mono, cjk_mono, cjk_sans, bdf }, warn))
+        let mut mono_bdf = None;
+        if let Some(p) = &cfg.mono_bdf {
+            match std::fs::read_to_string(p).map_err(|e| e.to_string()).and_then(|s| BdfFont::parse(&s)) {
+                Ok(f) => mono_bdf = Some(f),
+                Err(e) => warn.push(format!("{}: {e}（等幅は TrueType で描く）", p.display())),
+            }
+        }
+        let mut mono_cjk = None;
+        if let Some(c) = &cfg.mono_cjk {
+            match map_file(&c.path).ok().and_then(|d| FontRef::from_index(d, 0)) {
+                Some(f) => mono_cjk = Some((f, c.px, c.crisp)),
+                None => warn.push(format!("{}: 読めない（日本語は {} で描く）", c.path.display(), cfg.cjk_mono_family)),
+            }
+        }
+        Ok((FontFiles { mono, cjk_mono, cjk_sans, bdf, mono_bdf, mono_cjk, code_size: Size::px(cfg.code_px) }, warn))
     }
 
     /// ビットマップフォントを読み込んであるか。
@@ -96,8 +116,16 @@ impl FontFiles {
         self.bdf.is_some()
     }
 
+    /// この大きさの等幅を描く BDF（コードの大きさのときだけ）。
+    fn code_bdf(&self, size: Size) -> Option<&BdfFont> {
+        self.mono_bdf.as_ref().filter(|_| size == self.code_size)
+    }
+
     /// 等幅の半角 1 字の幅（画素）。
     fn mono_cell(&self, size: Size) -> u16 {
+        if let Some(b) = self.code_bdf(size) {
+            return b.metrics().cell_w.max(1);
+        }
         let gid = self.mono.charmap().map('0');
         let adv = self.mono.glyph_metrics(&[]).scale(size.as_px()).advance_width(gid);
         adv.round().max(1.0) as u16
@@ -107,6 +135,7 @@ impl FontFiles {
     pub fn metrics(&self, face: Face, size: Size) -> Metrics {
         let px = size.as_px();
         match face {
+            Face::Mono if self.code_bdf(size).is_some() => self.code_bdf(size).map(|b| b.metrics()).expect("mono_bdf"),
             Face::Mono => {
                 let m = self.mono.metrics(&[]).scale(px);
                 Metrics { ascent: m.ascent.round() as i16, descent: m.descent.round() as i16, cell_w: self.mono_cell(size) }
@@ -145,11 +174,44 @@ impl FontFiles {
             }
             Face::Mono => {
                 let cell = self.mono_cell(st.size);
+                // ビットマップの等幅: BDF の字をそのまま（全角は半角 2 つぶん）
+                if let Some(g) = self.code_bdf(st.size).and_then(|b| b.glyph(key.ch)) {
+                    let mut g = g.clone();
+                    g.advance = if g.advance > cell + cell / 5 { cell * 2 } else { cell };
+                    return g;
+                }
                 let gid = self.mono.charmap().map(key.ch);
                 if gid != 0 {
                     let mut g = render(ctx, self.mono, gid, px, true, st.bold, st.italic);
-                    g.advance = cell;
+                    // 等幅のフォント自身に全角の字がある（BIZ UD ゴシックなど）なら半角 2 つぶん
+                    let adv = self.mono.glyph_metrics(&[]).scale(px).advance_width(gid);
+                    g.advance = if adv > cell as f32 * 1.2 { cell * 2 } else { cell };
                     return g;
+                }
+                // 日本語のフォントの指定があれば、その大きさで描いて、半角 2 つぶんの中央に置く
+                if let Some((f, cpx, crisp)) = self.mono_cjk.filter(|_| st.size == self.code_size) {
+                    let gid = f.charmap().map(key.ch);
+                    if gid != 0 {
+                        let adv = f.glyph_metrics(&[]).scale(cpx).advance_width(gid);
+                        let mut g = render(ctx, f, gid, cpx, !crisp, st.bold, st.italic);
+                        g.advance = if adv > cell as f32 * 1.2 { cell * 2 } else { cell };
+                        g.left += ((g.advance as f32 - adv) / 2.0).round() as i16;
+                        // 等幅の行より背が高ければ、下の余り（等幅の descent）の分まで下げて、上が
+                        // 切れないようにする（Cozette 6×13 の行に PixelMplus12 を入れると上が 1px 出る）
+                        let m = self.metrics(Face::Mono, st.size);
+                        let over = g.top as i32 - m.ascent as i32;
+                        if over > 0 {
+                            let room = (m.descent as i32 - (g.height as i32 - g.top as i32)).max(0);
+                            g.top -= over.min(room) as i16;
+                        }
+                        if crisp {
+                            for a in g.data.iter_mut() {
+                                *a = if *a >= 128 { 255 } else { 0 };
+                            }
+                        }
+                        g.source = GlyphSource::Fallback;
+                        return g;
+                    }
                 }
                 // 無い字は CJK の等幅。全角が半角 2 つぶんになる大きさで描く
                 if let Some(f) = self.cjk_mono {

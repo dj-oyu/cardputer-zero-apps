@@ -7,10 +7,14 @@ M5Stack CardputerZero 用の、VS Code 風のコードエディタ（APPLaunch �
 - ファイルツリー、タブ、検索、行へ移動
 - SKK の日本語入力（Ctrl+J。辞書は `/usr/share/skk/SKK-JISYO.L`、個人辞書 `~/.skk-uim-jisyo` を uim-skk と共有）
 - Markdown のライブプレビュー（Ctrl+Shift+V でソース表示）
-- 統合ターミナル（F12 で開閉、F11 で全画面）と F5 で保存して実行
+- 統合ターミナル（F12 で開閉）と F5 で保存して実行
+- 区画の移り方: Ctrl+1 ツリー・Ctrl+2 エディタ・Ctrl+3 ターミナル、Ctrl+B / F12 で開閉、F11 でいまの区画を最大化
+  （ツリーではフォルダを開く画面）。ステータスバーの左端に、いまの区画と番号を出す
 - 単語補完、保存時の構文チェック、アウトライン（Ctrl+O）
 - ショートカット一覧（F1。絞り込んで Enter でその操作を実行）
 - 未保存の内容の控え（異常終了・電源断のあと、次の起動で戻すか尋ねる）
+- コードと端末の字は Cozette（英字、6×13）と PixelMplus12（日本語）。.deb に同梱（ライセンスは
+  `/usr/share/doc/zcode/`）。`--no-bundled-font` で DejaVu Sans Mono に戻せる
 
 ## 入れ方
 

@@ -177,7 +177,8 @@ jobs:
             -v "$PWD/.ci-cache/cargo-registry:/opt/cargo/registry" \
             -v "$PWD/.ci-cache/cargo-target:/cargo-target" \
             -w /work/zcode cz-dev:ci bash -euo pipefail -c '
-              cargo test --workspace --locked
+              bash tools/fetch-fonts.sh
+              ZCODE_REQUIRE_FONTS=1 cargo test --workspace --locked
               cargo test --workspace --locked --features zc-input/parse
               ./build.sh 0.0.0-ci
               file out/zcode | grep -q "ARM aarch64"
@@ -185,6 +186,9 @@ jobs:
               dpkg-deb --contents zcode_0.0.0-ci_arm64.deb
               dpkg-deb --contents zcode_0.0.0-ci_arm64.deb | grep -E "^-rwxr-xr-x root/root .*usr/share/APPLaunch/lib/zcode/zcode$"
               dpkg-deb --contents zcode_0.0.0-ci_arm64.deb | grep -E "^-rwxr-xr-x root/root .*usr/share/APPLaunch/bin/zcode$"
+              dpkg-deb --contents zcode_0.0.0-ci_arm64.deb | grep -E "^-rw-r--r-- root/root .*usr/share/APPLaunch/lib/zcode/fonts/cozette.bdf$"
+              dpkg-deb --contents zcode_0.0.0-ci_arm64.deb | grep -E "^-rw-r--r-- root/root .*usr/share/APPLaunch/lib/zcode/fonts/PixelMplus12-Regular.ttf$"
+              dpkg-deb --contents zcode_0.0.0-ci_arm64.deb | grep -E "^-rw-r--r-- root/root .*usr/share/doc/zcode/LICENSE-Cozette$"
               dpkg-deb --ctrl-tarfile zcode_0.0.0-ci_arm64.deb | tar -xO ./postinst | (! grep -q $'"'"'\r'"'"')
             '
       - name: ベンチマークのビルド
