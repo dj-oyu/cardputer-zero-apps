@@ -1,0 +1,176 @@
+# Go（.go）。色の付け方は VS Code の Dark+（go）に寄せてある。
+#
+# 限界:
+# - アウトラインは `func 名前` と `type 名前` の行だけ。メソッド（`func (s *S) Name(`）は、
+#   `func` の次が `(` なので項目にならない（「行の最初の語がキーワード、次が名前」の形式のため）
+# - 実機に go が無いので `check` / `run` は付けない（zcode は保存時の構文チェックをしない）
+# - 型の色は [words] の型名と、大文字で始まり小文字を含む名前（Server・http.Handler）だけ。
+#   小文字の自作の型（`type point struct` の使用側）は塗れない。全部大文字は定数の色
+# - ジェネリクスの山括弧は無く `[T any]` なので、型引数は普通の括弧と同じに塗る
+# - 字下げはタブ（gofmt の形）。Enter の自動字下げやタブの幅は zcode 側の設定に従う
+# - 書式動詞（%d %-8s %+v）は文字列の中だけで拾う。バッククォートの文字列（複数行）の中でも拾う
+
+name = "Go"
+extensions = ["go"]
+line_comment = "//"
+indent = "\t"
+keywords = [
+    "break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough",
+    "for", "func", "go", "goto", "if", "import", "interface", "map", "package", "range",
+    "return", "select", "struct", "switch", "type", "var",
+    "bool", "byte", "error", "float32", "float64", "int", "int8", "int16", "int32", "int64",
+    "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "any",
+    "true", "false", "nil", "iota", "append", "cap", "close", "copy", "delete", "len", "make",
+    "new", "panic", "print", "println", "recover", "min", "max", "clear",
+    "fmt", "Println", "Printf", "Sprintf", "Errorf", "main", "context", "errors",
+]
+
+[outline]
+items = { func = "function", type = "class" }
+indent_width = 1
+
+[variables]
+ident = '[A-Za-z_{{nonascii}}][A-Za-z0-9_{{nonascii}}]*'
+lident = '[a-z_{{nonascii}}][A-Za-z0-9_{{nonascii}}]*'
+
+[words]
+keyword = ["func", "var", "const", "type", "struct", "interface", "map", "chan", "package", "import"]
+control = [
+    "if", "else", "for", "range", "switch", "case", "default", "select", "break", "continue",
+    "return", "goto", "go", "defer", "fallthrough",
+]
+type = [
+    "bool", "string", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16",
+    "uint32", "uint64", "uintptr", "byte", "rune", "float32", "float64", "complex64",
+    "complex128", "error", "any", "comparable",
+]
+constant = ["true", "false", "nil", "iota"]
+function = [
+    "append", "cap", "clear", "close", "complex", "copy", "delete", "imag", "len", "make", "max",
+    "min", "new", "panic", "print", "println", "real", "recover",
+]
+
+# func の後ろは関数名（メソッドの受け手 `(s *S)` なら何もしない）、type の後ろは型名
+[word_push]
+func = "funcname"
+type = "typename"
+
+[default_token]
+str = "string"
+raw = "string"
+block_comment = "comment"
+
+[[contexts.main]]
+include = "expr"
+
+[[contexts.expr]]
+match = '//.*'
+token = "comment"
+[[contexts.expr]]
+match = '/\*'
+token = "comment"
+push = "block_comment"
+[[contexts.expr]]
+match = '"'
+token = "string"
+push = "str"
+# バッククォートの文字列（複数行。エスケープ無し）
+[[contexts.expr]]
+match = '`'
+token = "string"
+push = "raw"
+# ルーン 'a' '\n' '\x41' '\u00e9' '\U0001F600' '\101' と、非 ASCII 1 文字
+[[contexts.expr]]
+match = '''\'(?:\\(?:x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|[0-7]{3}|[^\n])|[^'\\\n{{nonascii}}]|[{{nonascii}}]+)\''''
+token = "string"
+# 識別子
+[[contexts.expr]]
+match = '{{ident}}'
+followed_by = '[ \t]*\('
+token = "function"
+words = true
+[[contexts.expr]]
+match = '[A-Z]'
+followed_by = '[^A-Za-z0-9_{{nonascii}}]'
+token = "type"
+[[contexts.expr]]
+match = '[A-Z][A-Z0-9_]*'
+followed_by = '[^A-Za-z0-9_{{nonascii}}]'
+token = "constant"
+[[contexts.expr]]
+match = '[A-Z][A-Za-z0-9_{{nonascii}}]*'
+token = "type"
+[[contexts.expr]]
+match = '{{lident}}'
+token = "text"
+words = true
+# 数（0x1F・1e-3・0b101・0o17・1_000・1.5i・.5 をまとめて）
+[[contexts.expr]]
+match = '(?:[0-9]|\.[0-9])(?:[eEpP][+-]|[0-9A-Za-z_.])*'
+token = "number"
+[[contexts.expr]]
+match = ':='
+token = "operator"
+[[contexts.expr]]
+match = '[-+*/%&|^~<>!=]+'
+token = "operator"
+[[contexts.expr]]
+match = '[(){}\[\],;:.]'
+token = "punctuation"
+[[contexts.expr]]
+match = '[ \t]+'
+token = "text"
+
+[[contexts.funcname]]
+match = '[ \t]+'
+token = "text"
+[[contexts.funcname]]
+match = '{{ident}}'
+token = "function"
+pop = true
+[[contexts.funcname]]
+match = ''
+pop = true
+
+[[contexts.typename]]
+match = '[ \t]+'
+token = "text"
+[[contexts.typename]]
+match = '{{ident}}'
+token = "type"
+pop = true
+[[contexts.typename]]
+match = ''
+pop = true
+
+[[contexts.block_comment]]
+match = '\*/'
+pop = true
+[[contexts.block_comment]]
+match = '[^*\n]+|\*'
+
+# "..." は行をまたがない。閉じていなければ行末で終わる
+[[contexts.str]]
+match = '"'
+pop = true
+[[contexts.str]]
+match = '\\(?:x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|[0-7]{3}|.)'
+token = "escape"
+[[contexts.str]]
+match = '\n'
+pop = true
+# Printf の書式動詞（%d %5.2f %-8s %+v %q %%）
+[[contexts.str]]
+match = '%[-+ #0]*[0-9*]*(?:\.[0-9*]+)?[A-Za-z%]'
+token = "constant"
+[[contexts.str]]
+match = '[^"\\%\n]+|%'
+
+[[contexts.raw]]
+match = '`'
+pop = true
+[[contexts.raw]]
+match = '%[-+ #0]*[0-9*]*(?:\.[0-9*]+)?[A-Za-z%]'
+token = "constant"
+[[contexts.raw]]
+match = '[^`%\n]+|%|\n'

@@ -1,0 +1,140 @@
+# MoonBit (moonbit) — zc-highlight の見本の正解。ZCODE_UPDATE_GOLDEN=1 で作り直す
+   1| ///|
+    : comment "///|"
+   2| /// 見本: MoonBit の構造体・列挙型・トレイト・式展開
+    : comment "/// 見本: MoonBit の構造体・列挙型・トレイト・式展開"
+   3| pub(all) struct Point {
+    : keyword "pub" · punctuation "(" · punctuation ")" · keyword "struct" · type "Point" · punctuation "{"
+   4|   x : Double
+    : punctuation ":" · type "Double"
+   5|   y : Double
+    : punctuation ":" · type "Double"
+   6| } derive(Show, Eq)
+    : punctuation "}" · keyword "derive" · punctuation "(" · type "Show" · punctuation "," · type "Eq" · punctuation ")"
+   7| 
+   8| ///|
+    : comment "///|"
+   9| pub enum Shape {
+    : keyword "pub" · keyword "enum" · type "Shape" · punctuation "{"
+  10|   Circle(Point, Double)
+    : function "Circle" · punctuation "(" · type "Point" · punctuation "," · type "Double" · punctuation ")"
+  11|   Rect(Point, Point)
+    : function "Rect" · punctuation "(" · type "Point" · punctuation "," · type "Point" · punctuation ")"
+  12|   Empty
+    : type "Empty"
+  13| } derive(Show)
+    : punctuation "}" · keyword "derive" · punctuation "(" · type "Show" · punctuation ")"
+  14| 
+  15| ///|
+    : comment "///|"
+  16| pub trait Area {
+    : keyword "pub" · keyword "trait" · type "Area" · punctuation "{"
+  17|   area(Self) -> Double
+    : function "area" · punctuation "(" · type "Self" · punctuation ")" · operator "->" · type "Double"
+  18| }
+    : punctuation "}"
+  19| 
+  20| ///|
+    : comment "///|"
+  21| impl Area for Shape with area(self) {
+    : keyword "impl" · type "Area" · control "for" · type "Shape" · keyword "with" · function "area" · punctuation "(" · constant "self" · punctuation ")" · punctuation "{"
+  22|   match self {
+    : control "match" · constant "self" · punctuation "{"
+  23|     Circle(_, r) => 3.14159 * r * r
+    : function "Circle" · punctuation "(" · constant "_" · punctuation "," · punctuation ")" · operator "=>" · number "3.14159" · operator "*" · operator "*"
+  24|     Rect(a, b) => (b.x - a.x).abs() * (b.y - a.y).abs()
+    : function "Rect" · punctuation "(" · punctuation "," · punctuation ")" · operator "=>" · punctuation "(" · punctuation "." · operator "-" · punctuation "." · punctuation ")." · function "abs" · punctuation "()" · operator "*" · punctuation "(" · punctuation "." · operator "-" · punctuation "." · punctuation ")." · function "abs" · punctuation "()"
+  25|     Empty => 0.0
+    : type "Empty" · operator "=>" · number "0.0"
+  26|   }
+    : punctuation "}"
+  27| }
+    : punctuation "}"
+  28| 
+  29| ///|
+    : comment "///|"
+  30| #deprecated("use Point::origin")
+    : attribute "#deprecated" · punctuation "(" · string "\"use Point::origin\"" · punctuation ")"
+  31| pub fn Point::zero() -> Point {
+    : keyword "pub" · keyword "fn" · type "Point" · punctuation "::" · function "zero" · punctuation "()" · operator "->" · type "Point" · punctuation "{"
+  32|   { x: 0.0, y: 1e-3 }
+    : punctuation "{" · punctuation ":" · number "0.0" · punctuation "," · punctuation ":" · number "1e-3" · punctuation "}"
+  33| }
+    : punctuation "}"
+  34| 
+  35| ///|
+    : comment "///|"
+  36| fn[T : Show] describe(items : Array[T]) -> String {
+    : keyword "fn" · punctuation "[" · type "T" · punctuation ":" · type "Show" · punctuation "]" · function "describe" · punctuation "(" · punctuation ":" · type "Array" · punctuation "[" · type "T" · punctuation "])" · operator "->" · type "String" · punctuation "{"
+  37|   let mut out = ""
+    : keyword "let" · keyword "mut" · operator "=" · string "\"\""
+  38|   for i, item in items {
+    : control "for" · punctuation "," · control "in" · punctuation "{"
+  39|     out += "\{i}: \{item} (\{items.length() - i} left)\n"
+    : operator "+=" · string "\"" · escape "\\{" · escape "}" · string ": " · escape "\\{" · escape "}" · string " (" · escape "\\{" · punctuation "." · function "length" · punctuation "()" · operator "-" · escape "}" · string " left)" · escape "\\n" · string "\""
+  40|   }
+    : punctuation "}"
+  41|   out
+  42| }
+    : punctuation "}"
+  43| 
+  44| ///|
+    : comment "///|"
+  45| suberror ParseError String
+    : keyword "suberror" · type "ParseError" · type "String"
+  46| 
+  47| ///|
+    : comment "///|"
+  48| fn parse_digit(c : Char) -> Int raise ParseError {
+    : keyword "fn" · function "parse_digit" · punctuation "(" · punctuation ":" · type "Char" · punctuation ")" · operator "->" · type "Int" · control "raise" · type "ParseError" · punctuation "{"
+  49|   if c >= '0' && c <= '9' {
+    : control "if" · operator ">=" · string "'0'" · operator "&&" · operator "<=" · string "'9'" · punctuation "{"
+  50|     c.to_int() - '0'.to_int()
+    : punctuation "." · function "to_int" · punctuation "()" · operator "-" · string "'0'" · punctuation "." · function "to_int" · punctuation "()"
+  51|   } else {
+    : punctuation "}" · control "else" · punctuation "{"
+  52|     raise ParseError("bad digit: \{c}")
+    : control "raise" · function "ParseError" · punctuation "(" · string "\"bad digit: " · escape "\\{" · escape "}" · string "\"" · punctuation ")"
+  53|   }
+    : punctuation "}"
+  54| }
+    : punctuation "}"
+  55| 
+  56| ///|
+    : comment "///|"
+  57| let banner : String =
+    : keyword "let" · punctuation ":" · type "String" · operator "="
+  58|   #|zcode "demo"
+    : string "#|zcode \"demo\""
+  59|   #|  raw line \n stays
+    : string "#|  raw line \\n stays"
+  60|   $|interpolated \{1 + 2}
+    : string "$|interpolated \\{1 + 2}"
+  61| 
+  62| ///|
+    : comment "///|"
+  63| test "parse" {
+    : keyword "test" · string "\"parse\"" · punctuation "{"
+  64|   inspect(parse_digit('7'), content="7")
+    : function "inspect" · punctuation "(" · function "parse_digit" · punctuation "(" · string "'7'" · punctuation ")," · operator "=" · string "\"7\"" · punctuation ")"
+  65|   let big = 1_000_000L
+    : keyword "let" · operator "=" · number "1_000_000L"
+  66|   let mask = 0xFF_FFU
+    : keyword "let" · operator "=" · number "0xFF_FFU"
+  67|   let bytes = b"abc\x00"
+    : keyword "let" · operator "=" · string "b\"abc" · escape "\\x00" · string "\""
+  68|   println("\{big} \{mask} \{bytes} \u{1F600}")
+    : function "println" · punctuation "(" · string "\"" · escape "\\{" · escape "}" · escape "\\{" · escape "}" · escape "\\{" · escape "}" · escape "\\u{1F600}" · string "\"" · punctuation ")"
+  69| }
+    : punctuation "}"
+  70| 
+  71| ///|
+    : comment "///|"
+  72| fn main {
+    : keyword "fn" · function "main" · punctuation "{"
+  73|   let shapes = [Circle({ x: 0.0, y: 0.0 }, 2.0), Empty]
+    : keyword "let" · operator "=" · punctuation "[" · function "Circle" · punctuation "({" · punctuation ":" · number "0.0" · punctuation "," · punctuation ":" · number "0.0" · punctuation "}," · number "2.0" · punctuation ")," · type "Empty" · punctuation "]"
+  74|   shapes |> describe |> println
+    : operator "|>" · operator "|>"
+  75| }
+    : punctuation "}"

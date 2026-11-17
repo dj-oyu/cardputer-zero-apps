@@ -1,0 +1,111 @@
+# C++ (cpp) — zc-highlight の見本の正解。ZCODE_UPDATE_GOLDEN=1 で作り直す
+   1| // 見本: C++ のクラス・名前空間・テンプレート・生文字列
+    : comment "// 見本: C++ のクラス・名前空間・テンプレート・生文字列"
+   2| #include <iostream>
+    : control "#include" · string "<iostream>"
+   3| #include <string>
+    : control "#include" · string "<string>"
+   4| #include <vector>
+    : control "#include" · string "<vector>"
+   5| #include "util.hpp"
+    : control "#include" · string "\"util.hpp\""
+   6| 
+   7| #define LOG(x) std::cerr << (x) << '\n'
+    : control "#define" · function "LOG" · punctuation "(" · punctuation ")" · type "std" · punctuation "::" · constant "cerr" · operator "<<" · punctuation "(" · punctuation ")" · operator "<<" · string "'\\n'"
+   8| 
+   9| namespace geo {
+    : keyword "namespace" · type "geo" · punctuation "{"
+  10| 
+  11| constexpr double kPi = 3.14159265358979;
+    : keyword "constexpr" · type "double" · operator "=" · number "3.14159265358979" · punctuation ";"
+  12| constexpr int MAX_POINTS = 1'000;
+    : keyword "constexpr" · type "int" · constant "MAX_POINTS" · operator "=" · number "1'000" · punctuation ";"
+  13| 
+  14| template <typename T>
+    : keyword "template" · operator "<" · keyword "typename" · type "T" · operator ">"
+  15| class Stack {
+    : keyword "class" · type "Stack" · punctuation "{"
+  16| public:
+    : keyword "public" · punctuation ":"
+  17|     void push(const T &v) { items_.push_back(v); }
+    : type "void" · function "push" · punctuation "(" · keyword "const" · type "T" · operator "&" · punctuation ")" · punctuation "{" · punctuation "." · function "push_back" · punctuation "(" · punctuation ");" · punctuation "}"
+  18|     T pop() {
+    : type "T" · function "pop" · punctuation "()" · punctuation "{"
+  19|         T v = std::move(items_.back());
+    : type "T" · operator "=" · type "std" · punctuation "::" · function "move" · punctuation "(" · punctuation "." · function "back" · punctuation "());"
+  20|         items_.pop_back();
+    : punctuation "." · function "pop_back" · punctuation "();"
+  21|         return v;
+    : control "return" · punctuation ";"
+  22|     }
+    : punctuation "}"
+  23|     [[nodiscard]] bool empty() const noexcept { return items_.empty(); }
+    : punctuation "[[" · punctuation "]]" · type "bool" · function "empty" · punctuation "()" · keyword "const" · keyword "noexcept" · punctuation "{" · control "return" · punctuation "." · function "empty" · punctuation "();" · punctuation "}"
+  24| 
+  25| private:
+    : keyword "private" · punctuation ":"
+  26|     std::vector<T> items_;
+    : type "std" · punctuation "::" · type "vector" · operator "<" · type "T" · operator ">" · punctuation ";"
+  27| };
+    : punctuation "};"
+  28| 
+  29| enum class Color : uint8_t { Red, Green = 0x10, Blue };
+    : keyword "enum" · keyword "class" · type "Color" · punctuation ":" · type "uint8_t" · punctuation "{" · type "Red" · punctuation "," · type "Green" · operator "=" · number "0x10" · punctuation "," · type "Blue" · punctuation "};"
+  30| 
+  31| struct Point {
+    : keyword "struct" · type "Point" · punctuation "{"
+  32|     double x = 0.0, y = 1e-3;
+    : type "double" · operator "=" · number "0.0" · punctuation "," · operator "=" · number "1e-3" · punctuation ";"
+  33|     virtual ~Point() = default;
+    : keyword "virtual" · operator "~" · function "Point" · punctuation "()" · operator "=" · control "default" · punctuation ";"
+  34|     auto len() const -> double { return std::sqrt(x * x + y * y); }
+    : keyword "auto" · function "len" · punctuation "()" · keyword "const" · operator "->" · type "double" · punctuation "{" · control "return" · type "std" · punctuation "::" · function "sqrt" · punctuation "(" · operator "*" · operator "+" · operator "*" · punctuation ");" · punctuation "}"
+  35| };
+    : punctuation "};"
+  36| 
+  37| }  // namespace geo
+    : punctuation "}" · comment "// namespace geo"
+  38| 
+  39| /* ブロック
+    : comment "/* ブロック"
+  40|    コメント */
+    : comment "   コメント */"
+  41| static const char *kHelp = R"(使い方:
+    : keyword "static" · keyword "const" · type "char" · operator "*" · operator "=" · string "R\"(使い方:"
+  42|   zcode "file" --help)";
+    : string "  zcode \"file\" --help)\"" · punctuation ";"
+  43| static const char *kTagged = R"sql(SELECT * FROM t)sql";
+    : keyword "static" · keyword "const" · type "char" · operator "*" · operator "=" · string "R\"sql(SELECT * FROM t)sql\"" · punctuation ";"
+  44| 
+  45| int main(int argc, char **argv) {
+    : type "int" · function "main" · punctuation "(" · type "int" · punctuation "," · type "char" · operator "**" · punctuation ")" · punctuation "{"
+  46|     using namespace geo;
+    : keyword "using" · keyword "namespace" · type "geo" · punctuation ";"
+  47|     Stack<int> st;
+    : type "Stack" · operator "<" · type "int" · operator ">" · punctuation ";"
+  48|     std::string name = "wide\t\"q\" %d\n";
+    : type "std" · punctuation "::" · type "string" · operator "=" · string "\"wide" · escape "\\t\\\"" · string "q" · escape "\\\"" · constant "%d" · escape "\\n" · string "\"" · punctuation ";"
+  49|     auto f = [&](int a) -> bool { return a > 0x1F && a != 'x'; };
+    : keyword "auto" · operator "=" · punctuation "[" · operator "&" · punctuation "](" · type "int" · punctuation ")" · operator "->" · type "bool" · punctuation "{" · control "return" · operator ">" · number "0x1F" · operator "&&" · operator "!=" · string "'x'" · punctuation ";" · punctuation "};"
+  50|     for (int i = 0; i < argc; ++i) {
+    : control "for" · punctuation "(" · type "int" · operator "=" · number "0" · punctuation ";" · operator "<" · punctuation ";" · operator "++" · punctuation ")" · punctuation "{"
+  51|         if (!f(i)) { continue; }
+    : control "if" · punctuation "(" · operator "!" · function "f" · punctuation "(" · punctuation "))" · punctuation "{" · control "continue" · punctuation ";" · punctuation "}"
+  52|         st.push(i);
+    : punctuation "." · function "push" · punctuation "(" · punctuation ");"
+  53|     }
+    : punctuation "}"
+  54|     try {
+    : control "try" · punctuation "{"
+  55|         throw std::runtime_error("bad");
+    : control "throw" · type "std" · punctuation "::" · function "runtime_error" · punctuation "(" · string "\"bad\"" · punctuation ");"
+  56|     } catch (const std::exception &e) {
+    : punctuation "}" · control "catch" · punctuation "(" · keyword "const" · type "std" · punctuation "::" · operator "&" · punctuation ")" · punctuation "{"
+  57|         std::cout << e.what() << std::endl;
+    : type "std" · punctuation "::" · constant "cout" · operator "<<" · punctuation "." · function "what" · punctuation "()" · operator "<<" · type "std" · punctuation "::" · constant "endl" · punctuation ";"
+  58|     }
+    : punctuation "}"
+  59|     return st.empty() ? EXIT_FAILURE : 0;
+    : control "return" · punctuation "." · function "empty" · punctuation "()" · operator "?" · constant "EXIT_FAILURE" · punctuation ":" · number "0" · punctuation ";"
+  60| }
+    : punctuation "}"

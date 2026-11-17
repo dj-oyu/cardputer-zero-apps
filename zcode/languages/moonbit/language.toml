@@ -1,0 +1,188 @@
+# MoonBit（.mbt .mbti）。色の付け方は VS Code の Dark+ に寄せてある（専用の定義は標準に無いので
+# Rust に合わせた）。
+#
+# 限界:
+# - 複数行文字列は 1 行ずつ: `#|` は生の行、`$|` は式展開つきの行（本文は文字列の色。
+#   `\{...}` は中を見ない）
+# - 文字列の `\{expr}`（式展開）は入れ子の {} を追えるが、中の式は普通のコードの色で塗る
+# - 型の色は [words] の型名と、大文字で始まる名前（`Int` `Array[T]` `Some`）。全部大文字は定数
+# - アウトラインは fn / struct / enum / trait / type / suberror / impl。`fn Type::method` は名前が
+#   `Type` になる（「行の最初の語、次が名前」の形式のため）。`pub(all)` などの括弧つきは読み飛ばす
+# - 属性 `#deprecated` `#internal(...)` は名前だけ属性の色で、括弧の中は普通に塗る
+# - 実機に moon が無いので `check` / `run` は付けない
+
+name = "MoonBit"
+extensions = ["mbt", "mbti"]
+line_comment = "//"
+indent = "  "
+keywords = [
+    "as", "async", "await", "break", "catch", "const", "continue", "derive", "else", "enum",
+    "extern", "false", "fn", "for", "guard", "if", "impl", "in", "is", "let", "letrec", "loop",
+    "match", "mut", "priv", "pub", "raise", "return", "self", "struct", "suberror", "test",
+    "trait", "true", "try", "type", "typealias", "using", "while", "with", "defer",
+    "Int", "Int64", "UInt", "UInt64", "Double", "Float", "Bool", "String", "Char", "Byte",
+    "Unit", "Array", "FixedArray", "Map", "Option", "Result", "Some", "None", "Ok", "Err",
+    "println", "Show", "Eq", "Compare", "Hash", "Default", "Debug", "main",
+]
+
+[outline]
+items = { fn = "function", impl = "function", struct = "class", enum = "class", trait = "class", type = "class", suberror = "class" }
+modifiers = ["pub", "priv", "async", "extern"]
+indent_width = 2
+
+[variables]
+ident = '[A-Za-z_{{nonascii}}][A-Za-z0-9_{{nonascii}}]*'
+
+[words]
+keyword = [
+    "fn", "let", "letrec", "mut", "const", "struct", "enum", "trait", "type", "typealias",
+    "suberror", "impl", "pub", "priv", "derive", "with", "extern", "async", "test", "using",
+    "package", "import",
+]
+control = [
+    "if", "else", "match", "while", "for", "loop", "break", "continue", "return", "in", "guard",
+    "try", "catch", "raise", "defer", "is", "as", "await", "lexmatch",
+]
+constant = ["true", "false", "self", "None", "_"]
+type = [
+    "Int", "Int16", "Int64", "UInt", "UInt16", "UInt64", "Double", "Float", "Bool", "String",
+    "Char", "Byte", "Unit", "BigInt", "Bytes", "Self", "Array", "FixedArray", "List", "Map",
+    "Set", "Option", "Result", "Error",
+]
+
+# fn の後ろは関数名（`fn Type::name` も）、型の宣言の後ろは型名、impl の後ろはトレイト名
+[word_push]
+fn = "fnname"
+struct = "typename"
+enum = "typename"
+trait = "typename"
+type = "typename"
+suberror = "typename"
+typealias = "typename"
+impl = "typename"
+
+[default_token]
+str = "string"
+
+[[contexts.main]]
+include = "expr"
+
+[[contexts.expr]]
+# コメント `//`（`///|` ブロックの区切りと `///` ドキュメントも）
+match = '//.*'
+token = "comment"
+# 複数行文字列の 1 行: `#|` は生、`$|` は式展開つき
+[[contexts.expr]]
+match = '[#$]\|[^\n]*'
+token = "string"
+# 属性 #deprecated #internal(...) #alias(...)
+[[contexts.expr]]
+match = '#[A-Za-z_][A-Za-z0-9_.]*'
+token = "attribute"
+[[contexts.expr]]
+match = '"'
+token = "string"
+push = "str"
+# バイト列・文字列の前置き b"..." b'a'
+[[contexts.expr]]
+match = 'b'
+followed_by = '''["']'''
+token = "string"
+# 文字 'a' '\n' '\x41' '\u{1F600}' '\u00e9' と、非 ASCII 1 文字
+[[contexts.expr]]
+match = '''\'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|[^\n])|[^'\\\n{{nonascii}}]|[{{nonascii}}]+)\''''
+token = "string"
+[[contexts.expr]]
+match = '{{ident}}'
+followed_by = '[ \t]*\('
+token = "function"
+words = true
+[[contexts.expr]]
+match = '[A-Z]'
+followed_by = '[^A-Za-z0-9_{{nonascii}}]'
+token = "type"
+[[contexts.expr]]
+match = '[A-Z][A-Z0-9_]*'
+followed_by = '[^A-Za-z0-9_{{nonascii}}]'
+token = "constant"
+words = true
+[[contexts.expr]]
+match = '[A-Z][A-Za-z0-9_{{nonascii}}]*'
+token = "type"
+words = true
+[[contexts.expr]]
+match = '[a-z_{{nonascii}}][A-Za-z0-9_{{nonascii}}]*'
+token = "text"
+words = true
+# 数（0x1F・0b101・1_000・1.5e-3・10L・5U・0xFFUL）
+[[contexts.expr]]
+match = '[0-9](?:[eE][+-]|[0-9A-Za-z_])*(?:\.[0-9](?:[eE][+-]|[0-9A-Za-z_])*)?'
+token = "number"
+[[contexts.expr]]
+match = '[-+*/%&|^~<>!=?]+'
+token = "operator"
+[[contexts.expr]]
+match = '[(){}\[\],;:.@\\]'
+token = "punctuation"
+[[contexts.expr]]
+match = '[ \t]+'
+token = "text"
+
+# fn のあと: `fn name` `fn Type::name` `fn[T] name`
+[[contexts.fnname]]
+match = '[ \t]+'
+token = "text"
+[[contexts.fnname]]
+match = '{{ident}}'
+followed_by = '::'
+token = "type"
+[[contexts.fnname]]
+match = '::'
+token = "punctuation"
+[[contexts.fnname]]
+match = '{{ident}}'
+token = "function"
+pop = true
+[[contexts.fnname]]
+match = ''
+pop = true
+
+# 型の宣言のあと: `struct Point` `enum Color` `impl Show for Point` `type Id`
+[[contexts.typename]]
+match = '[ \t]+'
+token = "text"
+[[contexts.typename]]
+match = '{{ident}}'
+token = "type"
+pop = true
+[[contexts.typename]]
+match = ''
+pop = true
+
+# "..." は行をまたがない。閉じていなければ行末で終わる。\{expr} は式展開
+[[contexts.str]]
+match = '"'
+pop = true
+[[contexts.str]]
+match = '\\\{'
+token = "escape"
+push = "interp"
+[[contexts.str]]
+match = '\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|.)'
+token = "escape"
+[[contexts.str]]
+match = '\n'
+pop = true
+[[contexts.str]]
+match = '[^"\\\n]+|\\'
+
+[[contexts.interp]]
+match = '\}'
+token = "escape"
+pop = true
+[[contexts.interp]]
+match = '\{'
+token = "punctuation"
+push = "interp"
+[[contexts.interp]]
+include = "expr"

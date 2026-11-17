@@ -1,0 +1,133 @@
+# Go (go) — zc-highlight の見本の正解。ZCODE_UPDATE_GOLDEN=1 で作り直す
+   1| // 見本: Go の宣言・文字列・ルーン・goroutine
+    : comment "// 見本: Go の宣言・文字列・ルーン・goroutine"
+   2| package main
+    : keyword "package"
+   3| 
+   4| import (
+    : keyword "import" · punctuation "("
+   5| 	"errors"
+    : string "\"errors\""
+   6| 	"fmt"
+    : string "\"fmt\""
+   7| 	"os"
+    : string "\"os\""
+   8| )
+    : punctuation ")"
+   9| 
+  10| const (
+    : keyword "const" · punctuation "("
+  11| 	MaxItems = 64
+    : type "MaxItems" · operator "=" · number "64"
+  12| 	Version  = "1.0"
+    : type "Version" · operator "=" · string "\"1.0\""
+  13| 	mask     = 0xFF_FF
+    : operator "=" · number "0xFF_FF"
+  14| )
+    : punctuation ")"
+  15| 
+  16| type Stack[T any] struct {
+    : keyword "type" · type "Stack" · punctuation "[" · type "T" · type "any" · punctuation "]" · keyword "struct" · punctuation "{"
+  17| 	items []T
+    : punctuation "[]" · type "T"
+  18| }
+    : punctuation "}"
+  19| 
+  20| type Shape interface {
+    : keyword "type" · type "Shape" · keyword "interface" · punctuation "{"
+  21| 	Area() float64
+    : function "Area" · punctuation "()" · type "float64"
+  22| }
+    : punctuation "}"
+  23| 
+  24| type Circle struct {
+    : keyword "type" · type "Circle" · keyword "struct" · punctuation "{"
+  25| 	R    float64 `json:"r"`
+    : type "R" · type "float64" · string "`json:\"r\"`"
+  26| 	Name string  `json:"name,omitempty"`
+    : type "Name" · type "string" · string "`json:\"name,omitempty\"`"
+  27| }
+    : punctuation "}"
+  28| 
+  29| var ErrEmpty = errors.New("stack is empty")
+    : keyword "var" · type "ErrEmpty" · operator "=" · punctuation "." · function "New" · punctuation "(" · string "\"stack is empty\"" · punctuation ")"
+  30| 
+  31| /* ブロック
+    : comment "/* ブロック"
+  32|    コメント */
+    : comment "   コメント */"
+  33| func (c Circle) Area() float64 {
+    : keyword "func" · punctuation "(" · type "Circle" · punctuation ")" · function "Area" · punctuation "()" · type "float64" · punctuation "{"
+  34| 	return 3.14159 * c.R * c.R
+    : control "return" · number "3.14159" · operator "*" · punctuation "." · type "R" · operator "*" · punctuation "." · type "R"
+  35| }
+    : punctuation "}"
+  36| 
+  37| func (s *Stack[T]) Pop() (T, error) {
+    : keyword "func" · punctuation "(" · operator "*" · type "Stack" · punctuation "[" · type "T" · punctuation "])" · function "Pop" · punctuation "()" · punctuation "(" · type "T" · punctuation "," · type "error" · punctuation ")" · punctuation "{"
+  38| 	var zero T
+    : keyword "var" · type "T"
+  39| 	if len(s.items) == 0 {
+    : control "if" · function "len" · punctuation "(" · punctuation "." · punctuation ")" · operator "==" · number "0" · punctuation "{"
+  40| 		return zero, ErrEmpty
+    : control "return" · punctuation "," · type "ErrEmpty"
+  41| 	}
+    : punctuation "}"
+  42| 	v := s.items[len(s.items)-1]
+    : operator ":=" · punctuation "." · punctuation "[" · function "len" · punctuation "(" · punctuation "." · punctuation ")" · operator "-" · number "1" · punctuation "]"
+  43| 	s.items = s.items[:len(s.items)-1]
+    : punctuation "." · operator "=" · punctuation "." · punctuation "[:" · function "len" · punctuation "(" · punctuation "." · punctuation ")" · operator "-" · number "1" · punctuation "]"
+  44| 	return v, nil
+    : control "return" · punctuation "," · constant "nil"
+  45| }
+    : punctuation "}"
+  46| 
+  47| func worker(id int, jobs <-chan int, done chan<- bool) {
+    : keyword "func" · function "worker" · punctuation "(" · type "int" · punctuation "," · operator "<-" · keyword "chan" · type "int" · punctuation "," · keyword "chan" · operator "<-" · type "bool" · punctuation ")" · punctuation "{"
+  48| 	for j := range jobs {
+    : control "for" · operator ":=" · control "range" · punctuation "{"
+  49| 		fmt.Printf("worker %d: job %-4d %5.2f%%\n", id, j, 1e-3)
+    : punctuation "." · function "Printf" · punctuation "(" · string "\"worker " · constant "%d" · string ": job " · constant "%-4d" · constant "%5.2f%%" · escape "\\n" · string "\"" · punctuation "," · punctuation "," · punctuation "," · number "1e-3" · punctuation ")"
+  50| 	}
+    : punctuation "}"
+  51| 	done <- true
+    : operator "<-" · constant "true"
+  52| }
+    : punctuation "}"
+  53| 
+  54| func main() {
+    : keyword "func" · function "main" · punctuation "()" · punctuation "{"
+  55| 	query := `SELECT *
+    : operator ":=" · string "`SELECT *"
+  56| FROM t WHERE id = %d`
+    : string "FROM t WHERE id = " · constant "%d" · string "`"
+  57| 	sep, tab, jp := '\n', '\t', '日'
+    : punctuation "," · punctuation "," · operator ":=" · string "'\\n'" · punctuation "," · string "'\\t'" · punctuation "," · string "'日'"
+  58| 	jobs := make(chan int, MaxItems)
+    : operator ":=" · function "make" · punctuation "(" · keyword "chan" · type "int" · punctuation "," · type "MaxItems" · punctuation ")"
+  59| 	done := make(chan bool)
+    : operator ":=" · function "make" · punctuation "(" · keyword "chan" · type "bool" · punctuation ")"
+  60| 	go worker(1, jobs, done)
+    : control "go" · function "worker" · punctuation "(" · number "1" · punctuation "," · punctuation "," · punctuation ")"
+  61| 	defer close(jobs)
+    : control "defer" · function "close" · punctuation "(" · punctuation ")"
+  62| 	switch {
+    : control "switch" · punctuation "{"
+  63| 	case sep == tab:
+    : control "case" · operator "==" · punctuation ":"
+  64| 		fmt.Println("same\t\"quoted\"", query, jp)
+    : punctuation "." · function "Println" · punctuation "(" · string "\"same" · escape "\\t\\\"" · string "quoted" · escape "\\\"" · string "\"" · punctuation "," · punctuation "," · punctuation ")"
+  65| 	default:
+    : control "default" · punctuation ":"
+  66| 		fmt.Fprintln(os.Stderr, "bad", 0b101, 0o17, 1.5i)
+    : punctuation "." · function "Fprintln" · punctuation "(" · punctuation "." · type "Stderr" · punctuation "," · string "\"bad\"" · punctuation "," · number "0b101" · punctuation "," · number "0o17" · punctuation "," · number "1.5i" · punctuation ")"
+  67| 	}
+    : punctuation "}"
+  68| 	if err := run(); err != nil {
+    : control "if" · operator ":=" · function "run" · punctuation "();" · operator "!=" · constant "nil" · punctuation "{"
+  69| 		os.Exit(1)
+    : punctuation "." · function "Exit" · punctuation "(" · number "1" · punctuation ")"
+  70| 	}
+    : punctuation "}"
+  71| }
+    : punctuation "}"
