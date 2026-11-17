@@ -151,6 +151,70 @@ pub enum ErrorCode {
     Internal,
 }
 
+/// LSP の問い合わせの種類（docs/lsp-design.md）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LspQuery {
+    /// カーソルの位置の型と説明（`textDocument/hover`）。
+    Hover,
+    /// 定義へ（`textDocument/definition`）。
+    Definition,
+    /// 使っている所（`textDocument/references`、宣言も含む）。
+    References,
+    /// プロジェクト全体の名前の検索（`workspace/symbol`。`text` が検索の文字列）。
+    Symbols,
+    /// 補完（`textDocument/completion`）。
+    Completion,
+}
+
+/// rust-analyzer の状態（`lsp_state`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LspPhase {
+    /// 起動して、プロジェクトを読んでいる・索引を作っている（問い合わせには「準備中」と返す）。
+    Loading,
+    /// 最初の索引が済んだ（問い合わせに答えられる）。
+    Ready,
+    /// 起動できない・落ちた（`message` に理由）。次の `lsp_warm` で起動し直す。
+    Failed,
+}
+
+/// LSP の答えの 1 項目（場所・補完の候補）。行・桁は 0 始まり、桁は行の中の UTF-8 の
+/// バイト位置（診断と同じ。受付が UTF-16 から直してから送る）。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LspItem {
+    /// 木の根からの相対パス（プロジェクトの中の場所）。プロジェクトの外なら空。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
+    /// プロジェクトの外の場所の見せ方（`core/src/option.rs`・`regex-1.11.1/src/lib.rs` の形）。
+    /// 実機にはそのファイルが無いので、開かずに見せるだけ。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ext: String,
+    #[serde(default)]
+    pub line: u32,
+    #[serde(default)]
+    pub col: u32,
+    /// 範囲の終わり `[行, 桁]`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<(u32, u32)>,
+    /// 名前（symbols の名前・補完の見出し）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// LSP の SymbolKind / CompletionItemKind の番号（0 = 無い）。
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub kind: u32,
+    /// 添え書き（場所ならその行の中身、symbols なら入れ物の名前、補完なら型）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    /// 補完で入れる文字列（`col` から今のカーソルまでを置き換える）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub insert: String,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 /// 実機 → ビルド係。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -187,6 +251,26 @@ pub enum ClientMsg {
     },
     /// 取り消す。受付は道具をプロセスグループごと止め、`done {status:"cancelled"}` を返す。
     Cancel { job: String },
+    /// rust-analyzer を先に起こしておく（Rust のファイルを開いた）。`tree` は `ready` を受けた木、
+    /// `path` は開いたファイル（木の根からの相対）。返事は `lsp_state`（状態が変わるたびにも届く）。
+    LspWarm { project: String, tree: String, path: String },
+    /// LSP の問い合わせ。`tree` は `ready` を受けた木（未保存の中身を重ねた目録）。`path` は木の
+    /// 根からの相対、`line` / `col` は 0 始まり・`col` は UTF-8 のバイト位置。`text` は symbols の
+    /// 検索の文字列。返事は同じ `id` の `lsp_result`（必ず 1 つ）。
+    Lsp {
+        id: u32,
+        project: String,
+        tree: String,
+        query: LspQuery,
+        #[serde(default)]
+        path: String,
+        #[serde(default)]
+        line: u32,
+        #[serde(default)]
+        col: u32,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        text: String,
+    },
 }
 
 /// ビルド係 → 実機。
@@ -263,6 +347,38 @@ pub enum ServerMsg {
         job: Option<String>,
         code: ErrorCode,
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_s: Option<u32>,
+    },
+    /// rust-analyzer の状態（`lsp_warm` への返事と、状態が変わったとき）。`cpu_ms` は、この受付で
+    /// 動かした rust-analyzer（子のプロセスも）が使った CPU の合計（ms。受付が起動してからの
+    /// 通算で、減らない）。DO が費用の計りに使うので、`type` の直後に置く（覗くだけで読める）。
+    /// `error` は DO が断ったとき（`limit`）だけ付く。
+    LspState {
+        #[serde(default)]
+        cpu_ms: u64,
+        project: String,
+        state: LspPhase,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<ErrorCode>,
+    },
+    /// `lsp` への返事。`error` があれば失敗（`unavailable` = rust-analyzer が準備中・動いていない、
+    /// `limit` = 費用の上限、`bad-tree` = 木がそろっていない、`internal`）で、`message` に理由。
+    /// 成功なら `text`（hover）と `items`（場所・候補）。何も無ければどちらも空。
+    LspResult {
+        #[serde(default)]
+        cpu_ms: u64,
+        id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<ErrorCode>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        message: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        items: Vec<LspItem>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_after_s: Option<u32>,
     },
@@ -513,6 +629,57 @@ mod tests {
         for (s, st) in [("failed", Status::Failed), ("cancelled", Status::Cancelled), ("timeout", Status::Timeout), ("lost", Status::Lost), ("error", Status::Error)] {
             same_both_ways(&format!(r#"{{"type":"done","job":"j","status":"{s}","exit":1,"queue_ms":0,"run_ms":0}}"#), ServerMsg::Done { job: "j".into(), status: st, exit: 1, queue_ms: 0, run_ms: 0 });
         }
+    }
+
+    /// LSP のメッセージ（docs/lsp-design.md の例と同じ文字列）。
+    #[test]
+    fn lsp_messages() {
+        same_both_ways(r#"{"type":"lsp_warm","project":"p","tree":"t","path":"src/main.rs"}"#, ClientMsg::LspWarm { project: "p".into(), tree: "t".into(), path: "src/main.rs".into() });
+        same_both_ways(
+            r#"{"type":"lsp","id":7,"project":"p","tree":"t","query":"hover","path":"src/main.rs","line":3,"col":12}"#,
+            ClientMsg::Lsp { id: 7, project: "p".into(), tree: "t".into(), query: LspQuery::Hover, path: "src/main.rs".into(), line: 3, col: 12, text: String::new() },
+        );
+        same_both_ways(
+            r#"{"type":"lsp","id":8,"project":"p","tree":"t","query":"symbols","path":"","line":0,"col":0,"text":"Foo"}"#,
+            ClientMsg::Lsp { id: 8, project: "p".into(), tree: "t".into(), query: LspQuery::Symbols, path: String::new(), line: 0, col: 0, text: "Foo".into() },
+        );
+        for (s, q) in [("definition", LspQuery::Definition), ("references", LspQuery::References), ("completion", LspQuery::Completion)] {
+            let m = decode::<ClientMsg>(&format!(r#"{{"type":"lsp","id":1,"project":"p","tree":"t","query":"{s}"}}"#)).unwrap();
+            assert!(matches!(m, Some(ClientMsg::Lsp { query, .. }) if query == q), "{s}");
+        }
+        same_both_ways(r#"{"type":"lsp_state","cpu_ms":1500,"project":"p","state":"loading"}"#, ServerMsg::LspState { cpu_ms: 1500, project: "p".into(), state: LspPhase::Loading, message: String::new(), error: None });
+        same_both_ways(
+            r#"{"type":"lsp_state","cpu_ms":0,"project":"p","state":"failed","message":"上限","error":"limit"}"#,
+            ServerMsg::LspState { cpu_ms: 0, project: "p".into(), state: LspPhase::Failed, message: "上限".into(), error: Some(ErrorCode::Limit) },
+        );
+        same_both_ways(r#"{"type":"lsp_state","cpu_ms":2,"project":"p","state":"ready"}"#, ServerMsg::LspState { cpu_ms: 2, project: "p".into(), state: LspPhase::Ready, message: String::new(), error: None });
+        same_both_ways(
+            r#"{"type":"lsp_result","cpu_ms":9,"id":7,"text":"fn len(&self) -> usize"}"#,
+            ServerMsg::LspResult { cpu_ms: 9, id: 7, error: None, message: String::new(), text: "fn len(&self) -> usize".into(), items: vec![], retry_after_s: None },
+        );
+        same_both_ways(
+            r#"{"type":"lsp_result","cpu_ms":9,"id":7,"items":[{"path":"src/a.rs","line":4,"col":7,"end":[4,10],"detail":"fn foo() {}"},{"ext":"core/src/option.rs","line":570,"col":0,"name":"Option","kind":10,"insert":"Some"}]}"#,
+            ServerMsg::LspResult {
+                cpu_ms: 9,
+                id: 7,
+                error: None,
+                message: String::new(),
+                text: String::new(),
+                items: vec![
+                    LspItem { path: "src/a.rs".into(), line: 4, col: 7, end: Some((4, 10)), detail: "fn foo() {}".into(), ..Default::default() },
+                    LspItem { ext: "core/src/option.rs".into(), line: 570, name: "Option".into(), kind: 10, insert: "Some".into(), ..Default::default() },
+                ],
+                retry_after_s: None,
+            },
+        );
+        same_both_ways(
+            r#"{"type":"lsp_result","cpu_ms":0,"id":1,"error":"limit","message":"上限","retry_after_s":60}"#,
+            ServerMsg::LspResult { cpu_ms: 0, id: 1, error: Some(ErrorCode::Limit), message: "上限".into(), text: String::new(), items: vec![], retry_after_s: Some(60) },
+        );
+        // cpu_ms が無くても読める（DO が作る返事）
+        assert!(matches!(decode::<ServerMsg>(r#"{"type":"lsp_result","id":3,"error":"unavailable"}"#).unwrap(), Some(ServerMsg::LspResult { id: 3, cpu_ms: 0, .. })));
+        // 知らない query は約束の間違い（知らない type ではない）
+        assert!(decode::<ClientMsg>(r#"{"type":"lsp","id":1,"project":"p","tree":"t","query":"rename"}"#).is_err());
     }
 
     #[test]

@@ -265,10 +265,22 @@ impl Store {
     /// 写しは同時に 1 つだけ（中で待たせる）。走っているジョブがある間は呼ばない
     /// （台帳が順番を守る）。
     pub fn sync_tree(&self, project: &str, manifest: &Manifest) -> Result<SyncStats, StoreError> {
-        self.sync_entries(project, manifest.files())
+        self.sync_entries(project, manifest.files(), "src", "tree.json")
     }
 
-    fn sync_entries(&self, project: &str, files: &[FileEntry]) -> Result<SyncStats, StoreError> {
+    /// [`Store::sync_tree`] と同じ写しを、rust-analyzer 用の木（`proj/<project id>/lsp`）へ
+    /// （docs/lsp-design.md）。ジョブの作業の木とは別にするので、ジョブが走っている間に呼んでよい。
+    /// 覚えは `lsp-tree.json`（掃除の「指されている中身」には数えない。木にコピーがあるため）。
+    pub fn sync_lsp_tree(&self, project: &str, manifest: &Manifest) -> Result<SyncStats, StoreError> {
+        self.sync_entries(project, manifest.files(), "lsp", "lsp-tree.json")
+    }
+
+    /// rust-analyzer 用の木（`proj/<project id>/lsp`）。
+    pub fn lsp_dir(&self, project: &str) -> PathBuf {
+        self.project_dir(project).join("lsp")
+    }
+
+    fn sync_entries(&self, project: &str, files: &[FileEntry], sub: &str, memo_name: &str) -> Result<SyncStats, StoreError> {
         let lock = self.project_lock(project);
         let _g = lock.lock().unwrap();
         // 受付の中でももう一度確かめる（目録の検査を通らないものは来ない前提だが、木の外に
@@ -295,9 +307,9 @@ impl Store {
         let pdir = self.project_dir(project);
         ensure_real_dir(&self.root.join("proj"))?;
         ensure_real_dir(&pdir)?;
-        let src = pdir.join("src");
+        let src = pdir.join(sub);
         ensure_real_dir(&src)?;
-        let memo_path = pdir.join("tree.json");
+        let memo_path = pdir.join(memo_name);
         let old: TreeMemo = fs::read(&memo_path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
 
         let mut stats = SyncStats::default();

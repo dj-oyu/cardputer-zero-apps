@@ -50,4 +50,8 @@ pub mod limits {
     pub const MAX_WRITEBACK_BYTES: usize = 512 << 10;
     /// zstd の窓（実機の展開メモリを抑える）。2MiB。
     pub const ZSTD_WINDOW_LOG: u32 = 21;
+    /// LSP の答え 1 つの項目の数（references・symbols・completion。超えたら切る）。
+    pub const MAX_LSP_ITEMS: usize = 200;
+    /// LSP の hover の文の長さ（バイト。超えたら文字の境目で切る）。
+    pub const MAX_LSP_TEXT: usize = 4096;
 }

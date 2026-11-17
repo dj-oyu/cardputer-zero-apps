@@ -13,6 +13,7 @@
 //! | [`runner`] | ジョブの実行の口（[`runner::Runner`]）と道具の起動 | （雛形で確定） |
 //! | [`runner::rust`] | cargo / rustc と、rustc の JSON → 診断 | B3 |
 //! | [`runner::c`]・[`runner::node`] | gcc、npm + tsc + esbuild | B4 |
+//! | [`lsp`] | rust-analyzer の橋渡し（docs/lsp-design.md） | LSP |
 //!
 //! **実機（依頼してきた側）を信用しない。** パスは目録の検査（[`zc_wire::tree::Manifest::new`]）
 //! を通ったものにだけ書き、作業の木の外へ出ない。上限（[`zc_wire::limits`]）を超えたら断る。
@@ -23,6 +24,7 @@
 //! tokio は使わない（接続は同時に数本）。
 
 pub mod jobs;
+pub mod lsp;
 pub mod pack;
 pub mod runner;
 pub mod server;

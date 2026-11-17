@@ -848,3 +848,48 @@ fn http_get_fails(addr: SocketAddr) -> bool {
     let mut b = [0u8; 16];
     !matches!(s.read(&mut b), Ok(n) if n > 0)
 }
+
+/// LSP の口（docs/lsp-design.md）: ready を受けた木にだけ答える・答えは同じ id で必ず 1 つ・
+/// 接続は続く。rust-analyzer があれば（ビルド係のイメージの中）、本物で hover まで通す。
+#[test]
+fn lsp_messages_over_the_socket() {
+    use zc_wire::msg::{LspPhase, LspQuery};
+    let srv = Server::start("lsp");
+    let mut c = Client::open(srv.addr());
+    c.s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+    let t = project("fn helper() -> u8 { 1 }\nfn main() { let _ = helper(); }\n");
+    // 木がそろっていない
+    c.send(&ClientMsg::Lsp { id: 5, project: PROJECT.into(), tree: t.id.clone(), query: LspQuery::Hover, path: "src/main.rs".into(), line: 1, col: 22, text: String::new() });
+    assert!(matches!(c.msg(), ServerMsg::LspResult { id: 5, error: Some(ErrorCode::BadTree), .. }));
+    c.send(&ClientMsg::LspWarm { project: PROJECT.into(), tree: t.id.clone(), path: "src/main.rs".into() });
+    assert!(matches!(c.msg(), ServerMsg::LspState { state: LspPhase::Failed, error: Some(ErrorCode::BadTree), .. }));
+    // 接続は続いている
+    t.upload(&mut c);
+    c.send(&ClientMsg::LspWarm { project: PROJECT.into(), tree: t.id.clone(), path: "src/main.rs".into() });
+    let have_ra = std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("rust-analyzer").is_file()));
+    match c.msg() {
+        ServerMsg::LspState { state: LspPhase::Loading, .. } if have_ra => {}
+        ServerMsg::LspState { state: LspPhase::Failed, message, .. } if !have_ra => assert!(message.contains("rust-analyzer が無い"), "{message}"),
+        other => panic!("{other:?}"),
+    }
+    let (_, body) = http_get(srv.addr(), "/v1/status");
+    assert!(body.contains("\"lsp_cpu_ms\""), "{body}");
+    if !have_ra {
+        return;
+    }
+    loop {
+        match c.msg() {
+            ServerMsg::LspState { state: LspPhase::Ready, .. } => break,
+            ServerMsg::LspState { state: LspPhase::Failed, message, .. } => panic!("{message}"),
+            _ => {}
+        }
+    }
+    c.send(&ClientMsg::Lsp { id: 6, project: PROJECT.into(), tree: t.id.clone(), query: LspQuery::Hover, path: "src/main.rs".into(), line: 1, col: 22, text: String::new() });
+    match c.msg() {
+        ServerMsg::LspResult { id: 6, error: None, text, cpu_ms, .. } => {
+            assert!(text.contains("fn helper() -> u8"), "{text}");
+            assert!(cpu_ms > 0);
+        }
+        other => panic!("{other:?}"),
+    }
+}
