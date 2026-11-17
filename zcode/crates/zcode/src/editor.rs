@@ -42,6 +42,8 @@ use std::sync::OnceLock;
 use zc_skk::{InputMode, LearnedWord, Preedit, PreeditState, Skk, SystemDict, UserDict};
 use zc_term::{ReadBudget, Term, TermCommand, TermEvent};
 use zc_markdown::MdDocument;
+use zc_ui::{ShortcutList, ShortcutRow};
+use zc_store::{BackupPolicy, DocBackup, Restore, Snapshot};
 use zc_ui::{CandidatePopup, CandidateRow, CodeLayouter, MdLayouter, MiniBuffer, PreeditStyle, PreeditView, MINI_H};
 use zc_ui::{CompletionPopup, EditorStatus, EditorView, FileTree, ImeMode, PickerList, PopupItem, RenderCx, SpanSource, StatusBar, Tab, TabBar, TerminalPanel, Widget, TERM_PANEL_H};
 
@@ -289,6 +291,8 @@ struct DocTab {
     saved: Option<Version>,
     /// Markdown のライブプレビュー（.md のときだけ。モック 10・11）。
     md: Option<MdState>,
+    /// 読み込みが終わったら入れる控えの内容とカーソル（起動時の復元）。
+    pending_restore: Option<(String, Pos)>,
 }
 
 /// この行数までの Markdown は、全体の解析をメインで行う（超えたら batch）。実機で
@@ -353,9 +357,25 @@ impl DocTab {
             shift: ShiftLog::new(),
             saved,
             md: None,
+            pending_restore: None,
         };
         t.detect_language();
         t
+    }
+    /// 控えの内容を入れる（今の中身を 1 回の編集で置き換える。未保存の印が付き、
+    /// 1 回の取り消しでディスクの中身に戻る）。
+    fn apply_restore(&mut self, text: &str, cursor: Pos, store: &mut DiagStore) {
+        let last = self.doc.as_lines().len_lines().saturating_sub(1);
+        let end = Pos::new(last, self.doc.line_len(last));
+        self.doc.break_undo_group();
+        if let Some(c) = self.doc.replace_range(Pos::new(0, 0), end, text) {
+            self.edited(c, store);
+        }
+        self.doc.break_undo_group();
+        let line = cursor.line.min(self.doc.as_lines().len_lines().saturating_sub(1));
+        let at = Pos::new(line, cursor.col.min(self.doc.line_len(line)));
+        self.doc.set_selection(at, at);
+        self.sync_cursor();
     }
     /// 置き場の鍵を決め直して（パスが決まった・変わった）、診断を置き場から写す。
     fn rekey(&mut self, workspace: &Path, store: &DiagStore) {
@@ -573,6 +593,12 @@ pub struct EditorScreen {
     skk_mode: InputMode,
     cand_popup: CandidatePopup,
     cand_stale: bool,
+    /// 控えを書く時機（§8.4）。
+    backup: BackupPolicy,
+    /// 起動時に見つけた控え（復元するか尋ねている間）。
+    restore_offer: Option<Restore>,
+    /// Ctrl+Q で終わる（控えを消す）。シグナルでの終了なら控えを書いてから終わる。
+    quit_clean: bool,
     mini: MiniBuffer,
     /// 登録欄を出していた（開閉で領域が変わる）。
     mini_open: bool,
@@ -603,6 +629,8 @@ pub struct EditorScreen {
     progress: Option<Progress>,
     /// 試験の結果の一覧（開いているあいだは本文の全体を覆う。モック 15）。
     tests: Option<TestsState>,
+    /// ショートカット一覧（F1。コマンドパレットを兼ねる。モック 5・6）。
+    shortcuts: Option<ShortcutList>,
     /// まだ一覧で見ていない試験の結果（F6 で開く）。
     test_unseen: Option<(PathBuf, TestReport)>,
     /// 保存が終わったら試験を頼む文書（F6 で未保存だったとき）。
@@ -658,6 +686,9 @@ impl EditorScreen {
             skk_mode: InputMode::Ascii,
             cand_popup: CandidatePopup::new(),
             cand_stale: false,
+            backup: BackupPolicy::default(),
+            restore_offer: None,
+            quit_clean: false,
             mini: MiniBuffer::new(),
             mini_open: false,
             term: None,
@@ -676,6 +707,7 @@ impl EditorScreen {
             notices: Notices::default(),
             progress: None,
             tests: None,
+            shortcuts: None,
             test_unseen: None,
             pending_test: None,
             test_waiting: false,
@@ -744,9 +776,17 @@ impl EditorScreen {
     pub fn active_path(&self) -> Option<&Path> {
         self.tabs.get(self.active).and_then(|t| t.path.as_deref())
     }
+    /// ショートカット一覧が開いていれば、その絞り込みの文字列（テスト用）。
+    pub fn shortcuts_query(&self) -> Option<&str> {
+        self.shortcuts.as_ref().map(|l| l.query())
+    }
     /// 選択中の文書が Markdown なら、プレビュー中か（`false` はソース表示）。
     pub fn markdown_preview(&self) -> Option<bool> {
         self.tabs.get(self.active).and_then(|t| t.md.as_ref()).map(|m| m.preview)
+    }
+    /// 起動時の控えの復元を尋ねている間は、その未保存の文書の数（テスト用）。
+    pub fn restore_pending(&self) -> Option<usize> {
+        self.restore_offer.as_ref().map(|r| r.unsaved_docs().count())
     }
     /// ステータスバーに出ている知らせ。
     pub fn message(&self) -> Option<&str> {
@@ -955,6 +995,10 @@ impl EditorScreen {
         self.feed_keys(keys.to_vec(), cx);
         self.pump_highlight(Some(cx));
         self.pump_markdown(cx);
+        if !self.tabs.is_empty() {
+            self.backup.note_edit(cx.now_us);
+            self.arm_backup(cx);
+        }
         // 打鍵の直後はカーソルを点けたままにして、点滅をやり直す
         self.cursor_on = true;
         if let Some(t) = self.tabs.get_mut(self.active) {
@@ -985,6 +1029,14 @@ impl EditorScreen {
     }
 
     fn handle_key(&mut self, ev: &KeyEvent, cx: &mut LoopCx<'_>) {
+        if self.restore_offer.is_some() {
+            self.restore_key(ev, cx);
+            return;
+        }
+        if self.shortcuts.is_some() {
+            self.shortcuts_key(ev, cx);
+            return;
+        }
         if self.message.take().is_some() {
             self.status_due = true;
         }
@@ -1495,6 +1547,7 @@ impl EditorScreen {
                     self.say(format!("{what}。もう一度 Ctrl+Q で終了"), true);
                 } else {
                     self.flush_skk(cx);
+                    self.quit_clean = true;
                     cx.quit = true;
                 }
             }
@@ -1528,6 +1581,8 @@ impl EditorScreen {
                 let i = if cmd == Command::NextTab { (self.active + 1) % n } else { (self.active + n - 1) % n };
                 self.tabs[self.active].doc.break_undo_group();
                 self.activate(i);
+                // タブを切り替えたら、段 2（SD）の控えをすぐ書く（変化があれば。§8.4）
+                self.backup.note_tab_switch();
             }
             Command::CloseTab if !self.tabs.is_empty() => {
                 let t = &self.tabs[self.active];
@@ -1561,6 +1616,7 @@ impl EditorScreen {
                 }
             }
             Command::ShowOutline if !self.tabs.is_empty() => self.open_outline(),
+            Command::ShowShortcuts => self.open_shortcuts(),
             Command::TogglePreview if self.focus == Focus::Editor => self.toggle_preview(),
             Command::ToggleCheckbox if self.focus == Focus::Editor => self.toggle_checkbox(),
             Command::Bold if self.focus == Focus::Editor => self.wrap_selection("**"),
@@ -2146,6 +2202,61 @@ impl EditorScreen {
         self.status_due = true;
     }
 
+    /// ショートカット一覧を開く（一覧はキー割り当てと同じ表 `commands::BINDINGS` から作る）。
+    fn open_shortcuts(&mut self) {
+        let rows = commands::BINDINGS.iter().map(|b| ShortcutRow { category: b.category, title: b.title, keys: b.keys }).collect();
+        self.shortcuts = Some(ShortcutList::new(rows));
+        self.completion = None;
+        self.tabs_dirty = true;
+        self.status_due = true;
+    }
+
+    fn close_shortcuts(&mut self) {
+        self.shortcuts = None;
+        self.tabs_dirty = true;
+        self.restore_body();
+    }
+
+    /// ショートカット一覧が開いているあいだの打鍵: 文字で絞り込み、↑↓ で選び、Enter で実行。
+    fn shortcuts_key(&mut self, ev: &KeyEvent, cx: &mut LoopCx<'_>) {
+        self.status_due = true;
+        if commands::lookup(ev) == Some(Command::ShowShortcuts) {
+            self.close_shortcuts();
+            return;
+        }
+        let Some(list) = self.shortcuts.as_mut() else { return };
+        match ev.key {
+            Key::Esc => self.close_shortcuts(),
+            Key::Enter => {
+                let cmd = list.selected().and_then(|i| commands::BINDINGS.get(i)).map(|b| b.command);
+                self.close_shortcuts();
+                if let Some(cmd) = cmd {
+                    // 一覧から選んだ操作は、エディタにいるものとして実行する（ツリー・端末の操作は
+                    // それぞれの中で効く）
+                    if self.focus == Focus::Tree && !self.tabs.is_empty() && !matches!(cmd, Command::Move { .. } | Command::Newline) {
+                        self.set_focus(Focus::Editor);
+                    }
+                    self.exec(cmd, cx);
+                }
+            }
+            Key::Up => list.move_sel(-1),
+            Key::Down => list.move_sel(1),
+            Key::PageUp => list.page(false),
+            Key::PageDown => list.page(true),
+            Key::Backspace => {
+                list.backspace();
+            }
+            _ => {
+                if ev.mods.ctrl() || ev.mods.contains(Mods::ALT) {
+                    return;
+                }
+                if let Some(c) = ev.text.filter(|c| !c.is_control()) {
+                    list.push_char(c);
+                }
+            }
+        }
+    }
+
     fn close_tests(&mut self) {
         self.tests = None;
         self.restore_body();
@@ -2244,6 +2355,138 @@ impl EditorScreen {
                 }
             });
         }
+    }
+
+    // --- 控え（§8.4） ---
+
+    /// いまのセッションと未保存の内容。未保存の文書が無ければ `None`（控えは要らない）。
+    fn snapshot(&self) -> Option<Snapshot> {
+        let mut docs = Vec::with_capacity(self.tabs.len());
+        for t in &self.tabs {
+            let unsaved = (t.doc.is_modified() && !t.loading).then(|| {
+                let mut v = Vec::new();
+                let _ = (t.doc.save_writer())(&mut v);
+                v
+            });
+            docs.push(DocBackup {
+                path: t.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                title: t.title.clone(),
+                cursor: t.doc.selection().1,
+                scroll_line: t.view.viewport().top,
+                unsaved,
+            });
+        }
+        if docs.iter().all(|d| d.unsaved.is_none()) {
+            return None;
+        }
+        Some(Snapshot { saved_at_ms: 0, active: Some(self.active as u32), docs })
+    }
+
+    /// 控えのタイマーを、次に書く時刻に合わせる。
+    fn arm_backup(&mut self, cx: &mut LoopCx<'_>) {
+        match self.backup.next_deadline() {
+            Some(t) => cx.timers.set_after(TimerId::Backup, Duration::from_micros(t.saturating_sub(cx.now_us).max(1_000))),
+            None => cx.timers.cancel(TimerId::Backup),
+        }
+    }
+
+    /// 書く時機になった段の控えを書く（未保存の文書が無ければ控えを消す）。
+    fn write_backups(&mut self, cx: &mut LoopCx<'_>) {
+        // 復元を尋ねている間は、前回の控えを上書きしない
+        if self.restore_offer.is_some() {
+            return;
+        }
+        let due = self.backup.due(cx.now_us);
+        if !due.is_empty() {
+            match self.snapshot() {
+                Some(snap) => {
+                    for tier in due {
+                        self.saver.backup(tier, snap.clone(), cx);
+                        self.backup.note_written(tier);
+                    }
+                }
+                None => {
+                    self.saver.discard_backups(cx);
+                    self.backup.note_clean();
+                }
+            }
+        }
+        self.arm_backup(cx);
+    }
+
+    /// 起動時に控えが見つかった。未保存の内容があれば、復元するか尋ねる。
+    fn offer_restore(&mut self, found: Option<Restore>, cx: &mut LoopCx<'_>) {
+        let Some(r) = found else { return };
+        for n in &r.notes {
+            self.say(n.clone(), true);
+        }
+        if r.unsaved_docs().next().is_none() {
+            // セッションだけ（未保存の内容が無い）なら、尋ねずに片づける
+            self.saver.discard_backups(cx);
+            return;
+        }
+        self.restore_offer = Some(r);
+        self.status_due = true;
+    }
+
+    /// 復元の問いへの答え: Enter で復元、Esc で捨てる。ほかのキーは問いを出したまま。
+    fn restore_key(&mut self, ev: &KeyEvent, cx: &mut LoopCx<'_>) {
+        if ev.mods.contains(Mods::CTRL) || ev.mods.contains(Mods::ALT) {
+            return;
+        }
+        match ev.key {
+            Key::Enter => {
+                let r = self.restore_offer.take().expect("restore_offer");
+                self.restore(r, cx);
+            }
+            Key::Esc => {
+                self.restore_offer = None;
+                self.saver.discard_backups(cx);
+                self.say("前回の未保存の内容を捨てた", false);
+            }
+            _ => {}
+        }
+        self.status_due = true;
+    }
+
+    /// 控えの未保存の内容をタブに戻す（開いていなければ開く）。保存はしない（未保存の印が付く）。
+    fn restore(&mut self, r: Restore, cx: &mut LoopCx<'_>) {
+        let mut n = 0;
+        let mut last = None;
+        for d in r.snapshot.docs.into_iter() {
+            let Some(bytes) = d.unsaved else { continue };
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            let i = match &d.path {
+                Some(p) => {
+                    let path = PathBuf::from(p);
+                    self.open_path(&path, cx);
+                    self.tabs.iter().position(|t| t.path.as_deref() == Some(path.as_path()))
+                }
+                None => {
+                    let doc = self.cfg.backend.empty();
+                    self.open_doc(None, &d.title, doc, None);
+                    Some(self.tabs.len() - 1)
+                }
+            };
+            let Some(i) = i else { continue };
+            let t = &mut self.tabs[i];
+            if t.loading {
+                t.pending_restore = Some((text, d.cursor));
+            } else {
+                t.apply_restore(&text, d.cursor, &mut self.diag_store);
+            }
+            n += 1;
+            last = Some(i);
+        }
+        if let Some(i) = last {
+            self.activate(i);
+            self.set_focus(Focus::Editor);
+        }
+        self.tabs_dirty = true;
+        // 戻した内容はまだ未保存なので、控えはこの後の打鍵・タイマーで書き直される
+        self.backup.note_edit(cx.now_us);
+        self.arm_backup(cx);
+        self.say(format!("前回の未保存の内容を {n} 件戻した（まだ保存していない）"), false);
     }
 
     // --- Markdown ---
@@ -2346,6 +2589,22 @@ impl EditorScreen {
     fn update_status(&mut self) {
         self.status_due = false;
         let mut bg = palette::STATUS;
+        if let Some(r) = &self.restore_offer {
+            let n = r.unsaved_docs().count();
+            let names: Vec<&str> = r.unsaved_docs().map(|d| d.title.as_str()).take(2).collect();
+            self.status.set_left(&format!("前回の未保存 {n} 件: {}{}", names.join(" "), if n > 2 { " …" } else { "" }));
+            self.status.set_right("Enter 戻す  Esc 捨てる");
+            self.status.set_chips(Vec::new());
+            self.status.set_bg(palette::STATUS_RUN);
+            return;
+        }
+        if let Some(list) = &self.shortcuts {
+            self.status.set_left(&list.status_left());
+            self.status.set_right(&list.status_right());
+            self.status.set_chips(Vec::new());
+            self.status.set_bg(palette::STATUS);
+            return;
+        }
         if self.outline.is_some() {
             self.status.set_left("アウトライン");
             self.status.set_right("Enter 移動  Esc 閉じる");
@@ -2456,9 +2715,28 @@ impl Screen for EditorScreen {
         for f in self.cfg.files.clone() {
             self.open_path(&f, cx);
         }
+        // 前回の控え（§8.4）。storage スレッドは依頼の順に処理するので、この後の控えの
+        // 書き込みより先に読まれる
+        if let Some(job) = self.saver.restore_job() {
+            let tx = cx.results.clone();
+            cx.workers.storage.submit(move || {
+                tx.send(AppEvent::RestoreFound(job()));
+            });
+        }
         self.pump_highlight(Some(cx));
         self.blinks_left = BLINKS_AFTER_KEY;
         cx.timers.set_after(TimerId::CursorBlink, BLINK);
+    }
+
+    fn stop(&mut self) {
+        // 復元を尋ねている途中なら、前回の控えに手を付けない
+        if self.restore_offer.is_some() {
+            return;
+        }
+        // Ctrl+Q（未保存なら確かめてから）は控えを消す。シグナル（ランチャーの Esc 長押しなど）
+        // なら、未保存の内容を控えに書いてから終わる
+        let snap = if self.quit_clean { None } else { self.snapshot() };
+        self.saver.finish_backups(snap);
     }
 
     fn on_keys(&mut self, keys: &[KeyEvent], _raw: &[RawRecord], kb: &Keyboard, cx: &mut LoopCx<'_>) {
@@ -2476,6 +2754,9 @@ impl Screen for EditorScreen {
                         t.words = words;
                         t.loading = false;
                         t.detect_language();
+                        if let Some((text, cursor)) = t.pending_restore.take() {
+                            t.apply_restore(&text, cursor, &mut self.diag_store);
+                        }
                         t.view.invalidate();
                         // 読んだ中身がディスクの中身。空の仮の文書のときの記録と控えは捨てる
                         t.saved = Some(t.doc.version());
@@ -2592,6 +2873,7 @@ impl Screen for EditorScreen {
                 }
             }
             AppEvent::Remote(ev) => self.on_remote(ev, cx),
+            AppEvent::RestoreFound(found) => self.offer_restore(found, cx),
             AppEvent::MarkdownParsed { doc, parsed } => {
                 let Some(t) = self.tabs.iter_mut().find(|t| t.id == doc) else { return };
                 let version = t.doc.version();
@@ -2616,6 +2898,7 @@ impl Screen for EditorScreen {
         match id {
             TimerId::StatusDelay => self.status_due = true,
             TimerId::SkkFlush => self.flush_skk(cx),
+            TimerId::Backup => self.write_backups(cx),
             TimerId::Tick => {
                 // 実行中の経過時間と、ビルド係の「実行中 n 秒」
                 if self.term.as_ref().is_some_and(|t| t.running.is_some()) || self.progress.is_some() {
@@ -2687,12 +2970,27 @@ impl Screen for EditorScreen {
         if changed {
             self.tabs_dirty = false;
             self.tabs_shown = self.tabs.iter().map(|t| (t.id, t.doc.is_modified(), t.has_error())).collect();
-            let tabs = self.tabs.iter().map(|t| Tab { doc: t.id, title: t.title.clone(), modified: t.doc.is_modified(), error: t.has_error() }).collect();
-            self.tabbar.set_tabs(tabs, self.active);
+            let mut tabs: Vec<Tab> = self.tabs.iter().map(|t| Tab { doc: t.id, title: t.title.clone(), modified: t.doc.is_modified(), error: t.has_error() }).collect();
+            let mut active = self.active;
+            if self.shortcuts.is_some() {
+                active = tabs.len();
+                tabs.push(Tab { doc: DocId(u32::MAX), title: "ショートカット".into(), modified: false, error: false });
+            }
+            self.tabbar.set_tabs(tabs, active);
             self.tabbar.set_inset(if self.tree_open { SIDE_W } else { 0 });
             self.status_due = true;
         }
         damage |= self.tabbar.render(cx, regions.tabs);
+        if let Some(list) = self.shortcuts.as_mut() {
+            // 本文（ツリーとエディタとパネル）の全体を覆う（モック 5・6）
+            let body = Rect::new(0, regions.tabs.bottom() as i16, Rect::SCREEN.w, (regions.status.y as i32 - regions.tabs.bottom()) as u16);
+            damage |= list.render(cx, body);
+            if self.status_due {
+                self.update_status();
+            }
+            damage |= self.status.render(cx, regions.status);
+            return damage;
+        }
         if self.outline.is_some() || self.tests.is_some() {
             // 本文（ツリーとエディタ）の全体を覆う（モック 14・15）
             let body = Rect::new(0, regions.tabs.bottom() as i16, Rect::SCREEN.w, (regions.status.y as i32 - regions.tabs.bottom()) as u16);

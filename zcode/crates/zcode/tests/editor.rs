@@ -1044,3 +1044,44 @@ fn run_tests_needs_a_remote_language() {
     assert!(ed.message().is_some_and(|m| m.contains("試験を実行できない")), "{:?}", ed.message());
     assert!(fake.jobs().is_empty());
 }
+
+// --- ショートカット一覧（段階 6、モック 5・6） ---
+
+#[test]
+fn f1_lists_shortcuts_filters_and_runs_the_selected_command() {
+    let mut lp = Loop::new();
+    let mut ed = editor_with(DocBackend::Simple, "abc\ndef\n");
+    lp.keys(&mut ed, &[key(Key::F(1))]);
+    assert_eq!(ed.shortcuts_query(), Some(""));
+    check_golden(&mut ed, "shortcuts.png");
+    // 日本語の操作名で絞り込み、Enter でその操作を実行する
+    lp.type_str(&mut ed, "すべて選択");
+    assert_eq!(ed.shortcuts_query(), Some("すべて選択"));
+    lp.keys(&mut ed, &[key(Key::Enter)]);
+    assert_eq!(ed.shortcuts_query(), None, "実行したら閉じる");
+    assert_eq!(ed.active_doc().unwrap().selected_text(), "abc\ndef");
+    // BackSpace で戻し、Esc で閉じる。F1 でも閉じる
+    lp.keys(&mut ed, &[key(Key::F(1))]);
+    lp.type_str(&mut ed, "選択");
+    check_golden(&mut ed, "shortcuts-filter.png");
+    lp.keys(&mut ed, &[key(Key::Backspace), key(Key::Backspace)]);
+    assert_eq!(ed.shortcuts_query(), Some(""));
+    lp.keys(&mut ed, &[key(Key::Esc)]);
+    assert_eq!(ed.shortcuts_query(), None);
+    lp.keys(&mut ed, &[key(Key::F(1)), key(Key::F(1))]);
+    assert_eq!(ed.shortcuts_query(), None);
+    // 一覧の打鍵は文書に入らない
+    assert_eq!(doc_text(ed.active_doc().unwrap()), "abc\ndef");
+}
+
+fn check_golden(ed: &mut EditorScreen, name: &str) {
+    let fonts = FontConfig::default();
+    if !fonts.available() {
+        return;
+    }
+    let canvas = zcode::render_screen(ed, &fonts).unwrap();
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden").join(name);
+    if let Err(e) = zc_display::png::check_golden(&canvas, path) {
+        panic!("{e}");
+    }
+}

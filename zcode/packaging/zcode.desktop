@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=zcode
+Comment=VS Code-like code editor (Markdown, SKK, terminal, F5 run)
+Exec=/usr/share/APPLaunch/bin/zcode
+Icon=share/images/zcode.png
+Terminal=false
+Categories=Development;
+StartupNotify=false

@@ -10,7 +10,7 @@ use crate::doc::SaveWriter;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zc_core::{DocId, Version};
-use zc_store::{BackupDirs, Content, SaveOutcome, StoreRequest, StoreResponse, StoreService};
+use zc_store::{BackupDirs, Content, Restore, SaveOutcome, Snapshot, StoreRequest, StoreResponse, StoreService, Tier};
 
 /// 保存の依頼。
 pub struct SaveRequest {
@@ -48,6 +48,16 @@ pub trait Saver {
     /// SKK の個人辞書（`~/.skk-uim-jisyo`）に学習した語を書き戻す（storage スレッドで、
     /// uim-skk と同じロックを取って読み直し、重ねて丸ごと書く）。
     fn skk_sync(&mut self, _changes: Vec<zc_store::DictChange>, _cx: &mut LoopCx<'_>) {}
+    /// 控え（未保存の内容とセッション）を書く（storage スレッドで。前回と同じなら書かない）。
+    fn backup(&mut self, _tier: Tier, _snapshot: Snapshot, _cx: &mut LoopCx<'_>) {}
+    /// 控えを全部消す（storage スレッドで）。
+    fn discard_backups(&mut self, _cx: &mut LoopCx<'_>) {}
+    /// 終了の直前: 控えを書く、または消す（その場で。storage スレッドを待たない）。
+    fn finish_backups(&mut self, _snapshot: Option<Snapshot>) {}
+    /// 起動時: 復元の候補を読む仕事（storage スレッドで走らせる）。
+    fn restore_job(&self) -> Option<Box<dyn FnOnce() -> Option<Restore> + Send>> {
+        None
+    }
 }
 
 /// `zc-store` の storage サービスに依頼する。
@@ -109,5 +119,31 @@ impl Saver for StoreSaver {
         let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return };
         let dict = zc_store::SkkUserDict::uim_default(&home);
         zc_store::submit(&cx.workers.storage, &self.svc, StoreRequest::SkkSync { dict, changes }, cx.results.clone(), wrap);
+    }
+
+    fn backup(&mut self, tier: Tier, snapshot: Snapshot, cx: &mut LoopCx<'_>) {
+        zc_store::submit(&cx.workers.storage, &self.svc, StoreRequest::Backup { tier, snapshot }, cx.results.clone(), wrap);
+    }
+
+    fn discard_backups(&mut self, cx: &mut LoopCx<'_>) {
+        zc_store::submit(&cx.workers.storage, &self.svc, StoreRequest::DiscardBackups, cx.results.clone(), wrap);
+    }
+
+    fn finish_backups(&mut self, snapshot: Option<Snapshot>) {
+        match snapshot {
+            Some(snapshot) => {
+                for tier in Tier::ALL {
+                    self.svc.handle(StoreRequest::Backup { tier, snapshot: snapshot.clone() });
+                }
+            }
+            None => {
+                self.svc.handle(StoreRequest::DiscardBackups);
+            }
+        }
+    }
+
+    fn restore_job(&self) -> Option<Box<dyn FnOnce() -> Option<Restore> + Send>> {
+        let svc = self.svc.clone();
+        Some(Box::new(move || svc.restore_candidates()))
     }
 }

@@ -1,7 +1,7 @@
 # zcode
 
-VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書く。段階 5（Markdown のライブ
-プレビュー）まで実装済み（`docs/design.md` §11）。
+VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書く。段階 6（ショートカット一覧・
+控え・.deb）まで実装済み（`docs/design.md` §11）。
 
 ## 文書
 
@@ -319,6 +319,26 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - `zc-markdown` の `edited` はブロック単位で解析し直し、`false` のときは全体の解析と同じ結果になる
   （ランダムな編集の試験で確かめている）。`]:`（参照リンクの定義）がある文書は毎回 `true`
 - レイアウトは解析結果を `try_borrow` で読む。`MdDocument` を `borrow_mut` したまま描画しない
+
+## 段階 6 で決めたこと（2026-11-17、モック 5・6、§8.4）
+
+- F1（Fn+1）でショートカット一覧（`zc_ui::ShortcutList`）。行は `commands::BINDINGS` から作る（キー割り当てと
+  同じ表）。文字で絞り込み（操作名の部分一致、または「ctrl s」のようなキー名）、↑↓ で選び Enter で実行、
+  Esc / F1 で閉じる。開いている間はタブバーに「ショートカット」のタブを足す。Fn レイヤーの物理キー
+  （Fn+5 など）は `zc-ui` の `shortcuts::fn_physical`（矢印・Home/End などの位置は実機で未確認）
+- 控え: 操作が 2 秒止まったら段 1（RAM）、60 秒止まったか Ctrl+Tab でタブを切り替えたら段 2（SD）を
+  storage スレッドで書く（`BackupPolicy`、`TimerId::Backup`）。未保存の文書が無くなったら控えを消す。
+  Ctrl+Q での終了は控えを消し、シグナル（ランチャーの Esc 長押しなど）での終了は `Screen::stop` で
+  未保存の内容を両方の段にその場で書く
+- 起動時: storage スレッドで控えを読み（`Saver::restore_job`）、ディスクと違う未保存の内容があれば
+  ステータスバー（橙）で「Enter 戻す / Esc 捨てる」と尋ねる。答えるまでほかのキーは効かず、控えも
+  上書きしない。戻した内容は「ディスクの中身を 1 回の編集で置き換えた」形（未保存の印が付き、1 回の
+  取り消しでディスクの中身に戻る）。読み込み中のタブには読み終わってから入れる
+- .deb: `./build.sh <版>` で `zcode_<版>_arm64.deb`。中身は `/usr/share/APPLaunch/{bin/zcode（起動
+  スクリプト）,lib/zcode/zcode,applications/zcode.desktop,share/images/zcode.png}`。起動スクリプトは
+  `~/code` を作ってそこを作業フォルダにし、標準エラーは `$XDG_RUNTIME_DIR/zcode.log`（RAM）へ。
+  実行環境（llrt・tsc・zc-remote）は .deb に入れない（`tools/install-runtimes.sh` で別に入れる）。
+  CI は `./build.sh 0.0.0-ci` で .deb の中身と権限まで確かめる
 
 ## 次にやること
 

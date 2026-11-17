@@ -1,0 +1,14 @@
+Package: zcode
+Version: 0.1
+Section: editors
+Priority: optional
+Architecture: arm64
+Maintainer: Uchida <uchida@local>
+Depends: libc6
+Recommends: skkdic, python3
+Description: VS Code-like code editor for CardputerZero APPLaunch
+ Draws directly on the built-in LCD (fb0) and reads the keyboard (evdev).
+ Syntax highlighting, file tree, built-in SKK Japanese input (shares
+ ~/.skk-uim-jisyo with uim-skk), Markdown live preview, integrated
+ terminal with F5 run, word completion, save-time checks, outline,
+ shortcut list (F1) and crash/power-loss backups of unsaved edits.
