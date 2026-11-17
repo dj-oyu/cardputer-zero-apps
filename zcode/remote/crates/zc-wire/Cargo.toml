@@ -1,0 +1,12 @@
+[package]
+name = "zc-wire"
+description = "実機 (zc-remote) ⇔ ビルド係 (zc-buildd) の約束: メッセージ・目録と ID・WebSocket の枠。I/O を持たない"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true

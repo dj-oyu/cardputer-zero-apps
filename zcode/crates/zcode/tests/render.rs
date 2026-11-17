@@ -200,8 +200,11 @@ fn editor_check_error_screen() {
     // 5 行目（0 始まり）の `:` を消して、チェックの結果が届いたことにする
     type_keys(&mut ed, &[KeyEvent::new(Key::Up, Mods::NONE), KeyEvent::new(Key::End, Mods::NONE), KeyEvent::new(Key::Backspace, Mods::NONE), KeyEvent::new(Key::Down, Mods::NONE)]);
     let doc = ed.active_doc_id().unwrap();
-    let diag = zc_intel::Diagnostic { line: 5, col: None, severity: zc_intel::Severity::Error, message: "SyntaxError: expected ':'".into() };
-    drive(&mut ed, |ed, cx| ed.on_event(zcode::app::AppEvent::Checked { doc, result: Ok(vec![diag]) }, cx));
+    let diag = zc_intel::Diagnostic::at_line(5, zc_intel::Severity::Error, "SyntaxError: expected ':'");
+    // 実機の構文チェックの結果は、絶対パスの付いた DiagnosticSet で届く（出どころ Syntax）
+    let file = zc_core::FileDiagnostics { path: std::sync::Arc::from(root.join("blink/main.py").as_path()), base: None, diags: vec![diag] };
+    let set = zc_core::DiagnosticSet { source: zc_core::DiagSource::Syntax, complete: false, files: vec![file] };
+    drive(&mut ed, |ed, cx| ed.on_event(zcode::app::AppEvent::Checked { doc, result: Ok(set) }, cx));
     check(&mut ed, "editor-check.png");
     let _ = fs::remove_dir_all(&root);
 }
@@ -219,5 +222,50 @@ fn editor_outline_screen() {
     type_keys(&mut ed, &chars("ma"));
     assert!(ed.outline_rows().is_some());
     check(&mut ed, "editor-outline.png");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// モック 15: 試験の結果の一覧（F6。落ちた試験が先、ステータスバーに失敗のメッセージ）。
+#[test]
+fn editor_tests_screen() {
+    use zc_core::{Key, KeyEvent};
+    use zc_remote_ipc::{Backend, DoneStatus, JobTag, TestCase, TestReport};
+    use zcode::app::AppEvent;
+    use zcode::remote::{RemoteEvent, RemoteJob, RemoteReq};
+    /// 偽物のビルド係（依頼の番号は 1）。
+    struct Fake;
+    impl zcode::editor::RemoteLink for Fake {
+        fn submit(&mut self, _job: RemoteJob, _cx: &mut zcode::app::LoopCx<'_>) -> RemoteReq {
+            RemoteReq(1)
+        }
+    }
+    let root = mock_workspace("tests");
+    let proj = root.join("blink");
+    let cfg = EditorConfig { backend: DocBackend::Simple, root: root.clone(), files: vec![] };
+    let mut ed = EditorScreen::new(cfg);
+    ed.set_remote(Box::new(Fake));
+    ed.set_tree_open(false);
+    ed.open_doc(Some(proj.join("src/main.rs")), "main.rs", Box::new(SimpleDoc::from_text("fn main() {}\n")), None);
+    ed.open_doc(Some(proj.join("src/lib.rs")), "lib.rs", Box::new(SimpleDoc::from_text("pub fn parse(s: &str) -> usize {\n    s.len()\n}\n")), None);
+    type_keys(&mut ed, &[KeyEvent::new(Key::F(6), Mods::NONE)]);
+    let case = |name: &str, passed: bool, loc: Option<(&str, u32)>, message: &str| TestCase { name: name.into(), passed, location: loc.map(|(p, l)| (p.to_string(), l)), message: message.into() };
+    let report = TestReport {
+        passed: 3,
+        failed: 2,
+        ignored: 1,
+        cases: vec![
+            case("tests::parse_one", true, None, ""),
+            case("tests::parse_empty", false, Some(("src/lib.rs", 41)), "thread 'tests::parse_empty' panicked at src/lib.rs:42:9:\nassertion `left == right` failed\n  left: 1\n right: 0"),
+            case("tests::parse_two", true, None, ""),
+            case("wrap::tests::wide_chars", false, Some(("src/wrap.rs", 17)), "index out of bounds"),
+            case("wrap::tests::ascii", true, None, ""),
+        ],
+    };
+    drive(&mut ed, |ed, cx| {
+        ed.on_event(AppEvent::Remote(RemoteEvent::Tests { req: RemoteReq(1), root: proj.clone(), report }), cx);
+        ed.on_event(AppEvent::Remote(RemoteEvent::Done { req: Some(RemoteReq(1)), tag: JobTag(1), status: DoneStatus::Failed, exit: 101, backend: Backend::Pc, elapsed_ms: 0, message: String::new() }), cx);
+    });
+    assert_eq!(ed.test_list().map(|(rows, sel)| (rows.len(), sel)), Some((5, 0)));
+    check(&mut ed, "editor-tests.png");
     let _ = fs::remove_dir_all(&root);
 }

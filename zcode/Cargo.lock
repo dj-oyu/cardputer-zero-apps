@@ -544,6 +544,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zc-remote-ipc"
+version = "0.1.0"
+dependencies = [
+ "zc-core",
+]
+
+[[package]]
 name = "zc-skk"
 version = "0.1.0"
 dependencies = [
@@ -601,6 +608,7 @@ dependencies = [
  "zc-input",
  "zc-intel",
  "zc-markdown",
+ "zc-remote-ipc",
  "zc-skk",
  "zc-store",
  "zc-term",

@@ -1,0 +1,29 @@
+# 実機に入れる実行環境の版と SHA-256（install-runtimes.sh が読む）。docs/stage3-design.md §10.3。
+#
+# 形: <名前> <版> <SHA-256> <ファイル名> <取ってくる場所（PC で取る。無ければ -）>
+# 版は数字で始める（置き場のフォルダ名 <名前>-<版> を見分けるため）。SHA-256 が決まっていない
+# 版の行は書かない（install-runtimes.sh は 16 進 64 桁でない行を断る）。
+#
+# llrt と llrt-types は自分でビルドする（runtimes/llrt/build.ps1 → runtimes/llrt/out/）。ビルドは
+# 再現可能とは限らないので、SHA-256 は「この版をこの手順で作ったもの」の 1 つを書く。作り直したら
+# 書き換える（build.sh が隣に <ファイル名>.sha256 を出す）。
+# - llrt 0.10.0-beta: 2026-11-16 に build.sh（no-sdk）で作ったもの（開発コンテナのボリューム
+#   llrt-build の target/aarch64-unknown-linux-musl/release/llrt。10,769,376 バイト）。大きさは
+#   この日に実機で動かしたもの（10.8MB）と合うが、同じファイルかは実機で確かめていない
+#   （入れるときに install-runtimes.sh が --version で動くことは確かめる）
+# - llrt-types 0.10.0-beta: v0.10.0-beta（b7ccc148）の types/*.d.ts 34 個を build.sh の tar の
+#   行でまとめたもの（名前の順・時刻 0・持ち主 0 にそろえるので、同じ中身なら同じ SHA-256）
+#
+# tsc は npm の公開物そのもの。SHA-256 は tgz を取って計算し、npm の integrity（SHA-512）とも
+# 突き合わせた（2026-11-17）:
+#   sha512-Qh4eU4/y3yDjnfjjyPYihMj5/ODIlmt+Bzu17OI+fiSRDW57QmU5SiN63exPRNJPKUzcc1INa1NXdrJ+MqHjUQ==
+#   取り方（PC で）: curl -fLO https://registry.npmjs.org/@typescript/typescript-linux-arm64/-/typescript-linux-arm64-7.0.2.tgz
+#
+# zc-remote は zcode/remote/build.sh が作る out/zc-remote（aarch64。開発コンテナの中では、同じ
+# ソースから 2 回作って同じ SHA-256 になることを確かめた。2026-11-17、1,774,576 バイト）。
+# **zc-remote・zc-wire・zc-core・zc-remote-ipc のソースか依存を変えたら SHA-256 は変わる**ので、
+# 作り直したら sha256sum out/zc-remote でこの行を書き換える（合わないファイルは入らない）。
+llrt        0.10.0-beta  63b260768a110d1641185674aecbfa4516dcf29116f89a845ccdfef848e2733f  llrt-0.10.0-beta-linux-a53-no-sdk   -
+llrt-types  0.10.0-beta  b20627c08926071143085179d8a0e98554e3a4f18824adc888a9459df7df4a0a  llrt-types-0.10.0-beta.tar          -
+tsc         7.0.2        c83d931ac9dd7549cde6e71246aa9d6a9812843023df3e277fe3b5dcf41dd0ea  typescript-linux-arm64-7.0.2.tgz    https://registry.npmjs.org/@typescript/typescript-linux-arm64/-/typescript-linux-arm64-7.0.2.tgz
+zc-remote   0.1.0        98696833e15eead525cfefa8f15802d04c7f5c9f49cf685e0165d355c52c43e1  zc-remote                           -

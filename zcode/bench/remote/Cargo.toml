@@ -1,0 +1,26 @@
+[package]
+name = "remotebench"
+version = "0.1.0"
+edition = "2021"
+description = "外部ビルド（zc-remote）の実機側の計測: SHA-256・zstd の展開・木の stat 走査・TLS のハンドシェイクの CPU・暗号の速さ"
+publish = false
+
+# 版は zcode/remote/Cargo.lock と同じものに合わせる（zc-remote が実際に使うもの）。
+[dependencies]
+sha2 = "0.10"
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+ruzstd = "0.8"
+# 試験用の証明書をその場で作る（ベンチの中だけ。zc-remote には入れない）
+rcgen = { version = "0.13", default-features = false, features = ["ring", "crypto"] }
+
+# zc-remote と同じ（大きさ優先・thin LTO）。速さを見るベンチなので、実物と同じ設定で測る。
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# zcode 本体・remote のワークスペースに含めない (単独でビルドする)
+[workspace]

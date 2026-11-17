@@ -3,7 +3,9 @@
 resolver = "2"
 members = ["crates/*"]
 # ベンチマークは各自が [workspace] を持つ単独の crate
-exclude = ["bench"]
+# remote/ は別のワークスペース（ring / rustls / serde_json を zcode の依存に混ぜないため。
+# docs/stage3-design.md §3）
+exclude = ["bench", "remote"]
 
 [workspace.package]
 version = "0.1.0"
@@ -24,6 +26,7 @@ zc-term = { path = "crates/zc-term" }
 zc-intel = { path = "crates/zc-intel" }
 zc-store = { path = "crates/zc-store" }
 zc-ui = { path = "crates/zc-ui" }
+zc-remote-ipc = { path = "crates/zc-remote-ipc" }
 # 外部の crate は pure Rust だけ (C ライブラリに依存するものは使わない)
 libc = "0.2"
 swash = "0.2"

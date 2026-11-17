@@ -4,17 +4,20 @@
 //! 本物の `zc_buffer::Buffer` の両方で回す（`both!`）。
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use zc_core::rt::{main_channel, MainReceiver, MainSender};
 use zc_core::time::now_us;
-use zc_core::{Canvas, Damage, Key, KeyEvent, Mods, Pos, Priority, RowRange, Theme};
+use zc_core::{Canvas, Damage, DiagSource, Diagnostic, DiagnosticSet, FileDiagnostics, Key, KeyEvent, Mods, Pos, Priority, RowRange, Severity, Theme};
 use zc_font::{FontConfig, Fonts, RasterMode};
 use zc_ui::layout::CODE_LINE_H;
 use zc_ui::RenderCx;
 use zcode::app::{AppEvent, LoopCx, Screen, TimerId, Timers, Workers};
 use zcode::doc::{DocBackend, SimpleDoc};
 use zcode::edbench::{doc_text, EdBenchKind, EditorBench};
-use zcode::editor::{EditorConfig, EditorScreen};
+use zc_remote_ipc::{Backend, DoneStatus, FileDiags, JobKind, JobTag, Phase, RemoteLang, SubmitFlags, TestCase, TestReport};
+use zcode::editor::{EditorConfig, EditorScreen, RemoteLink};
+use zcode::remote::{RemoteEvent, RemoteJob, RemoteReq};
 
 /// イベントループの代わり。
 struct Loop {
@@ -51,6 +54,7 @@ impl Loop {
     fn pump(&mut self, ed: &mut EditorScreen) {
         self.workers.batch.wait_idle();
         self.workers.storage.wait_idle();
+        self.workers.check.wait_idle();
         let evs: Vec<AppEvent> = self.rx.drain().collect();
         for ev in evs {
             self.with(|cx| ed.on_event(ev, cx));
@@ -628,7 +632,7 @@ fn save_runs_syntax_check(backend: DocBackend) {
     lp.with(|cx| ed.start(cx));
     lp.pump(&mut ed);
     lp.keys(&mut ed, &[ctrl('s')]);
-    lp.pump(&mut ed); // 保存 → チェックを batch に出す
+    lp.pump(&mut ed); // 保存 → チェックを check ワーカーに出す
     lp.pump(&mut ed); // チェックの結果
     let diags = ed.diagnostics();
     assert_eq!(diags.len(), 1, "{diags:?}");
@@ -649,4 +653,394 @@ fn save_runs_syntax_check(backend: DocBackend) {
     assert!(ed.active_view().unwrap().marks().is_empty());
     assert!(fs::read_to_string(&p).unwrap().contains("range(3):"));
     let _ = fs::remove_dir_all(&dir);
+}
+
+// --- 診断の置き場とビルド係（docs/stage3-design.md §13、課題 Z3 の受け入れ） ---
+
+/// 偽物のビルド係: 頼まれたジョブを覚えるだけ。結果は試験が `AppEvent::Remote` で流す。
+/// 依頼の番号は 1 から順。
+#[derive(Clone, Default)]
+struct FakeRemote(Arc<Mutex<Vec<RemoteJob>>>);
+
+impl RemoteLink for FakeRemote {
+    fn submit(&mut self, job: RemoteJob, _cx: &mut LoopCx<'_>) -> RemoteReq {
+        let mut v = self.0.lock().unwrap();
+        v.push(job);
+        RemoteReq(v.len() as u32)
+    }
+}
+
+impl FakeRemote {
+    fn jobs(&self) -> Vec<RemoteJob> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl Loop {
+    /// 専用スレッドからの知らせを流す。
+    fn remote(&mut self, ed: &mut EditorScreen, ev: RemoteEvent) {
+        self.with(|cx| ed.on_event(AppEvent::Remote(ev), cx));
+    }
+    /// 実機の構文チェックの結果（絶対パス・版なし）を流す。
+    fn syntax(&mut self, ed: &mut EditorScreen, file: &Path, diags: &[(u32, &str)]) {
+        let doc = ed.active_doc_id().unwrap();
+        let set = DiagnosticSet { source: DiagSource::Syntax, complete: false, files: vec![FileDiagnostics { path: Arc::from(file), base: None, diags: diags.iter().map(|&(l, m)| err(l, m)).collect() }] };
+        self.with(|cx| ed.on_event(AppEvent::Checked { doc, result: Ok(set) }, cx));
+    }
+}
+
+fn err(line: u32, msg: &str) -> Diagnostic {
+    Diagnostic::at_line(line, Severity::Error, msg)
+}
+fn scanned(tag: u32, root: &Path) -> RemoteEvent {
+    RemoteEvent::Phase { req: None, tag: JobTag(tag), root: root.to_path_buf(), phase: Phase::Scanned, done: 0, total: 0 }
+}
+fn remote_diags(tag: u32, root: &Path, complete: bool, files: &[(&str, &[(u32, &str)])]) -> RemoteEvent {
+    let files = files.iter().map(|(p, ds)| FileDiags { path: p.to_string(), diags: ds.iter().map(|&(l, m)| err(l, m)).collect() }).collect();
+    RemoteEvent::Diagnostics { req: None, tag: JobTag(tag), root: root.to_path_buf(), complete, files }
+}
+fn done(req: Option<u32>, tag: u32, status: DoneStatus) -> RemoteEvent {
+    RemoteEvent::Done { req: req.map(RemoteReq), tag: JobTag(tag), status, exit: 0, backend: Backend::Pc, elapsed_ms: 0, message: String::new() }
+}
+fn lines_of(ed: &EditorScreen) -> Vec<u32> {
+    ed.diagnostics().iter().map(|d| d.line).collect()
+}
+
+/// 作業フォルダの下に Rust のプロジェクト（`proj/src/lib.rs`・`wrap.rs`、どちらも 10 行）を作り、
+/// `lib.rs` を開いたエディタ。ビルド係は偽物。戻り値は（作業フォルダ, プロジェクトの根, …）。
+fn rust_project(backend: DocBackend, tag: &str) -> (PathBuf, PathBuf, EditorScreen, Loop, FakeRemote) {
+    let dir = tmp_dir(tag);
+    let proj = dir.join("proj");
+    fs::create_dir_all(proj.join("src")).unwrap();
+    let body: String = (0..10).map(|i| format!("fn f{i}() {{}}\n")).collect();
+    fs::write(proj.join("src/lib.rs"), &body).unwrap();
+    fs::write(proj.join("src/wrap.rs"), &body).unwrap();
+    let mut lp = Loop::new();
+    let mut ed = EditorScreen::new(EditorConfig { backend, root: dir.clone(), files: vec![proj.join("src/lib.rs")] });
+    let fake = FakeRemote::default();
+    ed.set_remote(Box::new(fake.clone()));
+    lp.with(|cx| ed.start(cx));
+    lp.pump(&mut ed);
+    (dir, proj, ed, lp, fake)
+}
+
+both!(syntax_and_remote_diagnostics_show_together, syntax_and_remote_diagnostics_show_together_simple, syntax_and_remote_diagnostics_show_together_buffer);
+fn syntax_and_remote_diagnostics_show_together(backend: DocBackend) {
+    let (dir, proj, mut ed, mut lp, _fake) = rust_project(backend, "both");
+    let lib = proj.join("src/lib.rs");
+    // 実機の構文チェック（絶対パス）と、ビルド係（根 + 相対パス）が同じファイルに付く
+    lp.syntax(&mut ed, &lib, &[(1, "expected `;`")]);
+    lp.remote(&mut ed, remote_diags(1, &proj, true, &[("src/lib.rs", &[(4, "E0308: mismatched types")])]));
+    assert_eq!(lines_of(&ed), [1, 4]);
+    assert_eq!(ed.active_view().unwrap().marks().len(), 2);
+    // 右に出すのは、このファイルの最初の診断（出どころによらず行の順）
+    assert_eq!(ed.message(), Some("2 行: expected `;`"));
+    // 同じ行・同じメッセージが両方から出たら、1 つに数える
+    lp.syntax(&mut ed, &lib, &[(1, "expected `;`"), (4, "E0308: mismatched types")]);
+    assert_eq!(lines_of(&ed), [1, 4]);
+    // 構文チェックが空で返っても、ビルド係の診断は残る
+    lp.syntax(&mut ed, &lib, &[]);
+    assert_eq!(lines_of(&ed), [4]);
+    // ビルド係の完全な結果が空なら消える。構文チェックの分は消さない
+    lp.syntax(&mut ed, &lib, &[(2, "x")]);
+    lp.remote(&mut ed, remote_diags(2, &proj, true, &[]));
+    assert_eq!(lines_of(&ed), [2]);
+    // 保存時の check をビルド係がした（成功）なら、前の構文チェックの結果は古いので消える
+    lp.keys(&mut ed, &[ctrl('s')]);
+    lp.pump(&mut ed);
+    lp.remote(&mut ed, done(Some(1), 3, DoneStatus::Ok));
+    assert!(ed.diagnostics().is_empty());
+    assert!(ed.active_view().unwrap().marks().is_empty());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+both!(late_remote_diagnostics_follow_edits, late_remote_diagnostics_follow_edits_simple, late_remote_diagnostics_follow_edits_buffer);
+fn late_remote_diagnostics_follow_edits(backend: DocBackend) {
+    let (dir, proj, mut ed, mut lp, fake) = rust_project(backend, "late");
+    // ジョブの走査が済んだ（このときの保存済みの版が基準）。そのあと、先頭に 2 行足す
+    lp.remote(&mut ed, scanned(7, &proj));
+    lp.keys(&mut ed, &[KeyEvent::new(Key::Home, Mods::CTRL)]);
+    lp.type_str(&mut ed, "// a\n// b\n");
+    // 数秒遅れて届いた診断（保存した中身の 5 行目）は、今の 7 行目に付く
+    lp.remote(&mut ed, remote_diags(7, &proj, true, &[("src/lib.rs", &[(4, "late")])]));
+    assert_eq!(lines_of(&ed), [6]);
+    assert_eq!(ed.active_view().unwrap().marks()[0].line, 6);
+    lp.remote(&mut ed, done(None, 7, DoneStatus::Failed));
+    // 付いたあとの編集でも動く
+    lp.type_str(&mut ed, "// c\n");
+    assert_eq!(lines_of(&ed), [7]);
+    // 保存すると、基準はその版になる（保存時の check を頼む）
+    lp.keys(&mut ed, &[ctrl('s')]);
+    lp.pump(&mut ed);
+    let jobs = fake.jobs();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!((jobs[0].kind, jobs[0].lang), (JobKind::Check, RemoteLang::Rust));
+    assert_eq!(jobs[0].file, proj.join("src/lib.rs"));
+    lp.remote(&mut ed, RemoteEvent::Phase { req: Some(RemoteReq(1)), tag: JobTag(8), root: proj.clone(), phase: Phase::Scanned, done: 0, total: 0 });
+    assert_eq!(ed.remote_progress().as_deref(), Some("ビルド係: 準備中"));
+    lp.type_str(&mut ed, "// d\n");
+    // 保存した中身（13 行）の 8 行目 → 1 行足したので 9 行目
+    lp.remote(&mut ed, remote_diags(8, &proj, true, &[("src/lib.rs", &[(7, "late")])]));
+    assert_eq!(lines_of(&ed), [8]);
+    lp.remote(&mut ed, done(Some(1), 8, DoneStatus::Failed));
+    assert_eq!(ed.remote_progress(), None);
+    // 行を消して、診断の行がファイルの外になっても、波線は文書の中に収まる
+    lp.keys(&mut ed, &[ctrl('a'), key(Key::Backspace)]);
+    assert_eq!(lines_of(&ed), [0]);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+both!(incomplete_results_keep_squiggles, incomplete_results_keep_squiggles_simple, incomplete_results_keep_squiggles_buffer);
+fn incomplete_results_keep_squiggles(backend: DocBackend) {
+    let (dir, proj, mut ed, mut lp, _fake) = rust_project(backend, "partial");
+    let wrap = proj.join("src/wrap.rs");
+    lp.with(|cx| ed.open_path(&wrap, cx));
+    lp.pump(&mut ed);
+    assert_eq!(ed.active_path(), Some(wrap.as_path()));
+    // 別のプロジェクト（開いていないファイル）の診断も置き場にある
+    let other = dir.join("other");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("x.rs"), "fn x() {}\nfn y() {}\n").unwrap();
+    lp.remote(&mut ed, remote_diags(1, &other, true, &[("x.rs", &[(1, "other")])]));
+    // 完全な結果: 2 つのファイルに付く
+    lp.remote(&mut ed, remote_diags(2, &proj, true, &[("src/lib.rs", &[(3, "a")]), ("src/wrap.rs", &[(5, "b")])]));
+    assert_eq!(lines_of(&ed), [5]);
+    // 取り消し・途中で切れた結果（complete でない）: 出てこなかったファイルの波線は消さない
+    lp.remote(&mut ed, remote_diags(3, &proj, false, &[("src/lib.rs", &[])]));
+    assert_eq!(lines_of(&ed), [5]);
+    lp.keys(&mut ed, &[KeyEvent::new(Key::Tab, Mods::CTRL)]);
+    assert!(ed.diagnostics().is_empty(), "出てきたファイルは置き換わる");
+    // 完全な結果: 出てこなかったファイルの波線は消える
+    lp.remote(&mut ed, remote_diags(4, &proj, true, &[("src/lib.rs", &[(3, "a")])]));
+    assert_eq!(lines_of(&ed), [3]);
+    lp.keys(&mut ed, &[KeyEvent::new(Key::Tab, Mods::CTRL)]);
+    assert!(ed.diagnostics().is_empty());
+    // ほかのプロジェクトの分は消えていない。開いたときに付く
+    lp.with(|cx| ed.open_path(&other.join("x.rs"), cx));
+    lp.pump(&mut ed);
+    assert_eq!(lines_of(&ed), [1]);
+    assert_eq!(ed.active_view().unwrap().marks().len(), 1);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+both!(superseded_remote_results_are_dropped, superseded_remote_results_are_dropped_simple, superseded_remote_results_are_dropped_buffer);
+fn superseded_remote_results_are_dropped(backend: DocBackend) {
+    let (dir, proj, mut ed, mut lp, _fake) = rust_project(backend, "stale");
+    // F5 のビルド（1）の走査のあとで、保存時の check（2）が走査した。結果は 2 が先に届く
+    lp.remote(&mut ed, scanned(1, &proj));
+    lp.remote(&mut ed, scanned(2, &proj));
+    lp.remote(&mut ed, remote_diags(2, &proj, true, &[("src/lib.rs", &[(3, "new")])]));
+    lp.remote(&mut ed, remote_diags(1, &proj, true, &[("src/lib.rs", &[(5, "old")])]));
+    assert_eq!(lines_of(&ed), [3], "古い木の結果で上書きしない");
+    lp.remote(&mut ed, done(None, 2, DoneStatus::Failed));
+    lp.remote(&mut ed, done(None, 1, DoneStatus::Failed));
+    // 取り消された check（3）の途中までの結果は、次の check（4）が走査済みなら捨てる
+    lp.remote(&mut ed, scanned(3, &proj));
+    lp.remote(&mut ed, scanned(4, &proj));
+    lp.remote(&mut ed, remote_diags(3, &proj, false, &[("src/lib.rs", &[(8, "cancelled")])]));
+    assert_eq!(lines_of(&ed), [3]);
+    lp.remote(&mut ed, done(None, 3, DoneStatus::Cancelled));
+    lp.remote(&mut ed, remote_diags(4, &proj, true, &[]));
+    assert!(ed.diagnostics().is_empty());
+    assert_eq!(ed.message(), Some("エラーは無くなった"));
+    // serve が再起動して番号が 1 に戻っても、新しい結果として取り込む
+    lp.remote(&mut ed, scanned(1, &proj));
+    lp.remote(&mut ed, remote_diags(1, &proj, true, &[("src/lib.rs", &[(2, "again")])]));
+    assert_eq!(lines_of(&ed), [2]);
+    // 位置なしの診断（パスが空）は、ステータスバーにだけ出す
+    lp.remote(&mut ed, remote_diags(1, &proj, true, &[("", &[(0, "linking failed")]), ("src/lib.rs", &[(2, "again")])]));
+    assert_eq!(lines_of(&ed), [2]);
+    assert_eq!(ed.message(), Some("linking failed"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+both!(not_applicable_falls_back_to_local_check, not_applicable_falls_back_to_local_check_simple, not_applicable_falls_back_to_local_check_buffer);
+fn not_applicable_falls_back_to_local_check(backend: DocBackend) {
+    if std::process::Command::new("gcc").arg("--version").output().map_or(true, |o| !o.status.success()) {
+        eprintln!("gcc が無いので飛ばす");
+        return;
+    }
+    let dir = tmp_dir("fallback");
+    let p = dir.join("bad.c");
+    fs::write(&p, "int main(void) {\n    return 0\n}\n").unwrap();
+    let mut lp = Loop::new();
+    let mut ed = EditorScreen::new(EditorConfig { backend, root: dir.clone(), files: vec![p.clone()] });
+    let fake = FakeRemote::default();
+    ed.set_remote(Box::new(fake.clone()));
+    lp.with(|cx| ed.start(cx));
+    lp.pump(&mut ed);
+    // 保存 → まずビルド係の check を頼む（実機の check はまだ走らせない）
+    lp.keys(&mut ed, &[ctrl('s')]);
+    lp.pump(&mut ed);
+    assert_eq!(fake.jobs().iter().map(|j| (j.kind, j.lang)).collect::<Vec<_>>(), [(JobKind::Check, RemoteLang::C)]);
+    lp.pump(&mut ed);
+    assert!(ed.diagnostics().is_empty());
+    // zc-remote が入っていない: 1 回だけ静かに知らせて、依頼は「対象ではない」で返る → 実機の gcc
+    lp.remote(&mut ed, RemoteEvent::Unavailable("zc-remote が無い".into()));
+    assert_eq!(ed.message(), Some("ビルド係を使えない: zc-remote が無い"));
+    lp.remote(&mut ed, done(Some(1), 0, DoneStatus::NotApplicable));
+    lp.pump(&mut ed);
+    assert!(!ed.diagnostics().is_empty(), "実機の構文チェックに回る");
+    assert!(ed.message().is_some_and(|m| m.contains("行:")), "{:?}", ed.message());
+    // オフラインでも同じ。何も知らせず、実機の check に回す
+    lp.keys(&mut ed, &[key(Key::Down), key(Key::End)]);
+    lp.type_str(&mut ed, ";");
+    lp.keys(&mut ed, &[ctrl('s')]);
+    lp.pump(&mut ed);
+    assert_eq!(fake.jobs().len(), 2);
+    lp.remote(&mut ed, done(Some(2), 0, DoneStatus::Offline));
+    lp.pump(&mut ed);
+    assert!(ed.diagnostics().is_empty(), "{:?}", ed.diagnostics());
+    assert_eq!(ed.message(), Some("構文エラーは無くなった"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+both!(missing_check_tool_is_reported_once, missing_check_tool_is_reported_once_simple, missing_check_tool_is_reported_once_buffer);
+fn missing_check_tool_is_reported_once(backend: DocBackend) {
+    let has = |cmd: &str| std::process::Command::new("bash").arg("-c").arg(format!("command -v {cmd}")).output().is_ok_and(|o| o.status.success());
+    if !has("bash") || has("tsc") {
+        eprintln!("bash が無い、または tsc があるので飛ばす");
+        return;
+    }
+    let dir = tmp_dir("notsc");
+    let p = dir.join("a.ts");
+    fs::write(&p, "const x: number = 1;\n").unwrap();
+    let mut lp = Loop::new();
+    let mut ed = EditorScreen::new(EditorConfig { backend, root: dir.clone(), files: vec![p.clone()] });
+    ed.set_remote(Box::new(FakeRemote::default()));
+    lp.with(|cx| ed.start(cx));
+    lp.pump(&mut ed);
+    // 前の保存のときの波線が残っているとする
+    lp.syntax(&mut ed, &p, &[(0, "TS1005: old")]);
+    for (n, expect_notice) in [(1, true), (2, false)] {
+        lp.keys(&mut ed, &[ctrl('s')]);
+        lp.pump(&mut ed);
+        // npm の依存が無いので、ビルド係の対象ではない → 実機の tsc（bash -c で包んである）
+        lp.remote(&mut ed, done(Some(n), 0, DoneStatus::NotApplicable));
+        lp.pump(&mut ed);
+        // tsc が無いと bash が 127 で終わる。「エラーなし」にせず、1 回だけ知らせる
+        let noticed = ed.message().is_some_and(|m| m.starts_with("構文チェックできない"));
+        assert_eq!(noticed, expect_notice, "{n} 回目: {:?}", ed.message());
+        assert_eq!(lines_of(&ed), [0], "波線はそのまま");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+fn test_report() -> TestReport {
+    let case = |name: &str, passed: bool, loc: Option<(&str, u32)>, message: &str| TestCase { name: name.into(), passed, location: loc.map(|(p, l)| (p.to_string(), l)), message: message.into() };
+    TestReport {
+        passed: 1,
+        failed: 2,
+        ignored: 0,
+        cases: vec![
+            case("tests::ok", true, None, ""),
+            case("tests::parse_empty", false, Some(("src/lib.rs", 4)), "thread 'tests::parse_empty' panicked at src/lib.rs:5:9:\nassertion `left == right` failed"),
+            case("wrap::tests::wide", false, Some(("src/wrap.rs", 7)), "boom"),
+        ],
+    }
+}
+
+both!(run_tests_shows_results_and_jumps, run_tests_shows_results_and_jumps_simple, run_tests_shows_results_and_jumps_buffer);
+fn run_tests_shows_results_and_jumps(backend: DocBackend) {
+    let (dir, proj, mut ed, mut lp, fake) = rust_project(backend, "tests");
+    let mut g = Gfx::new();
+    // F6: 保存済みなので、そのまま試験を頼む
+    lp.keys(&mut ed, &[key(Key::F(6))]);
+    assert_eq!(fake.jobs().iter().map(|j| (j.kind, j.lang, j.flags)).collect::<Vec<_>>(), [(JobKind::Test, RemoteLang::Rust, SubmitFlags::NONE)]);
+    assert_eq!(ed.remote_progress().as_deref(), Some("ビルド係: 接続中"));
+    // もう 1 回押しても、重ねて頼まない
+    lp.keys(&mut ed, &[key(Key::F(6))]);
+    assert_eq!(fake.jobs().len(), 1);
+    assert_eq!(ed.message(), Some("試験は実行中"));
+    lp.remote(&mut ed, RemoteEvent::Phase { req: Some(RemoteReq(1)), tag: JobTag(5), root: proj.clone(), phase: Phase::Running, done: 0, total: 0 });
+    assert_eq!(ed.remote_progress().as_deref(), Some("ビルド係: 試験中 0 秒"));
+    // 結果が届いた: 落ちた試験が先、通った試験が後
+    lp.remote(&mut ed, RemoteEvent::Tests { req: RemoteReq(1), root: proj.clone(), report: test_report() });
+    lp.remote(&mut ed, done(Some(1), 5, DoneStatus::Failed));
+    assert_eq!(ed.remote_progress(), None);
+    let (rows, sel) = ed.test_list().expect("一覧が開く");
+    assert_eq!(rows, [("tests::parse_empty".to_string(), false), ("wrap::tests::wide".to_string(), false), ("tests::ok".to_string(), true)]);
+    assert_eq!(sel, 0);
+    if let Some(g) = g.as_mut() {
+        assert!(!g.render(&mut ed).is_empty());
+    }
+    // 絞り込んで、Enter で落ちた行へ（開いていないファイルは開く）
+    lp.type_str(&mut ed, "wide");
+    assert_eq!(ed.test_list().unwrap().0.len(), 1);
+    lp.keys(&mut ed, &[key(Key::Enter)]);
+    assert!(ed.test_list().is_none());
+    lp.pump(&mut ed);
+    assert_eq!(ed.active_path(), Some(proj.join("src/wrap.rs").as_path()));
+    assert_eq!(cursor(&ed), Pos::new(7, 0));
+    if let Some(g) = g.as_mut() {
+        // 閉じたあとの画面に一覧が残らない
+        assert_screen_is_clean(g, &mut ed);
+    }
+    // 通った試験の Enter は何もしない。Esc で閉じる
+    lp.keys(&mut ed, &[key(Key::F(6))]);
+    lp.remote(&mut ed, RemoteEvent::Tests { req: RemoteReq(2), root: proj.clone(), report: test_report() });
+    lp.remote(&mut ed, done(Some(2), 6, DoneStatus::Failed));
+    lp.keys(&mut ed, &[key(Key::Up), key(Key::Enter)]);
+    assert_eq!(ed.test_list().unwrap().1, 2);
+    // もう開いているファイルへは、すぐ移る
+    lp.keys(&mut ed, &[key(Key::Down), key(Key::Enter)]);
+    assert_eq!(ed.active_path(), Some(proj.join("src/lib.rs").as_path()));
+    assert_eq!(cursor(&ed), Pos::new(4, 0));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+both!(test_results_do_not_steal_keys, test_results_do_not_steal_keys_simple, test_results_do_not_steal_keys_buffer);
+fn test_results_do_not_steal_keys(backend: DocBackend) {
+    let (dir, proj, mut ed, mut lp, fake) = rust_project(backend, "tests-typing");
+    // 未保存なら、保存が終わってから頼む（同じ木の check は重ねて頼まない）
+    lp.type_str(&mut ed, "// x\n");
+    lp.keys(&mut ed, &[key(Key::F(6))]);
+    assert!(fake.jobs().is_empty());
+    lp.pump(&mut ed);
+    assert_eq!(fake.jobs().iter().map(|j| j.kind).collect::<Vec<_>>(), [JobKind::Test]);
+    // 待っている間に書き続けた: 結果が届いても一覧は出さず、知らせるだけ
+    lp.type_str(&mut ed, "// y");
+    lp.remote(&mut ed, RemoteEvent::Tests { req: RemoteReq(1), root: proj.clone(), report: test_report() });
+    lp.remote(&mut ed, done(Some(1), 5, DoneStatus::Failed));
+    assert!(ed.test_list().is_none());
+    assert_eq!(ed.run_state().1, Some("✕ 試験 2 失敗 / 1 成功  F6 で一覧"));
+    lp.type_str(&mut ed, "z");
+    assert!(text(&ed).starts_with("// x\n// yz"));
+    // F6 で、その結果の一覧を開く（もう一度は走らせない）
+    lp.keys(&mut ed, &[key(Key::F(6))]);
+    assert_eq!(ed.test_list().map(|(r, _)| r.len()), Some(3));
+    assert_eq!(fake.jobs().len(), 1);
+    // 一覧の中の F6 は、もう一度実行（未保存なので、先に保存）
+    lp.keys(&mut ed, &[key(Key::F(6))]);
+    assert!(ed.test_list().is_none());
+    lp.pump(&mut ed);
+    assert_eq!(fake.jobs().len(), 2);
+    // 全部通ったら、一覧は出さずステータスバーに出す
+    let all_ok = TestReport { passed: 5, failed: 0, ignored: 1, cases: Vec::new() };
+    lp.remote(&mut ed, RemoteEvent::Tests { req: RemoteReq(2), root: proj.clone(), report: all_ok });
+    lp.remote(&mut ed, done(Some(2), 6, DoneStatus::Ok));
+    assert!(ed.test_list().is_none());
+    assert_eq!(ed.run_state().1, Some("✓ 試験 5 成功 / 1 無視"));
+    // コンパイルできなかった（結果が無いまま失敗）・オフライン
+    lp.keys(&mut ed, &[ctrl('s')]);
+    lp.pump(&mut ed);
+    lp.keys(&mut ed, &[key(Key::F(6))]);
+    let n = fake.jobs().len() as u32;
+    lp.remote(&mut ed, done(Some(n), 7, DoneStatus::Failed));
+    assert_eq!(ed.run_state().1, Some("✕ 試験: ビルドできなかった"));
+    lp.keys(&mut ed, &[key(Key::F(6))]);
+    lp.remote(&mut ed, done(Some(n + 1), 0, DoneStatus::Offline));
+    assert_eq!(ed.message(), Some("ビルド係: オフライン（ビルド係に届かない）"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn run_tests_needs_a_remote_language() {
+    let mut lp = Loop::new();
+    let mut ed = editor_with(DocBackend::Simple, "x = 1\n");
+    let fake = FakeRemote::default();
+    ed.set_remote(Box::new(fake.clone()));
+    lp.keys(&mut ed, &[key(Key::F(6))]);
+    assert!(ed.message().is_some_and(|m| m.contains("試験を実行できない")), "{:?}", ed.message());
+    assert!(fake.jobs().is_empty());
 }

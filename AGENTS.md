@@ -47,6 +47,9 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
   Windows では開発コンテナ（`container/`、WSL コンテナー `wslc`）で回す:
   アプリのフォルダで `..\container\dev.ps1 ./build.sh <version>`。
   `.deb` と生成アセット（アイコン等）は git 管理外
+- wslc は docker とほぼ同じだが違うところがある（2026-11-17、wslc 3.0.5）: `-p <ポート>:<ポート>` は
+  127.0.0.1 だけで待つ、`build` に `--platform`・`--load` が無い、`image inspect --format` は json だけ、
+  `manifest` が無い。詳しくは `zcode/AGENTS.md`「ビルド係のイメージ・deploy・CI」
 - 開発コンテナでできるのは .deb ビルド・`--render-test`・selftest まで。
   カメラ / fb0 / キー / BlueZ は実機で確認する（詳細は `container/README.md`）
 - 改行は `.gitattributes` で LF 固定。CRLF の sh / postinst / sudoers は壊れる
@@ -58,7 +61,8 @@ M5Stack CardputerZero（CM0 ベースの Linux マシン）向け APPLaunch
   そのタグの GitHub Release に添付
 - CI（`.github/workflows/ci.yml`）は PR と main への push で、**変更のあったアプリだけ**を
   開発コンテナの中で試す（qrreader: 自己テスト・描画・.deb、bt-tether: 描画・.deb と
-  sudoers の権限、zcode: cargo test・描画の正解画像・aarch64 ビルド）。`common/` は
+  sudoers の権限、zcode: cargo test・描画の正解画像・aarch64 ビルド、zcode/remote: 外部ビルドの
+  cargo test・Worker の tsc と vitest・ビルド係のイメージの中の試験）。`common/` は
   qrreader と bt-tether、`container/` と `.github/` は全部を試す対象にする。新しい
   アプリを足したら、ここにジョブと判定を足す
 - コミットメッセージは `<app> v<version>: <要約>` の形

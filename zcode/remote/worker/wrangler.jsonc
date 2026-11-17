@@ -1,0 +1,66 @@
+// zcode のビルド係（Cloudflare 側）。docs/stage3-design.md §6（設計）・§12.1（人がやること）、
+// 人向けの手順は docs/setup-remote-build.md。
+//
+// 項目名は wrangler 4.163.0 の config-schema.json と、公式の文書（Wrangler configuration →
+// Containers、Containers → Scheduling Policy。2026-11-17 に確認）に合わせた。
+// `scheduling_policy: "durable_object"` はベータ。**実物での deploy はまだ**（§15）。
+//
+// アカウントごとの値（Access のチーム名・AUD・機体の表）は、ここに書かない（公開リポジトリ）。
+// `wrangler secret put` で入れる（.dev.vars.example 参照）。
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "zcode-build",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+
+  // 入口は zcode-build.<subdomain>.workers.dev だけ（独自ドメインは使わない。2026-11-17 決定）。
+  // Access はこのホスト名に対する self-hosted のアプリケーションとして人が作る。
+  // Worker 単位の Access（Protect this Worker）は WebSocket の Upgrade が 403 になるので使わない。
+  // 版ごとのプレビュー URL（<版>-zcode-build.<subdomain>.workers.dev）は Access の外なので出さない。
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": { "enabled": true },
+
+  // Durable Object（SQLite）= ジョブの持ち主。実機 1 台につき 1 つ（名前 = device_id）。
+  "durable_objects": {
+    "bindings": [{ "name": "BUILD", "class_name": "BuildSession" }]
+  },
+  // DO の宣言。公式の文書の durable_object 方式の例はこの `exports` の形（古い `migrations` の
+  // new_sqlite_classes と同じ意味。両方は書けない）。
+  "exports": {
+    "BuildSession": { "type": "durable-object", "storage": "sqlite" }
+  },
+
+  // コンテナ。DO が自分でイメージ・大きさ・スナップショットを指定して起動する方式
+  // （durable_object scheduling policy。ベータ。スナップショットはこの方式でだけ使える）。
+  // この方式では instance_type・max_instances・image は書けない（大きさは下の vars の
+  // INSTANCE_TYPE を DO が start() に渡す）。
+  "containers": [
+    {
+      "class_name": "BuildSession",
+      "scheduling_policy": "durable_object",
+      "images": {
+        // 名前 "builder" は src/session.ts の IMAGE_NAME と同じにする。
+        // パスはこのファイルからの相対。ビルドの文脈は zcode/（受付 zc-buildd をイメージの中で
+        // ビルドする。zcode/.dockerignore で要るものだけに絞ってある）
+        "builder": { "dockerfile": "../container/Dockerfile", "build_context": "../.." }
+      }
+    }
+  ],
+
+  // つなぐ回数の制限（device_id ごと。60 秒に 30 回）。namespace_id はアカウントの中で一意な数字。
+  "ratelimits": [
+    { "name": "CONNECT_LIMIT", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } }
+  ],
+
+  // 費用に効く値はここにまとめる（変えたら deploy し直す）。費用の見込みは docs/stage3-design.md §6.6
+  "vars": {
+    // コンテナの大きさ: lite / standard-1 / standard-2 / standard-3 / standard-4
+    // （standard-4 = 4 vCPU・12GiB・20GB。それ以外の値は standard-4 として扱う）
+    "INSTANCE_TYPE": "standard-4",
+    // 最後のジョブ・接続のあと、コンテナを起こしておく時間（秒。1〜21600）
+    "KEEP_WARM_S": "600",
+    // 1 台あたり 1 日のジョブ数の上限
+    "JOBS_PER_DAY": "400"
+  }
+}

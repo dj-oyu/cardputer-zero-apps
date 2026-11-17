@@ -482,8 +482,9 @@ Esc か候補に無い文字を打つと閉じる。Enter は改行のまま（�
        background: repeating-linear-gradient(135deg, #f14c4c 0 1px, transparent 1px 2px);"></div>
   <div class="status" style="background:#a1260d"><span>main.py &nbsp;Ln 7, Col 23 &nbsp;⊗ 1</span><span style="font-family:'Noto Sans CJK JP',sans-serif; font-size:7px">5 行: expected ':'</span></div>
 </div></div>
-<figcaption><b>13. 保存時の構文チェック</b> — 保存すると batch が <code>language.toml</code> の <code>check</code>（Python は <code>ast.parse</code>、約 0.4 秒）を
-使い捨てで走らせる。エラーの行に赤い波線、タブ名を赤、ステータスバーに件数 <code>⊗ 1</code> と最初のメッセージを出す
+<figcaption><b>13. 保存時の構文チェック</b> — 保存すると check ワーカーが <code>language.toml</code> の <code>check</code>（Python は <code>ast.parse</code>、約 0.4 秒）を
+使い捨てで走らせる。<code>remote</code> のある言語（Rust・C・npm の依存がある JS / TS）は、先にビルド係の check を頼み、
+対象でない・届かないときだけ実機の <code>check</code> に回す。どちらの診断も同じ見た目で、両方あれば両方出す。エラーの行に赤い波線、タブ名を赤、ステータスバーに件数 <code>⊗ 1</code> と最初のメッセージを出す
 （ステータスバーは数秒で通常の色に戻り、件数は残す）。カーソルがエラーの行に来たら、そのメッセージをもう一度出す。
 直して保存し直すと消える。チェックの結果より後に編集していたら、行の移動に合わせて波線もずらす。</figcaption>
 </figure>
@@ -509,6 +510,34 @@ Esc か候補に無い文字を打つと閉じる。Enter は改行のまま（�
 字下げどおりの入れ子で並べ、右に行番号。開いた時点ではカーソルのいる関数を選んでおく。文字を打つと名前で絞り込み
 （一致した項目の親は薄く残して、どのクラスの中かが分かるようにする）、
 ↑↓ で選んで Enter でその行へ飛ぶ。Esc で閉じる。</figcaption>
+</figure>
+
+<!-- 15. 試験を実行（ビルド係） -->
+<figure>
+<div class="lcd-wrap"><div class="lcd">
+  <div class="tabs">
+    <div class="tab">main.rs</div>
+    <div class="tab on">lib.rs</div>
+  </div>
+  <div class="kb">
+    <div class="search on"><span class="cursor"></span></div>
+    <div class="sec">試験 — 2 失敗 / 3 成功 / 1 無視</div>
+    <div class="r sel"><span class="a" style="font-family:'DejaVu Sans Mono',monospace"><span class="err">✕</span> tests::parse_empty</span><span class="h">src/lib.rs:42</span></div>
+    <div class="r"><span class="a" style="font-family:'DejaVu Sans Mono',monospace"><span class="err">✕</span> wrap::tests::wide_chars</span><span class="h">src/wrap.rs:18</span></div>
+    <div class="r"><span class="a" style="font-family:'DejaVu Sans Mono',monospace"><span class="ok">✓</span> tests::parse_one</span><span class="h"></span></div>
+    <div class="r"><span class="a" style="font-family:'DejaVu Sans Mono',monospace"><span class="ok">✓</span> tests::parse_two</span><span class="h"></span></div>
+    <div class="r"><span class="a" style="font-family:'DejaVu Sans Mono',monospace"><span class="ok">✓</span> wrap::tests::ascii</span><span class="h"></span></div>
+  </div>
+  <div class="status" style="background:#a1260d"><span style="font-family:'Noto Sans CJK JP',sans-serif; font-size:7px">assertion `left == right` failed</span><span style="font-family:'Noto Sans CJK JP',sans-serif; font-size:7px">Enter 移動  Esc 閉じる</span></div>
+</div></div>
+<figcaption><b>15. 試験を実行</b> — <b>F6（Fn+6）</b> で、保存してからビルド係（<code>language.toml</code> に <code>remote</code> のある言語）で試験を走らせる。
+待っている間はエディタのまま書ける。進み具合はステータスバーの右（「ビルド係: 送信中 12KB」「ビルド係: 試験中 8 秒」）。
+落ちた試験があれば、結果をアウトライン（モック 14）と同じ一覧で出す: 落ちた試験（赤い ✕、右に場所）が先、通った試験（緑の ✓）が後。
+ステータスバーには、選んでいる試験の失敗のメッセージ。文字を打つと名前で絞り込み、↑↓ で選んで Enter で落ちた行へ飛ぶ
+（開いていないファイルは開く）。Esc で閉じる。一覧の中の F6 はもう一度実行。
+全部通ったときは一覧を出さず、ステータスバーに緑で「✓ 試験 5 成功」。F6 のあとに打鍵していたら（書いている途中に一覧で打鍵を奪わない）、
+ステータスバーに「✕ 試験 2 失敗 / 3 成功  F6 で一覧」とだけ出し、F6 で一覧を開く。
+コンパイルできなかったときは一覧は出ず、診断が波線になる（モック 13）。F6 が実機で押しやすいかは未確認。</figcaption>
 </figure>
 
 </div>
@@ -540,7 +569,8 @@ Esc か候補に無い文字を打つと閉じる。Enter は改行のまま（�
 <tr><td>ツリーへ移る / エディタへ戻る</td><td>Ctrl+E / Esc</td></tr>
 <tr><td>ツリーで開く</td><td>Enter</td></tr>
 <tr><td>アウトライン（絞り込んで Enter で移動）</td><td>Ctrl+O</td></tr>
-<tr><td rowspan="3">実行</td><td>保存して実行</td><td>F5（Fn+5）</td></tr>
+<tr><td rowspan="4">実行</td><td>保存して実行</td><td>F5（Fn+5）</td></tr>
+<tr><td>試験を実行（ビルド係。結果は一覧に）</td><td>F6（Fn+6）</td></tr>
 <tr><td>実行を止める</td><td>Ctrl+C（ターミナル内）</td></tr>
 <tr><td>ターミナル開閉 / 全画面</td><td>F12（Fn+P） / F11（Fn+O）</td></tr>
 <tr><td rowspan="3">Markdown</td><td>プレビュー ⇔ ソース</td><td>Ctrl+Shift+V</td></tr>
@@ -584,6 +614,7 @@ Esc か候補に無い文字を打つと閉じる。Enter は改行のまま（�
       そのまま使い、uim-skk と学習結果を共有する。CJK は Noto Sans Mono CJK で描く。</li>
   <li>入力モードはステータスバー右端に出す: 緑「かな」/ 黄「カナ」/ 薄い「A」（英数）。起動時は英数。</li>
   <li>作業フォルダの既定は <code>~/code</code>。</li>
+  <li>「試験を実行」の F6（Fn+6）は案。2 つ押しで収まるが、実機で押しやすいかはまだ確かめていない（モック 15）。</li>
 </ul>
 <script>
   // 枠の幅に合わせて 320x170 の実寸レイアウトを拡大する
