@@ -471,6 +471,14 @@ fn rust_analyzer_answers_through_serve() {
     if skip_without(&["cargo", "rust-analyzer"]) {
         return;
     }
+    // rustup の代理（component が無いと動かない）だけのとき
+    if !std::process::Command::new("rust-analyzer").arg("--version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success()) {
+        if std::env::var_os("ZC_E2E_REQUIRE").is_some_and(|v| v == "1") {
+            panic!("rust-analyzer が動かない（ZC_E2E_REQUIRE=1）");
+        }
+        eprintln!("e2e: rust-analyzer が動かないので飛ばす");
+        return;
+    }
     let sb = Sandbox::new("lsp");
     let buildd = Buildd::start(&sb);
     let _serve = sb.serve(&pc(buildd.port), &[]);

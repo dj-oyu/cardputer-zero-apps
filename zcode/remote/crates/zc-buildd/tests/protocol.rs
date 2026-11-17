@@ -866,10 +866,12 @@ fn lsp_messages_over_the_socket() {
     // 接続は続いている
     t.upload(&mut c);
     c.send(&ClientMsg::LspWarm { project: PROJECT.into(), tree: t.id.clone(), path: "src/main.rs".into() });
-    let have_ra = std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("rust-analyzer").is_file()));
+    // rustup の代理（component が無いと動かない）もあるので、動くかで見る
+    let have_ra = std::process::Command::new("rust-analyzer").arg("--version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
     match c.msg() {
         ServerMsg::LspState { state: LspPhase::Loading, .. } if have_ra => {}
-        ServerMsg::LspState { state: LspPhase::Failed, message, .. } if !have_ra => assert!(message.contains("rust-analyzer が無い"), "{message}"),
+        // 無い・代理だけ（起動してすぐ終わる）。どちらも loading か failed で知らせる
+        ServerMsg::LspState { state: LspPhase::Failed | LspPhase::Loading, .. } if !have_ra => {}
         other => panic!("{other:?}"),
     }
     let (_, body) = http_get(srv.addr(), "/v1/status");

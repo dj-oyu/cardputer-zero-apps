@@ -24,7 +24,8 @@ const READY_WAIT: Duration = Duration::from_secs(240);
 const ANSWER_WAIT: Duration = Duration::from_secs(60);
 
 fn skip() -> bool {
-    let have = std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("rust-analyzer").is_file()));
+    // rustup の代理（component が無いと動かない）もあるので、PATH にあるかではなく動くかで見る
+    let have = std::process::Command::new("rust-analyzer").arg("--version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
     if have {
         return false;
     }

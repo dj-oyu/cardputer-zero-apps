@@ -118,7 +118,7 @@ Cloudflare のコンテナの中でも PC でも、同じ実行ファイルが�
 |---|---|
 | `GET /v1/ws`（Upgrade、`Sec-WebSocket-Protocol: zc-build.v1`） | WebSocket（§5） |
 | `GET /healthz` | `200 ok` |
-| `GET /v1/status` | `{"running":n,"queued":n,"jobs":[…],"uptime_s":n}`（DO が、コンテナを起こしておくかの判断に使う） |
+| `GET /v1/status` | `{"running":n,"queued":n,"jobs":[…],"uptime_s":n,"lsp_cpu_ms":n,"lsp":…}`（DO が、コンテナを起こしておくかの判断と、rust-analyzer の CPU の計りに使う。`docs/lsp-design.md`） |
 
 認証はしない（Cloudflare では Access と Worker、PC では Tailscale の ACL が門番）。Worker が
 付ける `X-Zc-Device` は、ログに出す名前として使うだけ。
@@ -229,6 +229,10 @@ permessage-deflate なし）。制御は JSON のテキストフレーム、フ�
 | `error` | `job?`, `code`, `message`, `retry_after_s?` | `job` が無ければ接続全体の失敗（このあと切る）。`code`: version / protocol / too-large / limit / unknown-job / bad-tree / bad-blob / unavailable / internal |
 
 型の正本は `zc-wire/src/msg.rs`（serde の定義がそのまま JSON の形）。
+
+LSP（2026-11-17。`docs/lsp-design.md` §4.1）: 実機 → `lsp_warm`・`lsp`、ビルド係 → `lsp_state`・`lsp_result` を
+足した（知らない type は無視する決まりなので、版は 1 のまま）。どれもジョブと同じく、その接続で `ready` を
+受けた木に対して。
 
 ### 5.3 バイナリフレーム
 
@@ -388,6 +392,8 @@ vCPU 秒（使った分だけ）、ディスク 0.00000007 ドル / GB 秒。
     `error {limit}`（job なし）で閉じる（4429）。走っているジョブは止めず、終わったらすぐ止める。
     実機（`zc-remote`）は今の約束のまま「上限」として表示する（約束は変えていない）
   - 見込みは `GET /v1/usage`（Access の内側、JSON）。人向けの説明は `setup-remote-build.md` §2.6
+  - rust-analyzer（LSP）の CPU はジョブの外で使われる。受付が通算（`cpu_ms`・`lsp_cpu_ms`）を知らせ、DO は増えた分を
+    CPU として足す。上限に達したら LSP の問い合わせも DO が断る（`docs/lsp-design.md` §5）
 - 2 本目の守り: Cloudflare の Billing の予算の通知（8 ドル前後）。1 日のジョブ数（400）、実機 1 台に
   コンテナ 1 つ
 
@@ -576,8 +582,9 @@ serve → zcode / CLI:
 `tag` は serve が振るジョブの通し番号。同じジョブについての知らせを突き合わせる。型の正本は
 `zc-remote-ipc/src/lib.rs`。
 
-約束の版は 2（2026-11-17。`Submit` に未保存の中身の重ねと `flags` の bit4 `AUTO` を足した）。
-serve は版 1 の相手も受け、`Hello` を相手の版で返す。依頼は重ねの分だけ大きくてよい
+約束の版は 3（2026-11-17。版 2 で `Submit` に未保存の中身の重ねと `flags` の bit4 `AUTO` を足し、版 3 で
+LSP の `Lsp`（0x0007）・`LspResult`（0x800A）・`LspState`（0x800B）を足した。並びは `docs/lsp-design.md` §4.2）。
+serve は版 1〜3 の相手を受け、`Hello` を相手の版で返す。依頼は重ねの分だけ大きくてよい
 （`MAX_REQUEST_FRAME` = 256KiB + 1MiB）。重ねのパスは絶対パス（zcode は根を知らない。serve が
 根からの相対に直し、目録に無いものは捨てる）。
 
