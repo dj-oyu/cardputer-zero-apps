@@ -21,20 +21,26 @@
   "preview_urls": false,
   "observability": { "enabled": true },
 
-  // Durable Object（SQLite）= ジョブの持ち主。実機 1 台につき 1 つ（名前 = device_id）。
+  // Durable Object（SQLite）
+  //   BuildSession = ジョブの持ち主。実機 1 台につき 1 つ（名前 = device_id）
+  //   BudgetLedger = 費用の台帳。アカウントに 1 つ（名前 "budget"。src/budget.ts）
   "durable_objects": {
-    "bindings": [{ "name": "BUILD", "class_name": "BuildSession" }]
+    "bindings": [
+      { "name": "BUILD", "class_name": "BuildSession" },
+      { "name": "BUDGET", "class_name": "BudgetLedger" }
+    ]
   },
   // DO の宣言。公式の文書の durable_object 方式の例はこの `exports` の形（古い `migrations` の
   // new_sqlite_classes と同じ意味。両方は書けない）。
   "exports": {
-    "BuildSession": { "type": "durable-object", "storage": "sqlite" }
+    "BuildSession": { "type": "durable-object", "storage": "sqlite" },
+    "BudgetLedger": { "type": "durable-object", "storage": "sqlite" }
   },
 
   // コンテナ。DO が自分でイメージ・大きさ・スナップショットを指定して起動する方式
   // （durable_object scheduling policy。ベータ。スナップショットはこの方式でだけ使える）。
   // この方式では instance_type・max_instances・image は書けない（大きさは下の vars の
-  // INSTANCE_TYPE を DO が start() に渡す）。
+  // INSTANCE_* を DO が start() に渡す）。
   "containers": [
     {
       "class_name": "BuildSession",
@@ -53,14 +59,26 @@
     { "name": "CONNECT_LIMIT", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } }
   ],
 
-  // 費用に効く値はここにまとめる（変えたら deploy し直す）。費用の見込みは docs/stage3-design.md §6.6
+  // 費用に効く値はここにまとめる（変えたら deploy し直す。動いているコンテナは、止まって次に
+  // 起こすときから新しい大きさになる）。費用の見込みは docs/stage3-design.md §6.6、
+  // 人向けの説明は docs/setup-remote-build.md §2.6
   "vars": {
-    // コンテナの大きさ: lite / standard-1 / standard-2 / standard-3 / standard-4
-    // （standard-4 = 4 vCPU・12GiB・20GB。それ以外の値は standard-4 として扱う）
-    "INSTANCE_TYPE": "standard-4",
-    // 最後のジョブ・接続のあと、コンテナを起こしておく時間（秒。1〜21600）
-    "KEEP_WARM_S": "600",
-    // 1 台あたり 1 日のジョブ数の上限
-    "JOBS_PER_DAY": "400"
+    // コンテナの大きさ。INSTANCE_TYPE が空なら、下の 3 つの custom（既定 1 vCPU・3GiB・12GB）。
+    // custom の制限: vCPU 1/16〜4、メモリ 256〜12288MiB で 1 vCPU あたり 3072MiB 以上、
+    // ディスク 2000〜20000MB。外れた値は既定に戻す（ログに 1 行）
+    // 名前つきにするなら lite / standard-1 / standard-2 / standard-3 / standard-4
+    // （standard-4 = 4 vCPU・12GiB・20GB。メモリの料金は 1 vCPU・3GiB の 4 倍）
+    "INSTANCE_TYPE": "",
+    "INSTANCE_VCPU": "1",
+    "INSTANCE_MEMORY_MIB": "3072",
+    "INSTANCE_DISK_MB": "12000",
+    // 最後の動き（ジョブの終わり・実機のメッセージ）のあと、コンテナを起こしておく時間（秒。1〜21600）。
+    // 過ぎたら DO がコンテナを止める
+    "KEEP_WARM_S": "300",
+    // 1 台あたり 1 日のジョブ数の上限（check は数えない）
+    "JOBS_PER_DAY": "400",
+    // 月の超過（含まれる分を超えた料金）の上限（ドル）。アカウント全体で 1 つ。超えそうなら
+    // 新しいジョブを断り（error {limit}）、コンテナを起こさない。UTC の月初めに戻る
+    "BUDGET_OVERAGE_USD": "5.00"
   }
 }

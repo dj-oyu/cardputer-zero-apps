@@ -4,7 +4,7 @@
 //! - 1 メッセージ = 12 バイトの頭 + 本体。全部リトルエンディアン
 //!
 //! ```text
-//!   u32 len      このあとに続くバイト数（頭の残り 8 バイト + 本体。上限 MAX_FRAME）
+//!   u32 len      このあとに続くバイト数（頭の残り 8 バイト + 本体。上限 MAX_FRAME、依頼は MAX_REQUEST_FRAME）
 //!   u16 kind     メッセージの種類（Request は 0x00xx、Response は 0x80xx）
 //!   u16 flags    予約（0）
 //!   u32 req      依頼の番号（依頼した側が決める。0 は「自分の依頼ではない知らせ」）
@@ -28,6 +28,11 @@
 //!   `u32::MAX`。`severity` は 1 = エラー、2 = 警告。`code` が無ければ空の文字列
 //!   （空の `code` は「無い」と読む）
 //! - 試験: 落ちた場所が無ければ `path` は空・`line` は `u32::MAX`（`line` で判断する）
+//! - `Submit` の後ろの重ね（版 2 で足した）: `u16 件数`、件ごとに `path file`・`u32 長さ`・
+//!   バイト列。版 1 の `Submit`（`file` で終わる）も読める（重ね無しと読む）。書くときは
+//!   重ねが空でも件数 0 を書く
+//! - 依頼（Request）だけは [`MAX_REQUEST_FRAME`] まで受け取る（重ねの分だけ大きい）。読む側は
+//!   [`FrameReader::for_requests`] を使う
 //!
 //! この crate は I/O を持たない（バイト列 ⇔ 型だけ）。ソケットを読む・書くのは
 //! `zcode/src/remote.rs`（専用スレッド）と `zc-remote`（serve / CLI）。
@@ -35,8 +40,17 @@
 use std::path::{Path, PathBuf};
 use zc_core::{Diagnostic, Severity};
 
-/// 約束の版。合わない相手とは話さない。
-pub const IPC_VERSION: u16 = 1;
+/// 約束の版。合わない相手とは話さない（serve だけは [`MIN_IPC_VERSION`] からの相手も受ける）。
+///
+/// 版 2: `Submit` に未保存の中身の重ね（[`OverlayFile`]）と [`SubmitFlags::AUTO`] を足した。
+pub const IPC_VERSION: u16 = 2;
+/// serve が受ける、いちばん古い相手の版（版 1 の `Submit` も読める）。
+pub const MIN_IPC_VERSION: u16 = 1;
+/// [`Request::Submit`] の重ねの中身の合計の上限。超える重ねは送らない（打鍵が止まったときの
+/// check は飛ばす）。
+pub const MAX_OVERLAY_BYTES: usize = 1 << 20;
+/// 依頼 1 メッセージの上限（重ねの分だけ [`MAX_FRAME`] より大きい）。
+pub const MAX_REQUEST_FRAME: usize = MAX_FRAME + MAX_OVERLAY_BYTES;
 /// 1 メッセージの上限（頭の `len` の値の上限。`len` そのものの 4 バイトは含まない）。
 /// 超えるログ・診断は送る側が分ける。
 pub const MAX_FRAME: usize = 256 * 1024;
@@ -208,6 +222,9 @@ impl SubmitFlags {
     pub const ONLY_IF_WARM: SubmitFlags = SubmitFlags(1 << 2);
     /// ネットワークが無いとき、前に成功した実行ファイルで代用してよい（build）。
     pub const ALLOW_STALE: SubmitFlags = SubmitFlags(1 << 3);
+    /// 打鍵が止まったときの check（zcode が未保存の中身を重ねて頼む。版 2）。serve は設定
+    /// `check_on_save` が `idle` のときだけ受け、ほかは [`DoneStatus::NotApplicable`] で返す。
+    pub const AUTO: SubmitFlags = SubmitFlags(1 << 4);
 
     pub const fn contains(self, f: SubmitFlags) -> bool {
         self.0 & f.0 == f.0
@@ -223,14 +240,29 @@ pub enum Request {
     Warm { file: PathBuf },
     /// ジョブを頼む。`file` は保存したファイルの絶対パス（プロジェクトの根は serve が探す）。
     /// 同じプロジェクト・同じ種類の前の依頼が動いていれば、serve が取り消してから始める
-    /// （build は build だけ、check は check だけを取り消す）。
-    Submit { req: ReqId, kind: JobKind, lang: RemoteLang, flags: SubmitFlags, file: PathBuf },
+    /// （build は build だけ、check は check だけを取り消す）。`overlay` は、ディスクの代わりに
+    /// 使う未保存の中身（根の外のもの・木に無いものは serve が捨てる）。
+    Submit { req: ReqId, kind: JobKind, lang: RemoteLang, flags: SubmitFlags, file: PathBuf, overlay: Vec<OverlayFile> },
     /// 依頼を取り消す。
     Cancel { req: ReqId },
     /// 状態を聞く。返事は [`Response::Status`]。
     Status,
     /// serve を終わらせる（試験用）。
     Shutdown,
+}
+
+/// ディスクの代わりに使う、開いている文書の未保存の中身（[`Request::Submit`]）。
+#[derive(Clone, PartialEq, Eq)]
+pub struct OverlayFile {
+    /// 絶対パス（zcode は根を知らない。serve が根からの相対に直す）。
+    pub path: PathBuf,
+    pub bytes: Vec<u8>,
+}
+
+impl core::fmt::Debug for OverlayFile {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "OverlayFile({:?}, {} バイト)", self.path, self.bytes.len())
+    }
 }
 
 /// 1 ファイルぶんの診断（[`Response::Diagnostics`]）。
@@ -299,7 +331,7 @@ pub enum DecodeError {
     UnknownKind(u16),
     /// 値が範囲の外（列挙の番号、UTF-8 でない文字列）。
     Invalid(&'static str),
-    /// `len` が [`MAX_FRAME`] を超えている（相手が壊れている。切る）。
+    /// `len` が上限（[`MAX_FRAME`]、依頼は [`MAX_REQUEST_FRAME`]）を超えている（相手が壊れている。切る）。
     TooLarge(u32),
 }
 
@@ -344,12 +376,19 @@ pub fn encode_request(msg: &Request, out: &mut Vec<u8>) {
             begin(out, K_WARM, ReqId::NONE);
             put_path(out, file);
         }
-        Request::Submit { req, kind, lang, flags, file } => {
+        Request::Submit { req, kind, lang, flags, file, overlay } => {
             begin(out, K_SUBMIT, *req);
             out.push(*kind as u8);
             out.push(*lang as u8);
             put_u16(out, flags.0);
             put_path(out, file);
+            let overlay = &overlay[..overlay.len().min(u16::MAX as usize)];
+            put_u16(out, overlay.len() as u16);
+            for o in overlay {
+                put_path(out, &o.path);
+                put_u32(out, o.bytes.len() as u32);
+                out.extend_from_slice(&o.bytes);
+            }
         }
         Request::Cancel { req } => begin(out, K_CANCEL, *req),
         Request::Status => begin(out, K_STATUS, ReqId::NONE),
@@ -454,7 +493,7 @@ pub fn encode_response(msg: &Response, out: &mut Vec<u8>) {
 
 /// 1 メッセージ（頭の `len` より後ろ = `kind` から本体の終わりまで）を読む。
 pub fn decode_request(frame: &[u8]) -> Result<Request, DecodeError> {
-    let (kind, req, mut r) = split_header(frame)?;
+    let (kind, req, mut r) = split_header(frame, MAX_REQUEST_FRAME)?;
     let msg = match kind {
         K_HELLO => {
             let version = r.u16()?;
@@ -480,7 +519,19 @@ pub fn decode_request(frame: &[u8]) -> Result<Request, DecodeError> {
                 _ => return Err(DecodeError::Invalid("lang")),
             };
             let flags = SubmitFlags(r.u16()?);
-            Request::Submit { req, kind, lang, flags, file: r.path()? }
+            let file = r.path()?;
+            // 版 1 の Submit は file で終わる（重ね無し）
+            let mut overlay = Vec::new();
+            if r.remaining() > 0 {
+                let n = r.u16()? as usize;
+                overlay.reserve(n.min(r.remaining() / 6));
+                for _ in 0..n {
+                    let path = r.path()?;
+                    let len = r.u32()? as usize;
+                    overlay.push(OverlayFile { path, bytes: r.take(len)?.to_vec() });
+                }
+            }
+            Request::Submit { req, kind, lang, flags, file, overlay }
         }
         K_CANCEL => Request::Cancel { req },
         K_STATUS => Request::Status,
@@ -493,7 +544,7 @@ pub fn decode_request(frame: &[u8]) -> Result<Request, DecodeError> {
 
 /// 1 メッセージ（`kind` から本体の終わりまで）を読む。
 pub fn decode_response(frame: &[u8]) -> Result<Response, DecodeError> {
-    let (kind, req, mut r) = split_header(frame)?;
+    let (kind, req, mut r) = split_header(frame, MAX_FRAME)?;
     let msg = match kind {
         R_HELLO => Response::Hello { version: r.u16()? },
         R_STATUS => {
@@ -606,8 +657,8 @@ fn backend(v: u8) -> Result<Backend, DecodeError> {
 }
 
 /// 頭の残り（`kind`・`flags`・`req`）を読み、本体の読み手を返す。
-fn split_header(frame: &[u8]) -> Result<(u16, ReqId, Rd<'_>), DecodeError> {
-    if frame.len() > MAX_FRAME {
+fn split_header(frame: &[u8], limit: usize) -> Result<(u16, ReqId, Rd<'_>), DecodeError> {
+    if frame.len() > limit {
         return Err(DecodeError::TooLarge(frame.len().min(u32::MAX as usize) as u32));
     }
     let mut r = Rd { b: frame, pos: 0 };
@@ -773,16 +824,30 @@ impl<'a> Rd<'a> {
 /// 返したメッセージのぶんは、次の [`FrameReader::push`] で詰める（読むたびに詰め直さない）。
 /// [`DecodeError::TooLarge`] / [`DecodeError::Length`] を返したあとは続きを読めない（相手が
 /// 壊れている。接続を切る）。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FrameReader {
     buf: Vec<u8>,
     /// `buf` の中の、まだ返していない位置。
     pos: usize,
+    /// 1 メッセージの上限（頭の `len` の値）。
+    limit: usize,
+}
+
+impl Default for FrameReader {
+    fn default() -> FrameReader {
+        FrameReader { buf: Vec::new(), pos: 0, limit: MAX_FRAME }
+    }
 }
 
 impl FrameReader {
+    /// 返事（Response）を読む側。上限は [`MAX_FRAME`]。
     pub fn new() -> FrameReader {
         FrameReader::default()
+    }
+
+    /// 依頼（Request）を読む側（serve）。上限は [`MAX_REQUEST_FRAME`]（重ねの分だけ大きい）。
+    pub fn for_requests() -> FrameReader {
+        FrameReader { limit: MAX_REQUEST_FRAME, ..FrameReader::default() }
     }
 
     /// 読んだバイト列を足す。
@@ -812,7 +877,7 @@ impl FrameReader {
             return Ok(None);
         }
         let len = u32::from_le_bytes([avail[0], avail[1], avail[2], avail[3]]);
-        if len as usize > MAX_FRAME {
+        if len as usize > self.limit {
             return Err(DecodeError::TooLarge(len));
         }
         if (len as usize) < HEADER_LEN - 4 {
@@ -838,6 +903,7 @@ mod tests {
         assert_eq!(RemoteLang::parse("node"), Some(RemoteLang::Node));
         assert_eq!(RemoteLang::parse("python"), None);
         assert!(SubmitFlags(0b101).contains(SubmitFlags::ONLY_IF_WARM));
+        assert!(SubmitFlags(0b10001).contains(SubmitFlags::AUTO));
         assert!(!SubmitFlags::NONE.contains(SubmitFlags::WANT_LOG));
     }
 
@@ -845,17 +911,71 @@ mod tests {
     // 半端に届いたバイト列の切り出し、知らない kind の読み飛ばし、MAX_FRAME 超えの拒否。
     #[test]
     fn submit_round_trips_and_matches_golden_bytes() {
-        let msg = Request::Submit { req: ReqId(7), kind: JobKind::Check, lang: RemoteLang::Rust, flags: SubmitFlags::NONE, file: "/a/b.rs".into() };
+        let msg = Request::Submit { req: ReqId(7), kind: JobKind::Check, lang: RemoteLang::Rust, flags: SubmitFlags::NONE, file: "/a/b.rs".into(), overlay: vec![] };
         let mut buf = Vec::new();
         encode_request(&msg, &mut buf);
-        // len=21, kind=0x0003, flags=0, req=7, kind=2, lang=1, flags=0, 長さ 7 + "/a/b.rs"
-        assert_eq!(buf, [21, 0, 0, 0, 3, 0, 0, 0, 7, 0, 0, 0, 2, 1, 0, 0, 7, 0, b'/', b'a', b'/', b'b', b'.', b'r', b's']);
+        // len=23, kind=0x0003, flags=0, req=7, kind=2, lang=1, flags=0, 長さ 7 + "/a/b.rs", 重ね 0 件
+        assert_eq!(buf, [23, 0, 0, 0, 3, 0, 0, 0, 7, 0, 0, 0, 2, 1, 0, 0, 7, 0, b'/', b'a', b'/', b'b', b'.', b'r', b's', 0, 0]);
         let mut r = FrameReader::new();
         r.push(&buf[..5]);
         assert_eq!(r.next_frame().unwrap(), None);
         r.push(&buf[5..]);
         let frame = r.next_frame().unwrap().unwrap().to_vec();
         assert_eq!(decode_request(&frame).unwrap(), msg);
+
+        // 版 1 の Submit（file で終わる）も読める。重ね無し
+        let v1 = [21, 0, 0, 0, 3, 0, 0, 0, 7, 0, 0, 0, 2, 1, 0, 0, 7, 0, b'/', b'a', b'/', b'b', b'.', b'r', b's'];
+        assert_eq!(decode_request(&v1[4..]).unwrap(), msg);
+    }
+
+    #[test]
+    fn submit_overlay_matches_golden_bytes() {
+        let msg = Request::Submit {
+            req: ReqId(1),
+            kind: JobKind::Check,
+            lang: RemoteLang::Rust,
+            flags: SubmitFlags::AUTO,
+            file: "/p/a.rs".into(),
+            overlay: vec![OverlayFile { path: "/p/a.rs".into(), bytes: b"fn".to_vec() }, OverlayFile { path: "/p/e".into(), bytes: vec![] }],
+        };
+        let mut buf = Vec::new();
+        encode_request(&msg, &mut buf);
+        #[rustfmt::skip]
+        let body = [
+            2, 1, 0x10, 0,                                      // kind, lang, flags = AUTO
+            7, 0, b'/', b'p', b'/', b'a', b'.', b'r', b's',     // file
+            2, 0,                                               // 重ね 2 件
+            7, 0, b'/', b'p', b'/', b'a', b'.', b'r', b's',     // path
+            2, 0, 0, 0, b'f', b'n',                             // 長さ + 中身
+            4, 0, b'/', b'p', b'/', b'e',
+            0, 0, 0, 0,                                         // 空の中身
+        ];
+        assert_eq!(&buf[HEADER_LEN..], body);
+        assert_eq!(decode_request(&buf[4..]).unwrap(), msg);
+    }
+
+    /// 依頼は重ねの分だけ大きくてよい（上限 MAX_REQUEST_FRAME）。返事は MAX_FRAME のまま。
+    #[test]
+    fn requests_may_carry_a_megabyte_overlay() {
+        let bytes: Vec<u8> = (0..MAX_OVERLAY_BYTES).map(|i| (i % 251) as u8).collect();
+        let msg = Request::Submit { req: ReqId(3), kind: JobKind::Check, lang: RemoteLang::Node, flags: SubmitFlags::AUTO, file: "/p/a.ts".into(), overlay: vec![OverlayFile { path: "/p/a.ts".into(), bytes }] };
+        let mut buf = Vec::new();
+        encode_request(&msg, &mut buf);
+        assert!(buf.len() - 4 > MAX_FRAME && buf.len() - 4 <= MAX_REQUEST_FRAME);
+        let mut r = FrameReader::for_requests();
+        for chunk in buf.chunks(64 * 1024) {
+            r.push(chunk);
+        }
+        assert_eq!(decode_request(r.next_frame().unwrap().unwrap()).unwrap(), msg);
+        // 返事を読む側は、同じ大きさを断る
+        let mut r = FrameReader::new();
+        r.push(&buf);
+        assert!(matches!(r.next_frame(), Err(DecodeError::TooLarge(_))));
+        assert!(matches!(decode_response(&buf[4..]), Err(DecodeError::TooLarge(_))));
+        // 依頼の上限を超えるもの
+        let mut r = FrameReader::for_requests();
+        r.push(&((MAX_REQUEST_FRAME as u32) + 1).to_le_bytes());
+        assert!(matches!(r.next_frame(), Err(DecodeError::TooLarge(_))));
     }
 
     fn requests() -> Vec<Request> {
@@ -863,8 +983,16 @@ mod tests {
             Request::Hello { version: IPC_VERSION, client: ClientKind::Editor },
             Request::Hello { version: 9, client: ClientKind::Cli },
             Request::Warm { file: "/home/u/code/a/src/main.rs".into() },
-            Request::Submit { req: ReqId(1), kind: JobKind::Build, lang: RemoteLang::C, flags: SubmitFlags(0b1011), file: "/x/日本語.c".into() },
-            Request::Submit { req: ReqId(u32::MAX - 1), kind: JobKind::Test, lang: RemoteLang::Node, flags: SubmitFlags::WANT_LOG, file: "".into() },
+            Request::Submit { req: ReqId(1), kind: JobKind::Build, lang: RemoteLang::C, flags: SubmitFlags(0b1011), file: "/x/日本語.c".into(), overlay: vec![] },
+            Request::Submit { req: ReqId(u32::MAX - 1), kind: JobKind::Test, lang: RemoteLang::Node, flags: SubmitFlags::WANT_LOG, file: "".into(), overlay: vec![] },
+            Request::Submit {
+                req: ReqId(2),
+                kind: JobKind::Check,
+                lang: RemoteLang::Rust,
+                flags: SubmitFlags::AUTO,
+                file: "/x/src/main.rs".into(),
+                overlay: vec![OverlayFile { path: "/x/src/main.rs".into(), bytes: "fn main() { let あ = 1; }\n".into() }, OverlayFile { path: "/x/src/lib.rs".into(), bytes: vec![0, 0xff] }],
+            },
             Request::Cancel { req: ReqId(42) },
             Request::Status,
             Request::Shutdown,
@@ -1111,7 +1239,7 @@ mod tests {
         assert!(matches!(decode_request(&buf[4..]), Err(DecodeError::Invalid(_))));
 
         let mut buf = Vec::new();
-        encode_request(&Request::Submit { req: ReqId(1), kind: JobKind::Build, lang: RemoteLang::Rust, flags: SubmitFlags::NONE, file: "/a".into() }, &mut buf);
+        encode_request(&Request::Submit { req: ReqId(1), kind: JobKind::Build, lang: RemoteLang::Rust, flags: SubmitFlags::NONE, file: "/a".into(), overlay: vec![] }, &mut buf);
         let mut b = buf.clone();
         b[HEADER_LEN] = 0;
         assert!(matches!(decode_request(&b[4..]), Err(DecodeError::Invalid(_))));

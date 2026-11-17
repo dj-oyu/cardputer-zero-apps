@@ -400,3 +400,72 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - 環境変数（`ZC_REMOTE_URL` など）は `serve` を起動するときに読まれる。動いている `serve` には効かないので、
   試すときは先に `zc-remote stop`
 
+## 打鍵が止まったときの型検査（2026-11-17、ブランチ `zcode-auto-check`）
+
+- `remote.json` の `check_on_save` に `idle` を足した（保存時に加えて、打鍵が止まったときも）。既定は
+  `always` のまま（保存時だけ）。zcode は設定を読まない: `SubmitFlags::AUTO` の依頼を serve が
+  `idle` のときだけ受け、ほかは `NotApplicable` で断る。zcode は断られた・届かない（`Ok`・`Failed`・
+  `Cancelled` 以外）ら次の保存まで休む。`remote.json` が無い人には、専用スレッドも serve も作らない
+- zcode: `remote` のある言語で編集したら `TimerId::AutoCheck` を 1200ms（`editor::AUTO_CHECK_IDLE`）で
+  仕掛け直すだけ（打鍵ごとの仕事は版の比較とタイマー）。鳴ったら、未保存のタブの写し
+  （`snapshot_lines`）を `RemoteJob::overlay` に入れて頼む。バイト列にするのは専用スレッド（合計 1MiB
+  まで。超えたら送らない）。前に頼んだ版のまま・同じプロジェクトでほかの相手のジョブ（F5 のビルド）や
+  F6 の試験が動いている間は頼まない。診断の基準は頼んだときの各タブの版（`MyJob::bases` → `bind`）。
+  進み具合・知らせ・オフラインはステータスバーに出さない（波線と `⊗ n` だけ）。「zc-remote が無い」は
+  次の保存時の check の終わりに出す
+- IPC は版 2: `Submit` の後ろに重ね（絶対パス + 中身）。serve は版 1 の相手も受ける（`Hello` を相手の
+  版で返す）。新しい zcode は古い serve とは話せない（版が違う → 実機の構文チェックに回る）ので、
+  **zc-remote を先に入れ替え、`zc-remote stop` してから zcode を入れる**
+- serve: 走査のあとで目録の同じパスを重ねの大きさと SHA-256 に差し替え（`scan::apply_overlay`）、
+  中身は RAM から送る。ハッシュの覚えはディスクのまま。目録に無いファイル（除外・まだ無い）と根の
+  外のものは捨てる。依頼は `MAX_REQUEST_FRAME`（256KiB + 1MiB）まで読む
+- Worker: 1 日の上限（400）は `check` を数えない（build / test だけ）。deploy し直すまで効かない
+- 実機（2 号機・Wi-Fi、2026-11-17）: 保存せずに未定義の名前を打つと、打ち終えて 3 秒後の画面に赤い波線と
+  ステータスバーの誤り（`cannot find value ...`）が出ていた。消すと波線も消える。未確認: 打鍵中の遅延・
+  `idle` での電池
+
+## ビルド係の費用の上限（2026-11-17、ブランチ `zcode-cost-cap`）
+
+- **ユーザーの決定**: 安いコンテナにし、**月の超過は 5 ドルまで**（Workers Paid の 5 ドルと合わせて
+  月 10 ドル前後）。値は全部 `remote/worker/wrangler.jsonc` の `vars`（人向けは `docs/setup-remote-build.md`
+  §2.6、設計は `docs/stage3-design.md` §6.6）
+- 大きさは custom の **1 vCPU・3GiB・12GB**（`INSTANCE_VCPU`・`INSTANCE_MEMORY_MIB`・`INSTANCE_DISK_MB`。
+  `INSTANCE_TYPE` に名前を書けばそちら）。custom は 1 vCPU あたり 3GiB 以上（外れた値は既定に戻してログ）。
+  `durable_object` 方式の `start()` は `basic` を受けないので名前の表に入れていない。keep-warm は **300 秒**
+- 数字（料金表からの計算）: 1 vCPU・3GiB はメモリ 0.027 ドル / 時（`standard-4` は 0.108）。含まれる
+  25GiB 時間（約 8 時間）の後、超過 5 ドルまでで約 190 時間（メモリだけ）・約 175 時間（ディスク 12GB 込み）。
+  CPU はジョブが走っている 1 時間で 0.072 ドル
+- **ビルドは `standard-4` より遅い**（deploy 後に 2 号機・Wi-Fi で測った。2026-11-17）:
+
+  | 場面 | 1 vCPU・3GiB | `standard-4`（前の表） |
+  |---|---|---|
+  | Rust の hello、冷えたコンテナからの `run` | 2.21 秒（DO が止めた後。起動・ビルド・受け取り込み） | 14.1 秒（deploy 直後の最初の起動） |
+  | 1 行変えて `run` | 0.42 秒 | 0.42 秒 |
+  | 型エラーの `check` | 0.19 秒 | 0.13 秒 |
+  | regex の初回の `run` | **22.8 秒** | 8.6 秒 |
+  | regex を変更なしで `run` | 1.15 秒（583KB を受け取る） | — |
+
+  小さな差分のビルドと check は変わらず、依存の多い初回だけ約 2.7 倍。`/v1/usage` はメモリ 0.039GiB 時間
+  （約 47 秒 × 3GiB）で、3GiB の割り当てと合う
+- deploy 後に確かめた（2026-11-17）: custom の `instance` は受け付けられた。最後のジョブから約 5 分で DO が
+  `destroy()` し、`/v1/usage` の `running` が false になった。その後の `run` で次の `start()` も通った。
+  `BudgetLedger` は `exports` で作られた（deploy の出力に「Created: BudgetLedger」）。`vcpu_min_est` は
+  ジョブ中に読むと仮の延長込みの値で、後で読むと減ることがある（0.7 → 0.42）。未確認: ダッシュボードの
+  Containers の使用量との突き合わせ、上限に達したときの実機の表示
+- 守りの形（`remote/worker/src/budget.ts`）: 実機ごとの DO が自分の使用量を SQLite で計り（`Meter`。
+  メモリ・ディスク = 動いている時間 × 割り当て、CPU = ジョブが走っていた時間 × vCPU の多めの見積もり）、
+  アカウントに 1 つの台帳の DO（`BudgetLedger`、名前 `budget`）へ**合計の写し**を送る（差分ではないので
+  届かなくても次で追いつく）。上限は**アカウント全体で 1 つ**（実機ごとだと 2 台で 10 ドルになるため）。
+  判断は手元の値（自分の分 + 前に聞いたほかの分）でする: 受け付けの途中で外へ聞くと、同じ接続の次の
+  メッセージが割り込むため。コンテナを起こす前だけは台帳の返事を待つ（その間のメッセージは queue にたまる）
+- 断り方: 新しい `job`（check も）に `error {job, code:"limit", message, retry_after_s}`、冷えたコンテナは
+  起こさず job の無い `error {limit}` を送って 4429 で閉じる。`zc-remote` は両方とも今の約束のまま「上限」
+  （終了コード 5）として文を表示する（job の無いほうは「（あと N 秒）」が付く）。zcode の保存時の check は
+  `Limit` を黙って捨てる（手元の構文チェックにも回らない。変えるなら zcode 側）
+- **DO が自分でコンテナを止める**ようにした: コンテナが動いている間は alarm を 30 秒ごとに掛け続け、最後の
+  動きから `KEEP_WARM_S` 過ぎたら（上限に達していればジョブが終わり次第）`destroy()`。止めた時刻を正確に
+  数えるためと、「alarm が DO の動きとして数えられ、setInactivityTimeout が延びるか」（未確認）に費用が
+  左右されないため。setInactivityTimeout は守りとして残す
+- 見込みは `GET /v1/usage`（Access の内側、JSON。`month`・`usage.memory_gib_h`・`usage.vcpu_min_est`・
+  `overage_usd.total`・`devices` など）。`zc-remote status` はまだ表示しない
+

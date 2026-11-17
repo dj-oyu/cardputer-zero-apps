@@ -305,6 +305,51 @@ fn check_diagnostics_arrive_over_the_ipc_socket() {
     assert!(got.iter().any(|r| matches!(r, ipc::Response::Diagnostics { complete: true, last: true, files, .. } if files.iter().all(|f| f.diags.is_empty()))), "{got:#?}");
 }
 
+/// 打鍵が止まったときの check（設定 `check_on_save = idle`）: 保存していない中身（重ね）の
+/// 型エラーが、本物の cargo の診断として正しい行・バイト位置で届く。ディスクの中身はきれいなまま。
+#[test]
+fn unsaved_overlay_is_checked_while_the_disk_is_clean() {
+    if skip_without(&["cargo"]) {
+        return;
+    }
+    let sb = Sandbox::new("ovl");
+    let buildd = Buildd::start(&sb);
+    let env = pc(buildd.port);
+    std::fs::write(sb.root.join("config/zcode/remote.json"), r#"{ "check_on_save": "idle" }"#).unwrap();
+    sb.write("code/ovl/Cargo.toml", &HELLO_TOML.replace("hello", "ovl"));
+    let clean = BROKEN_RS.replace("\"str\"", "42");
+    let main = sb.write("code/ovl/src/main.rs", &clean);
+    let root = sb.home().join("code/ovl");
+    let line = BROKEN_RS.lines().nth(2).unwrap();
+    let col = line.find("\"str\"").unwrap() as u32;
+
+    let _serve = sb.serve(&env, &[]);
+    let mut editor = sb.client(ipc::ClientKind::Editor);
+    // ディスクのままなら通る
+    editor.submit(1, ipc::JobKind::Check, ipc::RemoteLang::Rust, ipc::SubmitFlags::AUTO, &main);
+    assert_eq!(done_of(&editor.until_done(WAIT)).0, ipc::DoneStatus::Ok);
+    // 未保存の中身を重ねる: 型エラー（3 行目、日本語の後ろ）
+    let overlay = vec![ipc::OverlayFile { path: main.clone(), bytes: BROKEN_RS.into() }];
+    editor.submit_overlay(2, ipc::JobKind::Check, ipc::RemoteLang::Rust, ipc::SubmitFlags::AUTO, &main, overlay);
+    let got = editor.until_done(WAIT);
+    let (status, _, backend, message) = done_of(&got);
+    assert_eq!((status, backend), (ipc::DoneStatus::Failed, ipc::Backend::Pc), "{message} {got:#?}");
+    let d = got
+        .iter()
+        .filter_map(|r| if let ipc::Response::Diagnostics { req: ipc::ReqId(2), root: r, files, .. } = r { assert_eq!(r, &root); Some(files) } else { None })
+        .flatten()
+        .filter(|f| f.path == "src/main.rs")
+        .flat_map(|f| f.diags.iter())
+        .find(|d| d.code.as_deref() == Some("E0308"))
+        .unwrap_or_else(|| panic!("E0308 の診断が無い: {got:#?}"))
+        .clone();
+    assert_eq!((d.line, d.col, d.end), (2, Some(col), Some((2, col + 5))), "{d:?}");
+    // ディスクは書き換えていない。もう一度ディスクのままで頼めば通る（結果の使い回し）
+    assert_eq!(std::fs::read_to_string(&main).unwrap(), clean);
+    editor.submit(3, ipc::JobKind::Check, ipc::RemoteLang::Rust, ipc::SubmitFlags::NONE, &main);
+    assert_eq!(done_of(&editor.until_done(WAIT)).0, ipc::DoneStatus::Ok);
+}
+
 /// 受付との間に挟む中継。台本どおりに接続を切る（何も言わずに両側を閉じる）。
 ///
 /// - 1 本目: 受付の `started` を通した直後に切る（ジョブは受付で走り続ける）

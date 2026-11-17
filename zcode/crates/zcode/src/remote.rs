@@ -37,6 +37,9 @@
 //!   来たら、そこまでの分を `complete = false` で送る
 //! - 終わったジョブについての、まとめて持っていた進み具合は捨てる（`Done` のあとに古い
 //!   進み具合を出さない）
+//! - 未保存の中身の重ね（[`OverlaySource`]。打鍵が止まったときの check）は、メインでは
+//!   文書の写しを取るだけ。バイト列にするのはこのスレッド。合計が
+//!   [`zc_remote_ipc::MAX_OVERLAY_BYTES`] を超えたら送らず、[`DoneStatus::NotApplicable`] で返す
 
 use crate::app::AppEvent;
 use std::collections::{HashMap, VecDeque};
@@ -46,12 +49,13 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{mpsc, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use zc_core::rt::{MainSender, Notifier};
+use zc_core::LineSource;
 use zc_remote_ipc::{
-    decode_response, encode_request, ArtifactKind, Backend, ClientKind, DecodeError, DoneStatus, FileDiags, FrameReader, JobKind, JobTag, Phase, RemoteLang, ReqId, Request, Response,
-    SubmitFlags, TestReport, IPC_VERSION,
+    decode_response, encode_request, ArtifactKind, Backend, ClientKind, DecodeError, DoneStatus, FileDiags, FrameReader, JobKind, JobTag, OverlayFile, Phase, RemoteLang, ReqId, Request,
+    Response, SubmitFlags, TestReport, IPC_VERSION, MAX_OVERLAY_BYTES, MAX_REQUEST_FRAME,
 };
 
 /// メインを起こす最短の間隔（design.md §4.3 のターミナルの間引きと同じ 30fps）。
@@ -68,8 +72,8 @@ const RECONNECT_FIRST: Duration = Duration::from_millis(500);
 const RECONNECT_MAX: Duration = Duration::from_secs(8);
 /// serve を起動したあと、ソケットを試す間隔。
 const SPAWN_POLL: Duration = Duration::from_millis(20);
-/// 書けずに溜まった依頼の上限（serve が読んでいない。切る）。
-const OUT_MAX: usize = 1024 * 1024;
+/// 書けずに溜まった依頼の上限（serve が読んでいない。切る）。重ねつきの依頼 2 つぶん。
+const OUT_MAX: usize = 2 * MAX_REQUEST_FRAME;
 /// ログを捨てて詰めるとき、この範囲に改行があれば行の頭からにする。
 const LOG_TRIM_LOOKAHEAD: usize = 256;
 
@@ -78,13 +82,86 @@ const LOG_TRIM_LOOKAHEAD: usize = 256;
 pub struct RemoteReq(pub u32);
 
 /// ジョブの依頼。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct RemoteJob {
     pub kind: JobKind,
     pub lang: RemoteLang,
     pub flags: SubmitFlags,
     /// 保存したファイルの絶対パス。
     pub file: PathBuf,
+    /// ディスクの代わりに使う未保存の中身（打鍵が止まったときの check。ふつうは空）。
+    pub overlay: Vec<OverlaySource>,
+}
+
+impl RemoteJob {
+    /// 重ね無しの依頼。
+    pub fn new(kind: JobKind, lang: RemoteLang, flags: SubmitFlags, file: PathBuf) -> RemoteJob {
+        RemoteJob { kind, lang, flags, file, overlay: Vec::new() }
+    }
+}
+
+/// 開いている文書の未保存の中身（[`RemoteJob::overlay`]）。メインは文書の写し
+/// （`TextDoc::snapshot_lines`。`zc_buffer` なら O(1)）を渡すだけで、バイト列にするのは
+/// 専用スレッド（[`OverlaySource::bytes`]）。
+#[derive(Clone)]
+pub struct OverlaySource {
+    /// 文書の絶対パス。
+    pub path: PathBuf,
+    lines: Arc<Mutex<Box<dyn LineSource + Send>>>,
+}
+
+impl OverlaySource {
+    pub fn new(path: PathBuf, lines: Box<dyn LineSource + Send>) -> OverlaySource {
+        OverlaySource { path, lines: Arc::new(Mutex::new(lines)) }
+    }
+
+    /// 中身（行を `\n` でつなぐ。最後の行が空なら末尾の改行になる）。`limit` バイトを
+    /// 超えたら `None`。
+    pub fn bytes(&self, limit: usize) -> Option<Vec<u8>> {
+        let lines = self.lines.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::new();
+        let mut line = String::new();
+        let n = lines.len_lines();
+        for i in 0..n {
+            lines.line(i, &mut line);
+            let newline = usize::from(i + 1 < n);
+            if out.len() + line.len() + newline > limit {
+                return None;
+            }
+            out.extend_from_slice(line.as_bytes());
+            if newline == 1 {
+                out.push(b'\n');
+            }
+        }
+        Some(out)
+    }
+}
+
+impl std::fmt::Debug for OverlaySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OverlaySource({:?})", self.path)
+    }
+}
+
+/// 重ねをバイト列にする。合計が `limit` を超えたら `None`。
+fn overlay_bytes(src: &[OverlaySource], limit: usize) -> Option<Vec<OverlayFile>> {
+    let mut left = limit;
+    let mut out = Vec::with_capacity(src.len());
+    for o in src {
+        let bytes = o.bytes(left)?;
+        left -= bytes.len();
+        out.push(OverlayFile { path: o.path.clone(), bytes });
+    }
+    Some(out)
+}
+
+/// `zc-remote` の設定のファイル（`~/.config/zcode/remote.json`。`XDG_CONFIG_HOME` があれば
+/// そちら）があるか。打鍵が止まったときの check は、これが無い人には専用スレッドも serve も
+/// 作らない（中身は読まない。読むのは serve）。
+pub fn remote_config_exists() -> bool {
+    let abs = |k: &str| std::env::var_os(k).map(PathBuf::from).filter(|p| p.is_absolute());
+    let Some(base) = abs("XDG_CONFIG_HOME").or_else(|| abs("HOME").map(|h| h.join(".config"))) else { return false };
+    base.join("zcode").join("remote.json").is_file()
 }
 
 /// 専用スレッドからメインへ（[`AppEvent::Remote`]）。
@@ -453,10 +530,14 @@ impl Worker {
     }
 
     fn submit(&mut self, req: RemoteReq, job: RemoteJob, started: Instant) {
+        // 未保存の中身は、つなぐ前にバイト列にする（大きすぎれば、つながずに断る）
+        let Some(overlay) = overlay_bytes(&job.overlay, MAX_OVERLAY_BYTES) else {
+            return self.done_now(req, None, started, DoneStatus::NotApplicable, format!("未保存の中身が {}MiB を超えている", MAX_OVERLAY_BYTES >> 20));
+        };
         match self.ensure_connected(true) {
             Ok(()) => {
                 self.jobs.insert(req.0, JobState { tag: None, started });
-                self.write(&Request::Submit { req: ReqId(req.0), kind: job.kind, lang: job.lang, flags: job.flags, file: job.file });
+                self.write(&Request::Submit { req: ReqId(req.0), kind: job.kind, lang: job.lang, flags: job.flags, file: job.file, overlay });
             }
             Err(ConnectFail::Unavailable) => self.done_now(req, None, started, DoneStatus::NotApplicable, String::new()),
             Err(ConnectFail::NoServe) => self.done_now(req, None, started, DoneStatus::Error, "zc-remote serve につながらない".into()),

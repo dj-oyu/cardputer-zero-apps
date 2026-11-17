@@ -289,7 +289,8 @@ u64 offset    この中身の、流れの中での位置
 |---|---|---|
 | Access のアプリケーション | `zcode-build`（ホスト名 `<build-host>`） | サービストークンを確かめ、JWT を付ける。合わなければ Worker に届かない |
 | Worker | `zcode-build` | JWT を確かめる・身元を `device_id` に直す・つなぐ回数の制限・DO へ渡す |
-| Durable Object | `BuildSession`（名前 = `device_id`、SQLite） | ジョブの持ち主: 中継・台帳・1 日の上限・コンテナの寿命 |
+| Durable Object | `BuildSession`（名前 = `device_id`、SQLite） | ジョブの持ち主: 中継・台帳・1 日の上限・コンテナの寿命・自分の使用量の計り |
+| Durable Object | `BudgetLedger`（名前 `budget`、アカウントに 1 つ、SQLite） | 費用の台帳: 実機ごとの使用量の最新の写しを集め、月の上限の判断に使う（§6.6） |
 | コンテナ | イメージ `builder` | `zc-buildd` と道具 |
 
 **DO は実機 1 台につき 1 つ**（名前 = `device_id`）。2 台の実機が同じプロジェクトを触っても、
@@ -297,7 +298,8 @@ u64 offset    この中身の、流れの中での位置
 
 ### 6.2 Worker
 
-1. 口は `GET /v1/ws`（Upgrade）だけ。ほかは 404
+1. 口は `GET /v1/ws`（Upgrade）と `GET /v1/usage`（今月の費用の見込み、JSON。§6.6）だけ。ほかは 404。
+   どちらも下の 2〜4 を通す
 2. Access の JWT（ヘッダ `Cf-Access-Jwt-Assertion`）を Web Crypto で確かめる: 署名（RS256）、
    `iss` = `https://<チーム名>.cloudflareaccess.com`、`aud` にアプリケーションの AUD、`exp`。
    公開鍵は `https://<チーム名>.cloudflareaccess.com/cdn-cgi/access/certs`（1 時間覚える）
@@ -326,7 +328,11 @@ u64 offset    この中身の、流れの中での位置
   `zc-buildd` の `/v1/status` を聞いて、コンテナを止めさせない
 - コンテナが止まっていた（台帳では走っていたのに `/v1/status` に無い）ジョブは `lost` にする。
   `lost` のジョブへの `attach` には、コンテナを起こさずに `done {lost}` を返す
-- 最後の接続が切れ、走っているジョブが無くなってから 10 分（`KEEP_WARM_S`）でコンテナを止める
+- 最後の動き（実機のメッセージ・接続・ジョブの終わり）から 5 分（`KEEP_WARM_S`）、走っているジョブが
+  無ければ、**DO が alarm で自分でコンテナを止める**（`destroy()`）。コンテナが動いている間は alarm を
+  30 秒ごとに掛け続ける。`setInactivityTimeout` も同じ時間で掛けておく（alarm が止まったときの守り）。
+  自分で止めるのは、止めた時刻を正確に数えるため（§6.6）と、「alarm が DO の動きとして数えられて
+  コンテナの止まるまでの時間が延びるか」が分からなくても止まる時間が決まるため
 - コンテナを起こせないときは `error {unavailable}`
 
 `attach`・`cancel`・ログの保持といった約束の中身を知っているのは `zc-buildd` で、DO は中継と
@@ -340,7 +346,8 @@ u64 offset    この中身の、流れの中での位置
 固定する。**秘密を入れない**（`build.rs`・`postinstall`・試験という任意のコードが動く）。
 
 起動の方式は、DO が自分でイメージ・大きさ・スナップショットを指定する形
-（`scheduling_policy = "durable_object"`。ベータ）。大きさは `standard-4`（4 vCPU・12GiB・20GB）。
+（`scheduling_policy = "durable_object"`。ベータ）。大きさは **custom の 1 vCPU・3GiB・12GB**
+（2026-11-17 決定。最初の deploy では `standard-4` = 4 vCPU・12GiB・20GB だった。理由は §6.6）。
 
 ### 6.5 キャッシュ（3 段で進める）
 
@@ -348,20 +355,41 @@ u64 offset    この中身の、流れの中での位置
 
 | 段 | やること | いつ |
 |---|---|---|
-| 1 | 温めておく（10 分）。まず、冷えた起動と初回のビルドの時間を**測る** | 最初の deploy（課題 C3 のあと） |
+| 1 | 温めておく（5 分）。まず、冷えた起動と初回のビルドの時間を**測る** | 最初の deploy（課題 C3 のあと） |
 | 2 | **スナップショット**: ビルドが成功し、lock のハッシュが前回の写しと違うとき、走っているジョブが無くなってから `snapshotContainer` で写す。id とイメージの版を DO に覚え、次に冷えたらそこから起こす。イメージが変わったら写しは捨てる。写しは 30 日保持（起こすたびに延びる） | 課題 C4 |
 | 3 | sccache（置き場は R2）。コンテナから外への HTTPS を DO が横取りして R2 の束縛へ流す形にすれば、**コンテナに秘密を置かずに済む** | 段 2 を測って足りなければ |
 
 ### 6.6 費用
 
 含まれる分（月 5 ドルの有料プラン）: CPU 375 vCPU 分・メモリ 25GiB 時間・ディスク 200GB 時間。
+単価: メモリ 0.0000025 ドル / GiB 秒（割り当てた大きさに、動いている間ずっと）、CPU 0.00002 ドル /
+vCPU 秒（使った分だけ）、ディスク 0.00000007 ドル / GB 秒。
 
-- 1 回のビルド（`standard-4` で 1 分）は CPU 4 vCPU 分で、含まれる分の約 1%
 - **温めておく間のメモリが本当の費用**。`standard-4`（12GiB）は 1 時間 0.108 ドルで、含まれる
-  25GiB 時間は約 2 時間分。10 分温めると 1 回で含まれる分の 8%。1 日 2 時間 × 30 日なら
-  月 6 ドル強の超過の見込み
-- 守り: 1 日のジョブ数（400）、実機 1 台にコンテナ 1 つ、温める時間は 10 分。Cloudflare の
-  利用量の通知を入れる（§12.1）
+  25GiB 時間は約 2 時間分。1 日 2 時間 × 30 日なら月 6 ドル強の超過の見込みだった
+- **決めたこと（2026-11-17 ユーザー）: 安い大きさにし、月の超過の上限を 5 ドルにする**（プランと
+  合わせて月 10 ドル前後）。大きさは custom の 1 vCPU・3GiB・12GB（メモリは custom の下限の
+  1 vCPU あたり 3GiB、ディスクはイメージ 1.5GB と cargo・npm のキャッシュの分）、温める時間は 5 分
+- 1 vCPU・3GiB は動いている 1 時間でメモリ 0.027 ドル（`standard-4` の 4 分の 1）。含まれる分
+  （約 8 時間）の後、超過 5 ドルまでで約 190 時間（メモリだけ）、ディスク込みで約 175 時間
+- ビルドは `standard-4` より遅い。実機で測った regex の初回の `run` 8.6 秒（`standard-4`）は、
+  1 vCPU で 20 秒前後になる見込み（**未計測**）
+- **月の上限の守り**（`remote/worker/src/budget.ts`）:
+  - 実機ごとの DO が、コンテナを起こしてから止めるまでを計る（SQLite。暦月は UTC）。メモリ・ディスクは
+    動いている時間 × 割り当て、CPU は見えないので「ジョブが走っていた時間 × vCPU」で多めに見積もる。
+    DO が作り直されて止まった時刻が分からなければ「最後の記録 + `KEEP_WARM_S` + 60 秒」と「今」の
+    早い方で閉じる（少なく数えない）
+  - 上限は**アカウント全体で 1 つ**: 実機ごとの DO は、自分の今月の合計の写し（差分ではない）を
+    台帳の DO（`BudgetLedger`）へ送り、ほかの実機の分を返してもらう。送るのはコンテナを起こす前
+    （返事を待つ）・ジョブの受け付けと終わり・alarm・止めたとき。判断は手元の値でする（受け付けの途中で
+    外へ聞くと、次のメッセージが割り込んで順番が崩れるため）。台帳に届かなければ前に聞いた値で続ける
+  - 「今の超過 + 次の 1 ジョブ（15 分）と keep-warm の見込み」が上限（`BUDGET_OVERAGE_USD`）を超えるなら:
+    新しい `job` に `error {limit}`（`retry_after_s` = 次の月まで）、止まっているコンテナは起こさず
+    `error {limit}`（job なし）で閉じる（4429）。走っているジョブは止めず、終わったらすぐ止める。
+    実機（`zc-remote`）は今の約束のまま「上限」として表示する（約束は変えていない）
+  - 見込みは `GET /v1/usage`（Access の内側、JSON）。人向けの説明は `setup-remote-build.md` §2.6
+- 2 本目の守り: Cloudflare の Billing の予算の通知（8 ドル前後）。1 日のジョブ数（400）、実機 1 台に
+  コンテナ 1 つ
 
 数字は公式の料金表からの計算で、実測ではない。
 
@@ -457,7 +485,7 @@ zcode と同じプロセスグループ（APPLaunch の Esc 長押しで一緒�
 ```
 
 - `backend`: `auto`（PC に届けば PC）/ `pc` / `cloudflare`
-- `check_on_save`: `always` / `warm`（接続が温かいときだけ）/ `manual`
+- `check_on_save`: `always` / `idle`（保存時に加えて、打鍵が止まったときも未保存の中身で。2026-11-17 に足した）/ `warm`（接続が温かいときだけ）/ `manual`
 
 `~/.config/zcode/remote-token.json`（**権限 0600。広ければ読まない**。ログに出さない）:
 
@@ -523,7 +551,7 @@ zcode / CLI → serve:
 |---|---|---|
 | 0x0001 | Hello | `u16 version`, `u8 client`（1 = エディタ、2 = CLI） |
 | 0x0002 | Warm | `path file` |
-| 0x0003 | Submit | `u8 kind`（1 build / 2 check / 3 test）, `u8 lang`（1 rust / 2 c / 3 node）, `u16 flags`, `path file` |
+| 0x0003 | Submit | `u8 kind`（1 build / 2 check / 3 test）, `u8 lang`（1 rust / 2 c / 3 node）, `u16 flags`, `path file`, `u16 重ねの件数`, 件ごとに `path file`・`u32 長さ`・バイト列（版 2。版 1 は `file` で終わる） |
 | 0x0004 | Cancel | — |
 | 0x0005 | Status | — |
 | 0x0006 | Shutdown | — |
@@ -542,11 +570,16 @@ serve → zcode / CLI:
 | 0x8008 | FileWritten | `u32 tag`, `path path` |
 | 0x8009 | Done | `u32 tag`, `u8 status`, `i32 exit`, `u8 backend`, `u32 elapsed_ms`, `str message` |
 
-例（Submit、`req` = 7、check、rust、`/a/b.rs`）:
-`15 00 00 00 | 03 00 | 00 00 | 07 00 00 00 | 02 | 01 | 00 00 | 07 00 2f 61 2f 62 2e 72 73`
+例（Submit、`req` = 7、check、rust、`/a/b.rs`、重ね無し。版 2）:
+`17 00 00 00 | 03 00 | 00 00 | 07 00 00 00 | 02 | 01 | 00 00 | 07 00 2f 61 2f 62 2e 72 73 | 00 00`
 
 `tag` は serve が振るジョブの通し番号。同じジョブについての知らせを突き合わせる。型の正本は
 `zc-remote-ipc/src/lib.rs`。
+
+約束の版は 2（2026-11-17。`Submit` に未保存の中身の重ねと `flags` の bit4 `AUTO` を足した）。
+serve は版 1 の相手も受け、`Hello` を相手の版で返す。依頼は重ねの分だけ大きくてよい
+（`MAX_REQUEST_FRAME` = 256KiB + 1MiB）。重ねのパスは絶対パス（zcode は根を知らない。serve が
+根からの相対に直し、目録に無いものは捨てる）。
 
 ### 8.3 保存したとき
 
@@ -736,7 +769,8 @@ sudo を使わない。置き場は jimmy のホームの下。
 |---|---|---|
 | つなぐ回数 | 実機ごとに 60 秒 30 回 | Worker |
 | 同時の接続 | 実機ごとに 4 本 | DO |
-| 1 日のジョブ数 | 実機ごとに 400 | DO |
+| 1 日のジョブ数 | 実機ごとに 400（check は数えない） | DO |
+| 月の費用 | 超過 5 ドル（アカウント全体、`BUDGET_OVERAGE_USD`） | DO と台帳の DO（§6.6） |
 | 同時に走るジョブ | 2（同じプロジェクトは 1 つ）。待ちは 8 | `zc-buildd` |
 | 1 ジョブの時間 | 15 分 | `zc-buildd` |
 | 木 | 2000 ファイル・32MiB・1 ファイル 4MiB | 実機（送る前）と `zc-buildd` |

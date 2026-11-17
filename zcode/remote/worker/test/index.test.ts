@@ -125,6 +125,27 @@ describe("handle", () => {
     expect(seen).toHaveLength(0);
   });
 
+  it("GET /v1/usage: Access と表を通った実機だけ、台帳の DO（名前 budget）のまとめを返す", async () => {
+    const budget = fakeDo();
+    const { env, seen } = makeEnv({ BUDGET: budget.ns });
+    const res = await run(await wsRequest({ path: "/v1/usage" }), env);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.text()).toBe("to-do");
+    expect(budget.seen).toHaveLength(1);
+    expect(budget.seen[0]!.name).toBe("budget");
+    expect(new URL(budget.seen[0]!.request.url).pathname).toBe("/usage");
+    expect(seen).toHaveLength(0);
+
+    // Upgrade は要らない。JWT が無ければ 401、表に無いトークンは 403
+    expect((await run(new Request("https://build.example.com/v1/usage"), env)).status).toBe(401);
+    expect((await run(await wsRequest({ path: "/v1/usage", jwt: await signJwt(key, servicePayload({ common_name: "nobody.access" })) }), env)).status).toBe(403);
+    expect(budget.seen).toHaveLength(1);
+    // 束縛が無ければ 503
+    const { env: noBudget } = makeEnv();
+    expect((await run(await wsRequest({ path: "/v1/usage" }), noBudget)).status).toBe(503);
+  });
+
   it("Upgrade でなければ 426", async () => {
     const { env, seen } = makeEnv();
     const res = await run(new Request("https://build.example.com/v1/ws"), env);

@@ -13,6 +13,7 @@
 //      DO は中継と見張りだけ（同じ実装を PC 直結でも使い、Cloudflare なしで試せるようにするため）
 //   4. 通り過ぎるテキストを見て**ジョブの台帳**（SQLite）を付ける:
 //        実機 → job      … 1 日の上限を数える。超えていたら中継せず error {limit} を返す
+//                          （check は数えない。打鍵が止まるたびに頼まれ、軽いため。build / test だけ数える）
 //        受付 → started  … running にする（始まった時刻を付け直す）
 //        受付 → done     … done にする（status・時刻を残す）
 //      バイナリは見ない。JSON として読めないテキストは中継せず error {protocol} で閉じる
@@ -22,8 +23,17 @@
 //      /v1/status に無いジョブは lost にする
 //   6. lost のジョブへの attach には、zc-buildd へ流さずに done {status:"lost"} を返す
 //      （実機は同じ依頼を出し直す。job id が同じなので、同じジョブとして数える）
-//   7. 最後の接続が切れ、running が無くなってから KEEP_WARM_S 秒でコンテナが止まる
-//      （alarm をやめ、setInactivityTimeout に任せる）
+//   7. 最後の動き（実機のメッセージ・接続・ジョブの終わり）から KEEP_WARM_S 秒、running が無ければ
+//      **DO が alarm で自分でコンテナを止める**（destroy）。コンテナが動いている間は alarm を
+//      30 秒ごとに掛け続ける。setInactivityTimeout も同じ時間で掛けておく（alarm が止まったときの
+//      守り）。自分で止めるのは、止めた時刻を正確に数えるため（費用の守り、budget.ts）と、
+//      「alarm が DO の動きとして数えられ、コンテナの止まるまでの時間が延びるか」が分からなくても
+//      止まる時間が決まるため。Cloudflare の文書の「alarm で自分の締め切りを持ち、過ぎたら destroy()」
+//      の形（Sandbox の Run code when a sandbox stops）と同じ
+//   8. **費用の守り**（budget.ts）: コンテナが動いている区間を数え（Meter）、アカウントの台帳の DO へ
+//      報告する。月の超過が上限（BUDGET_OVERAGE_USD）を超えそうなら、新しい job に error {limit}、
+//      冷えたコンテナは起こさず error {limit} で閉じる（4429）。走っているジョブは止めず、終わったら
+//      keep-warm を待たずにコンテナを止める
 //
 // **コンテナが止まっているときの接続（「冷えた接続」）**: 6 の「コンテナを起こさずに返す」ために、
 // コンテナが止まっている間は、上流が要るメッセージが来るまでコンテナを起こさない。
@@ -64,8 +74,9 @@
 //   - getTcpPort(7411).fetch() の返事の webSocket を accept() して、DO の中から読み書きできるか
 //     （公式の例は、返事をそのまま実機へ返す形。だめなら connect() の生の TCP に WebSocket の
 //     枠を自分で載せる。直すのは ContainerBuilder.open だけ）
-//   - alarm が動くたびに「DO が動いた」と数えられ、コンテナの止まるまでの時間が延びるか
-//     （実機が切れたまま 10 分を超えるジョブで確かめる。だめなら KEEP_WARM_S を 15 分以上に）
+//   - destroy() で止めたあと running が false になるまでの時間、止めたあとの次の start() が通るか
+//   - alarm が動くたびに「DO が動いた」と数えられ、setInactivityTimeout の数え始めが延びるか
+//     （延びても DO が自分で止めるので費用は変わらない。延びなければ、alarm の間に止まることがある）
 //   - start() の直後の running の値、/healthz が通るまでの時間（GB 級のイメージの冷えた起動）
 //   - WebSocket の close に使えるコード（ここでは必ず通る 4000 番台だけを使う）
 //   - /v1/status の jobs の state の文字列（ここでは "done" だけを「終わった」と読む。課題 B1 と合わせる）
@@ -75,6 +86,7 @@
 
 import { DEVICE_HEADER, SUBPROTOCOL, WS_PATH, json, type Env } from "./index";
 import { MAX_BINARY_FRAME, MAX_CONNECTIONS_PER_DEVICE, MAX_TEXT_FRAME } from "./limits";
+import { LedgerClient, Meter, budgetOf, guardOf, instanceOf, startInstance, type Accounts, type Guard, type InstanceSpec } from "./budget";
 
 /** zc-buildd のポート（zc-wire の DEFAULT_PORT と同じ）。 */
 export const BUILDD_PORT = 7411;
@@ -107,7 +119,16 @@ export const CLOSE = {
   /** 上流（zc-buildd）が閉じた。 */
   upstream: 4502,
   unavailable: 4503,
+  /** 月の費用の上限に達していて、コンテナを起こさなかった（error {limit} を先に送る）。 */
+  limit: 4429,
 } as const;
+
+/** 上限に達していて、コンテナを起こさなかった。 */
+class BudgetExhausted extends Error {
+  constructor(readonly guard: Guard) {
+    super(guard.message);
+  }
+}
 
 // ───────────────────────── 台帳 ─────────────────────────
 
@@ -127,7 +148,10 @@ export interface JobRow {
 
 /** 台帳（純粋な部分。SQLite の口だけに依存させ、試験しやすくする）。 */
 export interface Ledger {
-  /** job を数える。その日の上限を超えていたら false。同じ job id の出し直しは数えない。 */
+  /**
+   * job を数える。その日の上限を超えていたら false。同じ job id の出し直しは数えない。
+   * check は台帳に載せるが数えない（上限で断らない）。
+   */
   admit(job: string, kind: JobRow["kind"], nowMs: number, perDay: number): boolean;
   started(job: string, nowMs: number): void;
   done(job: string, status: string, nowMs: number): void;
@@ -181,8 +205,10 @@ export class SqlLedger implements Ledger {
       this.sql(`UPDATE jobs SET kind = ?, state = 'running', status = NULL, started_ms = ?, finished_ms = NULL WHERE job = ?`, kind, nowMs, job);
       return true;
     }
-    const used = Number(this.sql(`SELECT COUNT(*) AS n FROM jobs WHERE day = ?`, day)[0]?.n ?? 0);
-    if (used >= perDay) return false;
+    if (kind !== "check") {
+      const used = Number(this.sql(`SELECT COUNT(*) AS n FROM jobs WHERE day = ? AND kind != 'check'`, day)[0]?.n ?? 0);
+      if (used >= perDay) return false;
+    }
     this.sql(
       `INSERT OR REPLACE INTO jobs (job, kind, state, status, day, started_ms, finished_ms)
        VALUES (?, ?, 'running', NULL, ?, ?, NULL)`,
@@ -260,8 +286,10 @@ export interface BuilddStatus {
 export interface Builder {
   /** コンテナが動いているか（受付が待ち受けているとは限らない）。 */
   running(): boolean;
-  /** コンテナを起こす。待たない。起こせなければ投げる。 */
-  start(): void;
+  /** コンテナを `spec` の大きさで起こす。待たない。起こせなければ投げる。 */
+  start(spec: InstanceSpec): void;
+  /** コンテナを止める（destroy）。止められなければ投げる。 */
+  stop(): Promise<void>;
   /** /healthz が 200 か（中で時間切れを持つ。投げない）。 */
   healthy(): Promise<boolean>;
   /** /v1/status。聞けなければ null（投げない）。 */
@@ -282,18 +310,31 @@ export interface Clock {
 export interface SessionConfig {
   keepWarmMs: number;
   jobsPerDay: number;
+  /** コンテナの大きさ（budget.ts の instanceOf）。 */
+  instance: InstanceSpec;
+  /** 月の超過の上限（ドル）。 */
+  budgetUsd: number;
 }
 
+/** keep-warm の既定（秒）。 */
+export const DEFAULT_KEEP_WARM_S = 300;
+
+type ConfigVars = Partial<
+  Pick<Env, "KEEP_WARM_S" | "JOBS_PER_DAY" | "INSTANCE_TYPE" | "INSTANCE_VCPU" | "INSTANCE_MEMORY_MIB" | "INSTANCE_DISK_MB" | "BUDGET_OVERAGE_USD">
+>;
+
 /** 設定を読む（おかしな値は既定に戻す）。 */
-export function configOf(env: Pick<Env, "KEEP_WARM_S" | "JOBS_PER_DAY">): SessionConfig {
+export function configOf(env: ConfigVars, log?: (m: string) => void): SessionConfig {
   const num = (s: string | undefined, def: number, min: number, max: number): number => {
     const n = Number(s);
-    return Number.isFinite(n) && n >= min && n <= max ? Math.floor(n) : def;
+    return s !== undefined && s.trim() !== "" && Number.isFinite(n) && n >= min && n <= max ? Math.floor(n) : def;
   };
   return {
     // setInactivityTimeout は 6 時間まで
-    keepWarmMs: num(env.KEEP_WARM_S, 600, 1, 21_600) * 1000,
+    keepWarmMs: num(env.KEEP_WARM_S, DEFAULT_KEEP_WARM_S, 1, 21_600) * 1000,
     jobsPerDay: num(env.JOBS_PER_DAY, 400, 0, 1_000_000),
+    instance: instanceOf(env, log),
+    budgetUsd: budgetOf(env.BUDGET_OVERAGE_USD, log),
   };
 }
 
@@ -354,11 +395,56 @@ export class SessionCore {
     private readonly builder: Builder,
     private readonly clock: Clock,
     private readonly cfg: SessionConfig,
+    /** コンテナの動いている区間の計り（budget.ts）。 */
+    private readonly meter: Meter,
+    /** アカウントの台帳（無ければ自分の分だけで判断する）。 */
+    private readonly accounts: Accounts | null = null,
   ) {}
 
   /** 開いている接続の数。 */
   get connections(): number {
     return this.conns.size;
+  }
+
+  /** 実機の名前（台帳で人が読む名前）。 */
+  setLabel(deviceId: string): void {
+    this.meter.setLabel(deviceId);
+  }
+
+  /**
+   * DO が作り直されたとき（constructor から）。計りの区間とコンテナの実際を合わせる:
+   * 区間が開いたままでコンテナが止まっていれば、止まった時刻の上限で閉じる（少なく数えない）。
+   * 区間が無いのにコンテナが動いていれば（この版を deploy する前から動いていた）、今から数える。
+   */
+  async recover(): Promise<void> {
+    const now = this.clock.now();
+    if (this.meter.isOpen() && !this.builder.running()) {
+      this.meter.close(Math.min(now, this.meter.untilMs(this.cfg.keepWarmMs)));
+    } else if (!this.meter.isOpen() && this.builder.running()) {
+      this.meter.open(now, this.cfg.instance);
+      this.meter.setBusy(now, this.ledger.running() > 0);
+    }
+    if (this.meter.isOpen() || this.ledger.running() > 0) await this.clock.ensureAlarm(now + ALARM_INTERVAL_MS);
+  }
+
+  /** 今の判断（自分の分 + ほかの実機の分）。 */
+  guard(now: number = this.clock.now()): Guard {
+    const total = this.meter.usage(now);
+    const others = this.meter.others(now);
+    const sum = { memGibS: total.memGibS + others.memGibS, vcpuS: total.vcpuS + others.vcpuS, diskGbS: total.diskGbS + others.diskGbS };
+    return guardOf(sum, this.meter.spec() ?? this.cfg.instance, this.cfg.keepWarmMs, this.cfg.budgetUsd, now);
+  }
+
+  /** 台帳へ報告し、ほかの実機の分を覚え直す。届かなければ前の値のまま。投げない。 */
+  private async report(now: number): Promise<void> {
+    if (this.accounts === null) return;
+    const view = await this.accounts.report(this.meter.snapshot(now, this.cfg.keepWarmMs));
+    if (view !== null) this.meter.setOthers(view);
+  }
+
+  /** 実機・受付の動き。keep-warm を数え直す。 */
+  private activity(): void {
+    this.meter.touch(this.clock.now());
   }
 
   /** 新しい接続を受けてよいか（同時に 4 本まで）。 */
@@ -371,13 +457,17 @@ export class SessionCore {
     const conn: Conn = { device, deviceId, mode: "cold", up: null, queue: [], queuedBytes: 0, hello: null, swallowHello: false };
     this.conns.set(device, conn);
     if (this.builder.running() || this.starting !== null) {
+      this.activity();
       this.openUpstream(conn);
       return;
     }
     // コンテナが止まっている = 受付は何も覚えていない。走っていたはずのジョブは全部 lost
     // （受け付けたばかりのものも含めるので、猶予のぶん先の時刻で呼ぶ）。
+    const now = this.clock.now();
     this.ready = false;
-    this.ledger.reconcile([], this.clock.now() + RECONCILE_GRACE_MS);
+    this.ledger.reconcile([], now + RECONCILE_GRACE_MS);
+    // 計りの区間が開いたままなら、止まった時刻の上限で閉じる
+    if (this.meter.isOpen()) this.meter.close(Math.min(now, this.meter.untilMs(this.cfg.keepWarmMs)));
   }
 
   /** 実機からのメッセージ。 */
@@ -388,6 +478,7 @@ export class SessionCore {
       this.orphan(device);
       return;
     }
+    this.activity();
     if (typeof data !== "string") {
       if (data.byteLength > MAX_BINARY_FRAME) return this.fail(conn, "too-large", "binary frame too large", CLOSE.tooLarge);
       this.forward(conn, data);
@@ -408,13 +499,21 @@ export class SessionCore {
         const kind = msg.kind;
         if (typeof kind !== "string" || !KINDS.includes(kind)) return this.fail(conn, "protocol", "bad job kind", CLOSE.protocol);
         const now = this.clock.now();
+        // 月の費用の上限（判断は手元の値で。台帳へ聞きに行くと、その間に次のメッセージが割り込む）
+        const g = this.guard(now);
+        if (g.exhausted) {
+          this.reply(conn, { type: "error", job, code: "limit", message: g.message, retry_after_s: g.retryAfterS });
+          return;
+        }
         if (!this.ledger.admit(job, kind as JobRow["kind"], now, this.cfg.jobsPerDay)) {
           this.reply(conn, { type: "error", job, code: "limit", message: "daily job limit reached", retry_after_s: secondsToNextDay(now) });
           return;
         }
+        this.meter.setBusy(now, true);
         this.forward(conn, data);
         // running がある間は alarm で見張る（コンテナを止めさせない・lost を見つける）
         await this.clock.ensureAlarm(now + ALARM_INTERVAL_MS);
+        void this.report(now);
         return;
       }
 
@@ -444,6 +543,7 @@ export class SessionCore {
   deviceClosed(device: DeviceSocket): void {
     const conn = this.conns.get(device);
     if (conn === undefined) return;
+    this.activity();
     this.drop(conn);
     try {
       conn.up?.close(1000, "device closed");
@@ -461,10 +561,13 @@ export class SessionCore {
     }
   }
 
-  /** 30 秒ごと（running がある間だけ掛け直す）。 */
+  /**
+   * 30 秒ごと（コンテナが動いている間、または running がある間）。見張り・計り・止める判断。
+   */
   async alarm(): Promise<void> {
     const now = this.clock.now();
     this.ledger.prune(now);
+    this.meter.prune(now);
     if (this.starting !== null) {
       // 起こしている途中。次で見る。
       await this.clock.ensureAlarm(now + ALARM_INTERVAL_MS);
@@ -474,34 +577,76 @@ export class SessionCore {
       // コンテナが止まった。走っていたジョブは無くなった。alarm は掛け直さない。
       this.ready = false;
       this.ledger.reconcile([], now + RECONCILE_GRACE_MS);
+      if (this.meter.isOpen()) {
+        // 前の alarm からこの alarm までのどこかで止まった。多めに数える側（今）で閉じる
+        this.meter.close(Math.min(now, this.meter.untilMs(this.cfg.keepWarmMs)));
+        await this.report(now);
+      }
       return;
     }
+    // 計りの区間が無いのに動いている（この版の deploy の前から動いていた）: 今から数える
+    if (!this.meter.isOpen()) this.meter.open(now, this.cfg.instance);
+    this.meter.accrue(now);
+
     let st = await this.builder.status();
     if (st === null) {
       await this.clock.sleep(1000);
       st = await this.builder.status();
     }
+    let busy: boolean;
     if (st === null) {
       // コンテナは動いているのに受付が 2 回続けて答えない。受付が死んだとみなす。
-      // コンテナは setInactivityTimeout で止まる（ここでは延ばさない）。
+      // keep-warm は延ばさない（下の「止める」に任せる）。
       this.ledger.reconcile([], this.clock.now() + RECONCILE_GRACE_MS);
-      return;
-    }
-    const alive: string[] = [];
-    for (const j of st.jobs) {
-      if (j.state === "done") {
-        // 見ている実機がいない間に終わった（done を中継できなかった）。結果は受付に残っている。
-        if (this.ledger.stateOf(j.job) === "running") this.ledger.done(j.job, j.status ?? "unknown", this.clock.now());
-      } else {
-        alive.push(j.job);
+      busy = false;
+    } else {
+      const alive: string[] = [];
+      for (const j of st.jobs) {
+        if (j.state === "done") {
+          // 見ている実機がいない間に終わった（done を中継できなかった）。結果は受付に残っている。
+          if (this.ledger.stateOf(j.job) === "running") this.ledger.done(j.job, j.status ?? "unknown", this.clock.now());
+        } else {
+          alive.push(j.job);
+        }
       }
+      this.ledger.reconcile(alive, this.clock.now());
+      busy = this.ledger.running() > 0 || st.running + st.queued > 0;
     }
-    this.ledger.reconcile(alive, this.clock.now());
-    if (this.ledger.running() > 0 || st.running + st.queued > 0) {
+    const t = this.clock.now();
+    // 走っている間は「動きがある」とみなす（終わってから keep-warm を数える）
+    this.meter.setBusy(t, busy);
+    await this.report(t);
+    if (busy) {
       // DO の再起動で消えるので、毎回掛け直す
       await this.builder.keepWarm(this.cfg.keepWarmMs).catch(() => {});
-      await this.clock.ensureAlarm(this.clock.now() + ALARM_INTERVAL_MS);
+      await this.clock.ensureAlarm(t + ALARM_INTERVAL_MS);
+      return;
     }
+    // 走っているジョブが無い: keep-warm を過ぎたか、費用の上限に達していたら止める
+    const idleMs = t - this.meter.activeMs();
+    const g = this.guard(t);
+    if (idleMs >= this.cfg.keepWarmMs || g.exhausted) {
+      await this.stopBuilder(t, g.exhausted && idleMs < this.cfg.keepWarmMs ? "budget" : "idle");
+      return;
+    }
+    await this.clock.ensureAlarm(t + ALARM_INTERVAL_MS);
+  }
+
+  /** コンテナを止めて、計りの区間を閉じる。止められなければ次の alarm でもう一度。 */
+  private async stopBuilder(now: number, why: string): Promise<void> {
+    try {
+      await this.builder.stop();
+    } catch (e) {
+      console.error("session: cannot stop the builder", why, String(e));
+      await this.clock.ensureAlarm(now + ALARM_INTERVAL_MS);
+      return;
+    }
+    console.log("session: builder stopped", why);
+    const t = this.clock.now();
+    this.ready = false;
+    this.meter.close(t);
+    this.ledger.reconcile([], t + RECONCILE_GRACE_MS);
+    await this.report(t);
   }
 
   // ── 中 ──
@@ -523,9 +668,9 @@ export class SessionCore {
   }
 
   /** 接続全体の失敗: error を返して両側を閉じる。 */
-  private fail(conn: Conn, code: string, message: string, closeCode: number): void {
+  private fail(conn: Conn, code: string, message: string, closeCode: number, extra: Record<string, unknown> = {}): void {
     try {
-      conn.device.send(JSON.stringify({ type: "error", code, message }));
+      conn.device.send(JSON.stringify({ type: "error", code, message, ...extra }));
     } catch {
       // 閉じるだけ
     }
@@ -595,8 +740,15 @@ export class SessionCore {
         conn.queuedBytes = 0;
         for (const d of queue) up.send(d);
         conn.mode = "open";
-      } catch {
-        if (conn.mode !== "closed") this.fail(conn, "unavailable", "cannot start the builder", CLOSE.unavailable);
+      } catch (e) {
+        if (conn.mode === "closed") return;
+        if (e instanceof BudgetExhausted) {
+          // 実機（zc-remote）は、job の無い error {limit} を「やり直しても同じ」として、待っている
+          // 依頼を全部「上限」で終える（文に retry_after_s の秒数が付く）
+          this.fail(conn, "limit", e.guard.message, CLOSE.limit, { retry_after_s: e.guard.retryAfterS });
+        } else {
+          this.fail(conn, "unavailable", "cannot start the builder", CLOSE.unavailable);
+        }
       }
     })();
   }
@@ -615,8 +767,26 @@ export class SessionCore {
 
   private async startAndWait(): Promise<void> {
     if (!this.builder.running()) {
+      // 起こす前に、台帳から最新のほかの実機の分を聞いて判断する（ここは待ってよい: 待っている間の
+      // 実機のメッセージは queue にたまり、順番は崩れない）
+      const now = this.clock.now();
+      await this.report(now);
+      const g = this.guard(now);
+      if (g.exhausted) throw new BudgetExhausted(g);
       // TODO(C4): スナップショットがあれば、そこから起こす（snapshot.ts）。
-      this.builder.start();
+      this.builder.start(this.cfg.instance);
+      const t = this.clock.now();
+      this.meter.open(t, this.cfg.instance);
+      this.meter.setBusy(t, this.ledger.running() > 0);
+      // コンテナが動いている間は alarm を掛け続ける（keep-warm を過ぎたら止める）
+      await this.clock.ensureAlarm(t + ALARM_INTERVAL_MS);
+      void this.report(t);
+    } else if (!this.meter.isOpen()) {
+      // 動いているのに区間が無い（この版の deploy の前から動いていた）
+      const t = this.clock.now();
+      this.meter.open(t, this.cfg.instance);
+      this.meter.setBusy(t, this.ledger.running() > 0);
+      await this.clock.ensureAlarm(t + ALARM_INTERVAL_MS);
     }
     const deadline = this.clock.now() + START_WAIT_MS;
     for (;;) {
@@ -656,6 +826,8 @@ export class SessionCore {
         break;
       case "done":
         this.ledger.done(msg.job, typeof msg.status === "string" ? msg.status : "unknown", now);
+        this.meter.setBusy(now, this.ledger.running() > 0);
+        void this.report(now);
         break;
     }
   }
@@ -663,15 +835,9 @@ export class SessionCore {
 
 // ───────────────────────── Cloudflare の口 ─────────────────────────
 
-const INSTANCES = ["lite", "standard-1", "standard-2", "standard-3", "standard-4"] as const;
-type Instance = (typeof INSTANCES)[number];
-
 /** ctx.container と、その中の zc-buildd。 */
 class ContainerBuilder implements Builder {
-  constructor(
-    private readonly ctx: DurableObjectState,
-    private readonly env: Env,
-  ) {}
+  constructor(private readonly ctx: DurableObjectState) {}
 
   private container(): Container {
     const c = this.ctx.container;
@@ -687,13 +853,18 @@ class ContainerBuilder implements Builder {
     return this.ctx.container?.running ?? false;
   }
 
-  start(): void {
+  start(spec: InstanceSpec): void {
     const c = this.container();
     const image = c.images[IMAGE_NAME];
     if (image === undefined) throw new Error(`image "${IMAGE_NAME}" is not configured`);
-    const instance: Instance = (INSTANCES as readonly string[]).includes(this.env.INSTANCE_TYPE) ? (this.env.INSTANCE_TYPE as Instance) : "standard-4";
     // enableInternet: cargo と npm が crates.io・npm へ取りに行く（§15 の未確認の項目）
-    c.start({ image, instance, enableInternet: true });
+    c.start({ image, instance: startInstance(spec), enableInternet: true });
+  }
+
+  async stop(): Promise<void> {
+    const c = this.ctx.container;
+    if (c === undefined || !c.running) return;
+    await c.destroy();
   }
 
   async healthy(): Promise<boolean> {
@@ -780,9 +951,14 @@ export class BuildSession implements DurableObject {
     private readonly env: Env,
   ) {
     const sql = ctx.storage.sql;
-    const ledger = new SqlLedger((q, ...b) => sql.exec(q, ...b).toArray());
+    const exec: SqlExec = (q, ...b) => sql.exec(q, ...b).toArray();
+    const ledger = new SqlLedger(exec);
+    const meter = new Meter(exec);
     const cfg = configOf(env);
-    const builder = new ContainerBuilder(ctx, env);
+    const builder = new ContainerBuilder(ctx);
+    // 台帳の DO の中では、実機ごとの DO を id で見分ける（名前 = device_id は fetch のときにしか来ない）
+    const accounts = env.BUDGET ? new LedgerClient(env.BUDGET, ctx.id.toString()) : null;
+    if (accounts === null) console.error("session: BUDGET binding is missing; the budget guard counts this device only");
     const clock: Clock = {
       now: () => Date.now(),
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -790,15 +966,15 @@ export class BuildSession implements DurableObject {
         if ((await ctx.storage.getAlarm()) === null) await ctx.storage.setAlarm(atMs);
       },
     };
-    this.core = new SessionCore(ledger, builder, clock, cfg);
+    this.core = new SessionCore(ledger, builder, clock, cfg, meter, accounts);
 
     // ここに来た = DO が作り直された。メモリの中の上流は無いので、残っている実機の
     // WebSocket は閉じる（実機がつなぎ直して attach する。先頭の説明を参照）。
     for (const ws of ctx.getWebSockets()) this.core.orphan(ws);
     // setInactivityTimeout は DO の再起動で消える。
     if (builder.running()) void builder.keepWarm(cfg.keepWarmMs).catch(() => {});
-    // 見張りの続き（alarm は DO の再起動をまたいで残るが、念のため）。
-    if (ledger.running() > 0) void clock.ensureAlarm(Date.now() + ALARM_INTERVAL_MS);
+    // 計りの区間をコンテナの実際に合わせ、見張りを続ける（alarm は DO の再起動をまたいで残るが、念のため）。
+    void this.core.recover();
   }
 
   /** Worker から。WebSocket の Upgrade だけが来る（X-Zc-Device つき）。 */
@@ -809,6 +985,7 @@ export class BuildSession implements DurableObject {
     const offered = (request.headers.get("Sec-WebSocket-Protocol") ?? "").split(",").map((s) => s.trim());
     if (!offered.includes(SUBPROTOCOL)) return json(400, "bad request");
     if (!this.core.hasRoom()) return json(429, "too many connections", { "retry-after": "5" });
+    this.core.setLabel(deviceId);
 
     const pair = new WebSocketPair();
     const client = pair[0];
@@ -840,7 +1017,7 @@ export class BuildSession implements DurableObject {
     this.core.deviceClosed(ws);
   }
 
-  /** 30 秒ごと（running がある間だけ）。 */
+  /** 30 秒ごと（コンテナが動いている間、または running がある間）。 */
   async alarm(): Promise<void> {
     await this.core.alarm();
     // TODO(C4): 走っているジョブが無くなったら、スナップショットを撮る（snapshot.ts。§6.5）。
@@ -853,3 +1030,6 @@ export class BuildSession implements DurableObject {
 // lost のジョブへの attach に done{lost}（コンテナを起こさない）、同時の接続 5 本目を断る、
 // 壊れた JSON で閉じる、コンテナを起こせないとき error{unavailable}。
 // Ledger は SQLite（node:sqlite）で、表の全部の場面を単体で。
+// 費用の守り: 起こしてから止めるまでの計り（alarm・keep-warm で止める・DO の作り直し）、上限で
+// 冷えたコンテナを起こさない・新しい job を断る・走っているジョブは終わる、月の変わり目、
+// 2 台で 1 つの上限（本物の BudgetBook）。budget.ts の単体は test/budget.test.ts。

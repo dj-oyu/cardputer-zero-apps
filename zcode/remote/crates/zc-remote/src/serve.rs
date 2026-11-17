@@ -48,12 +48,20 @@
 //! - 相手が切れたら（EOF・ECONNRESET）、その相手の依頼は取り消す
 //! - SD の控えを戻した実行ファイルには、控えの時刻（最後に成功した時刻）を付ける
 //!   （CLI が「前の版（日時）」を出すため）
+//! - **未保存の中身の重ね**（`Submit` の `overlay`。打鍵が止まったときの check）: 走査の
+//!   あとで、目録の同じパスの大きさと SHA-256 を重ねの中身に差し替え、中身は RAM から送る
+//!   （SD には書かない。ハッシュの覚えはディスクの中身のまま）。重ねの合計が
+//!   [`zc_remote_ipc::MAX_OVERLAY_BYTES`] を超えたら「上限」で断る
+//! - `SubmitFlags::AUTO` の依頼は、設定 `check_on_save` が `idle` のときだけ受ける（ほかは
+//!   すぐ「対象ではない」。設定を読み直しても効く）
+//! - 相手の版は [`zc_remote_ipc::MIN_IPC_VERSION`] から受ける（返事の `Hello` は相手の版。
+//!   版 1 の zcode も、重ね無しでそのまま使える）
 
 use crate::artifact::{self, ArtifactError, Dirs, LastGood, Meta, Placed, Receiver};
 use crate::auth::{AccessServiceToken, AuthError, Credential, NoCredential, Retry};
 use crate::config::{BackendChoice, CheckOnSave, Config};
 use crate::net::{self, Conn, Dial, DialStats, DialStep, Incoming, NetError, Stage, Timeouts};
-use crate::scan::{self, HashCache, Project, ProjectError, ScanError, Shape};
+use crate::scan::{self, HashCache, Overlaid, Project, ProjectError, ScanError, Shape};
 use crate::session::{Action, Event, JobRequest, Outcome, Session, Ticket};
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -286,6 +294,7 @@ struct Submit {
     lang: ipc::RemoteLang,
     flags: ipc::SubmitFlags,
     file: PathBuf,
+    overlay: Vec<ipc::OverlayFile>,
 }
 
 /// 依頼 1 つ（[`Ticket`] 1 つ）ぶんの持ち物。
@@ -303,6 +312,8 @@ struct JobCtx {
     art_failed: Option<String>,
     art_retried: bool,
     rescans: u8,
+    /// 未保存の中身（目録のこのパスは、ディスクではなくこれを送る）。
+    overlay: Vec<Overlaid>,
 }
 
 fn ipc_backend(b: Option<Which>) -> ipc::Backend {
@@ -578,8 +589,15 @@ impl Core {
     /// 依頼を受ける。
     fn on_submit(&mut self, now: u64, cid: u32, kind: ipc::ClientKind, submit: Submit) {
         use ipc::DoneStatus as S;
-        let Submit { req, job, lang, flags, file } = submit;
+        let Submit { req, job, lang, flags, file, overlay } = submit;
         let who = Who { client: Some(cid), req, tag: self.new_tag() };
+        // 打鍵が止まったときの check は、設定が idle のときだけ（zcode の check だけ）。
+        if flags.contains(ipc::SubmitFlags::AUTO) && !(kind == ipc::ClientKind::Editor && job == ipc::JobKind::Check && self.opts.config.check_on_save == CheckOnSave::Idle) {
+            return self.done(now, who, false, now, End(S::NotApplicable, 0, "打鍵が止まったときの check は切ってある（check_on_save = idle で使う）".into()));
+        }
+        if overlay.iter().map(|o| o.bytes.len()).sum::<usize>() > ipc::MAX_OVERLAY_BYTES {
+            return self.done(now, who, false, now, End(S::Limit, 0, format!("未保存の中身が {}MiB を超えている", ipc::MAX_OVERLAY_BYTES >> 20)));
+        }
         let (wkind, wlang) = (
             match job {
                 ipc::JobKind::Build => wire::Kind::Build,
@@ -609,7 +627,8 @@ impl Core {
         if only_warm && !self.connected {
             return self.done(now, who, false, now, End(S::Offline, 0, "接続が冷えている".into()));
         }
-        let manifest = match self.scan(&project) {
+        let overlay = scan::resolve_overlay(&project, overlay.into_iter().map(|o| (o.path, o.bytes)).collect());
+        let manifest = match self.scan(&project).and_then(|m| scan::apply_overlay(m, &overlay)) {
             Ok(m) => m,
             Err(ScanError::TooLarge(m)) => return self.done(now, who, false, now, End(S::Limit, 0, m)),
             Err(ScanError::Io(m)) => return self.done(now, who, false, now, End(S::Error, 0, m)),
@@ -624,7 +643,7 @@ impl Core {
         };
         self.phase(now, who, &project.root, ipc::Phase::Scanned, 0, 0);
         let ticket = self.session.submit(now, request.clone());
-        self.jobs.push(JobCtx { ticket, who, project, request, flags, started_us: now, art: None, rx: None, placed: None, art_failed: None, art_retried: false, rescans: 0 });
+        self.jobs.push(JobCtx { ticket, who, project, request, flags, started_us: now, art: None, rx: None, placed: None, art_failed: None, art_retried: false, rescans: 0, overlay });
     }
 
     fn scan(&mut self, project: &Project) -> Result<Arc<zc_wire::tree::Manifest>, ScanError> {
@@ -643,7 +662,7 @@ impl Core {
         if ctx.rescans > MAX_RESCANS {
             return fail(self, ctx, ipc::DoneStatus::Error, "送っている間にファイルが書き換わり続けている".into());
         }
-        match self.scan(&ctx.project) {
+        match self.scan(&ctx.project).and_then(|m| scan::apply_overlay(m, &ctx.overlay)) {
             Ok(m) => {
                 ctx.request.manifest = m;
                 self.phase(now, ctx.who, &ctx.project.root.clone(), ipc::Phase::Scanned, 0, 0);
@@ -1292,15 +1311,26 @@ impl Serve {
                     return;
                 }
                 let root = self.core.jobs.iter().find(|j| Arc::ptr_eq(&j.request.manifest, &manifest)).map(|j| j.project.root.clone());
+                // 未保存の中身（どの依頼の重ねでも、同じパス・同じ中身なら使える）は RAM から送る。
+                let mem = self.core.jobs.iter().flat_map(|j| j.overlay.iter()).find(|o| o.rel == path && o.sha256 == sha256 && o.bytes.len() as u64 == size).map(|o| o.bytes.clone());
                 let mut sent_last = false;
-                let ok = match &root {
-                    Some(root) => scan::read_blob(root, &path, size, &sha256, &mut |offset, chunk| {
+                let ok = match (&mem, &root) {
+                    (Some(bytes), _) => {
+                        for (k, chunk) in bytes.chunks(zc_wire::limits::CHUNK_BYTES).enumerate() {
+                            let offset = (k * zc_wire::limits::CHUNK_BYTES) as u64;
+                            let last = offset + chunk.len() as u64 == size;
+                            sent_last |= last;
+                            conn.send_binary(&wire::BinHeader { kind: wire::BinKind::Blob, last, id, offset }.encode(), chunk);
+                        }
+                        true
+                    }
+                    (None, Some(root)) => scan::read_blob(root, &path, size, &sha256, &mut |offset, chunk| {
                         let last = offset + chunk.len() as u64 == size;
                         sent_last |= last;
                         conn.send_binary(&wire::BinHeader { kind: wire::BinKind::Blob, last, id, offset }.encode(), chunk);
                     })
                     .unwrap_or(false),
-                    None => false,
+                    (None, None) => false,
                 };
                 if ok {
                     if !sent_last {
@@ -1500,7 +1530,7 @@ impl Serve {
                     }
                     let id = self.core.next_client;
                     self.core.next_client = self.core.next_client.wrapping_add(1).max(1);
-                    self.core.clients.push(Client { id, stream, reader: ipc::FrameReader::new(), out: Vec::new(), out_pos: 0, kind: None, closing: false, dead: false, held: Vec::new(), flush_at: None, phases: Vec::new() });
+                    self.core.clients.push(Client { id, stream, reader: ipc::FrameReader::for_requests(), out: Vec::new(), out_pos: 0, kind: None, closing: false, dead: false, held: Vec::new(), flush_at: None, phases: Vec::new() });
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(_) => return,
@@ -1557,10 +1587,12 @@ impl Serve {
         match (r, kind) {
             (ipc::Request::Hello { version, client }, _) => {
                 let c = &mut self.core.clients[ci];
-                c.send(&ipc::Response::Hello { version: ipc::IPC_VERSION });
-                if version == ipc::IPC_VERSION {
+                // 古い相手（版 1 の zcode）も受ける。返事は相手の版（相手は自分の版と比べる）。
+                if (ipc::MIN_IPC_VERSION..=ipc::IPC_VERSION).contains(&version) {
+                    c.send(&ipc::Response::Hello { version });
                     c.kind = Some(client);
                 } else {
+                    c.send(&ipc::Response::Hello { version: ipc::IPC_VERSION });
                     c.closing = true;
                 }
             }
@@ -1576,9 +1608,9 @@ impl Serve {
                 let st = status(self);
                 self.core.clients[ci].send(&st);
             }
-            (ipc::Request::Submit { req, kind: job, lang, flags, file }, Some(kind)) => {
+            (ipc::Request::Submit { req, kind: job, lang, flags, file, overlay }, Some(kind)) => {
                 self.maybe_reload(now);
-                self.core.on_submit(now, id, kind, Submit { req, job, lang, flags, file })
+                self.core.on_submit(now, id, kind, Submit { req, job, lang, flags, file, overlay })
             }
             (ipc::Request::Cancel { req }, _) => {
                 if let Some(t) = self.core.jobs.iter().find(|j| j.who.client == Some(id) && j.who.req == req).map(|j| j.ticket) {
