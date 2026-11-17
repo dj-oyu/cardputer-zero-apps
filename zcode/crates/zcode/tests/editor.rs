@@ -629,11 +629,16 @@ fn save_runs_syntax_check(backend: DocBackend) {
     fs::write(&p, "def main():\n    for i in range(3)\n        print(i)\n").unwrap();
     let mut lp = Loop::new();
     let mut ed = EditorScreen::new(EditorConfig { backend, root: dir.clone(), files: vec![p.clone()] });
+    // Python は remote = "python"（2026-11-17）。ビルド係が「対象ではない」と返したら実機の check に回る
+    let fake = FakeRemote::default();
+    ed.set_remote(Box::new(fake.clone()));
     lp.with(|cx| ed.start(cx));
     lp.pump(&mut ed);
     lp.keys(&mut ed, &[ctrl('s')]);
-    lp.pump(&mut ed); // 保存 → チェックを check ワーカーに出す
-    lp.pump(&mut ed); // チェックの結果
+    lp.pump(&mut ed); // 保存 → ビルド係に check を頼む
+    assert_eq!(fake.jobs().iter().map(|j| (j.kind, j.lang)).collect::<Vec<_>>(), [(JobKind::Check, RemoteLang::Python)]);
+    lp.remote(&mut ed, done(Some(1), 0, DoneStatus::NotApplicable));
+    lp.pump(&mut ed); // 実機の check の結果
     let diags = ed.diagnostics();
     assert_eq!(diags.len(), 1, "{diags:?}");
     assert_eq!(diags[0].line, 1);
@@ -648,6 +653,8 @@ fn save_runs_syntax_check(backend: DocBackend) {
     lp.type_str(&mut ed, ":");
     lp.keys(&mut ed, &[ctrl('s')]);
     lp.pump(&mut ed);
+    // ビルド係に届かない（オフライン）も実機の check に回る
+    lp.remote(&mut ed, done(Some(2), 0, DoneStatus::Offline));
     lp.pump(&mut ed);
     assert!(ed.diagnostics().is_empty(), "{:?}", ed.diagnostics());
     assert!(ed.active_view().unwrap().marks().is_empty());
