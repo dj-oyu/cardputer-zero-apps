@@ -1,5 +1,7 @@
 # WIP: 特定版のシミュレーション・実験で削除した直接指定候補。
 # このファイルをそのまま一括purgeせず、各環境で依存と用途を確認する。
+# HDMI描画や他のアプリへの依存があるMesa / Vulkan / LLVMはこの候補に含めない。
+# この一覧は実機で全機能の互換性を保証するものではない。詳細はREADME.mdとvalidation.md。
 chromium
 chromium-common
 chromium-l10n
