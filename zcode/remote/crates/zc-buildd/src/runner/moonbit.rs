@@ -5,7 +5,7 @@
 //!
 //! | 種類 | 中でやること |
 //! |---|---|
-//! | check | `moon check --target native --output-json` |
+//! | check | `moon check --target native --output-json --no-mbti` |
 //! | build | `MOON_CC=aarch64-linux-gnu-gcc MOON_AR=aarch64-linux-gnu-ar moon build --target native --release --output-json`。**native の後ろ向きのクロスビルド**: moon は MOON_CC がホスト向けでないと分かると、x86_64 用に配っている `libmoonbitrun.o`（mimalloc）と `libbacktrace.a` を使わず、ランタイムを C のソース（`$MOON_HOME/lib/runtime/*.c`）からクロスの gcc でコンパイルし、システムの malloc を使う（0.10.20 で確かめた）。出てくるのは動的リンクの PIE（glibc。実機と同じ Debian 13） |
 //! | test | `moon test --target native --test-failure-json`（**x86_64 のまま**。C は `/usr/bin/cc`） |
 //!
@@ -13,6 +13,9 @@
 //!   ので使わない
 //! - 版: moon 0.1.20261104・moonc v0.10.20+65efd5b93（イメージの ARG）。core は native だけ束ねてある
 //!   （wasm・js の検査はしない。`preferred_target` は見ない）
+//! - **check には `--no-mbti` を付ける**: `moon.mod` の `preferred_target` が native だと、通った check は
+//!   `pkg.generated.mbti` を書こうとして `mooninfo` を呼ぶ。イメージには入っていないので moon が異常終了した
+//!   （2026-11-18、実機のサンプルで見つけた）。作業の木に書くものでもないので、書かせない
 //! - **`moon.mod.json` の木は、この版の moon が断る**（「moon fmt で moon.mod に移す」）。その誤りが
 //!   そのまま位置なしの診断になる
 //!
@@ -78,7 +81,7 @@ pub fn run(ctx: &JobCtx<'_>, out: &dyn JobOutput) -> Result<JobResult, JobFailur
     let mut result = JobResult { complete: true, ..Default::default() };
 
     let (sub, extra): (&str, &[&str]) = match ctx.kind {
-        Kind::Check => ("check", &["--output-json"]),
+        Kind::Check => ("check", &["--output-json", "--no-mbti"]),
         Kind::Build => ("build", &["--release", "--output-json"]),
         Kind::Test => ("test", &["--output-json", "--test-failure-json"]),
     };
@@ -404,7 +407,8 @@ mod tests {
             return;
         }
         let files = [
-            ("moon.mod", "name = \"zc/hello\"\n\nversion = \"0.1.0\"\n"),
+            // preferred_target が native でも check が通る（--no-mbti。無いと mooninfo を呼んで落ちた）
+            ("moon.mod", "name = \"zc/hello\"\n\nversion = \"0.1.0\"\n\npreferred_target = \"native\"\n"),
             ("moon.pkg", ""),
             ("lib.mbt", "///|\npub fn add(a : Int, b : Int) -> Int {\n  a + b\n}\n"),
             ("lib_test.mbt", "///|\ntest \"add\" {\n  assert_eq(@hello.add(1, 2), 4)\n}\n\n///|\ntest \"ok\" {\n  assert_eq(@hello.add(1, 2), 3)\n}\n"),

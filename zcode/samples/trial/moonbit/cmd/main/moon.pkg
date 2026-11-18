@@ -1,0 +1,5 @@
+import {
+  "trial/blink" @blink,
+}
+
+pkgtype(kind: "executable")
