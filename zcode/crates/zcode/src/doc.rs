@@ -131,6 +131,16 @@ impl TextDoc for zc_buffer::Buffer {
     }
 }
 
+/// 解放済みでアリーナに残っているメモリを OS へ返す（glibc の `malloc_trim`）。
+/// 大きなファイルの読み込み後など、一時的に大きく確保した後に呼ぶ。
+pub fn release_free_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: 引数 0 の malloc_trim はどのスレッドからでも呼べる。
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 /// 文書の実装の選び方。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum DocBackend {
@@ -151,10 +161,22 @@ impl DocBackend {
     }
     /// ファイルを読んで作る。**batch スレッドで呼ぶ**。
     pub fn load(self, path: &Path, cancel: &CancelToken) -> io::Result<Box<dyn TextDoc + Send>> {
+        self.load_noting(path, cancel, None)
+    }
+    /// [`DocBackend::load`] と同じ。読んだバイト列を `note` にも見せる（文書にした中身と同じ
+    /// バイト列で書き込み層の記録を取るため。ファイルを 2 度読まない）。
+    pub fn load_noting(self, path: &Path, cancel: &CancelToken, note: Option<&dyn Fn(&Path, &[u8])>) -> io::Result<Box<dyn TextDoc + Send>> {
+        let bytes = std::fs::read(path)?;
+        if cancel.is_stale() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "読み込みを取り消した"));
+        }
+        if let Some(note) = note {
+            note(path, &bytes);
+        }
         match self {
-            DocBackend::Buffer => Ok(Box::new(zc_buffer::Buffer::load(path, cancel)?)),
+            DocBackend::Buffer => Ok(Box::new(zc_buffer::Buffer::from_bytes_cancellable(&bytes, cancel)?)),
             DocBackend::Simple => {
-                let text = String::from_utf8(std::fs::read(path)?).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "UTF-8 でない"))?;
+                let text = String::from_utf8(bytes).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "UTF-8 でない"))?;
                 Ok(Box::new(SimpleDoc::from_text(&text)))
             }
         }

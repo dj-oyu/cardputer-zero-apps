@@ -668,16 +668,10 @@ impl MdDocument {
     pub fn parse(src: &dyn LineSource, cancel: &CancelToken) -> Result<Versioned<MdDocument>, Cancelled> {
         cancel.check()?;
         let n = src.len_lines().max(1);
-        let mut text = String::new();
-        let mut buf = String::new();
-        for i in 0..n {
-            if i & 255 == 255 {
-                cancel.check()?;
-            }
-            push_line(src, i, i > 0, &mut buf, &mut text);
-        }
-        let mut lines = build(&text, Some(cancel))?;
-        lines.resize(n as usize, LineData::stale());
+        let lines = match parse_windowed(src, n, WINDOW_LINES, cancel)? {
+            Some(lines) => lines,
+            None => parse_whole(src, n, cancel)?,
+        };
         Ok(Versioned::new(cancel.version(), MdDocument::from_lines(lines)))
     }
     /// batch の結果で置き換える。`current` と版が違えば捨てて `false`。
@@ -812,6 +806,67 @@ impl MdDocument {
             }
         }
         None
+    }
+}
+
+/// 全体を 1 回で解析する。
+fn parse_whole(src: &dyn LineSource, n: u32, cancel: &CancelToken) -> Result<Vec<LineData>, Cancelled> {
+    let mut text = String::new();
+    let mut buf = String::new();
+    for i in 0..n {
+        if i & 255 == 255 {
+            cancel.check()?;
+        }
+        push_line(src, i, i > 0, &mut buf, &mut text);
+    }
+    let mut lines = build(&text, Some(cancel))?;
+    lines.resize(n as usize, LineData::stale());
+    Ok(lines)
+}
+
+/// 全体の解析で一度に渡す行数（これより長い文書は窓に分けて解析する）。
+const WINDOW_LINES: u32 = 2048;
+
+/// 窓に分けて解析する。pulldown-cmark は渡した文章の構文木を丸ごと作るので、数万行の
+/// 文書では一時メモリが文書の何十倍にもなる（0.7MB の文書で約 14MB）。外側のブロックの
+/// 先頭から解析し直しても結果が変わらない（`edited` と同じ前提）ことを使い、窓の最後の
+/// 外側のブロックは次の窓でやり直す。
+///
+/// 窓に分けられない（行数が窓以下）、または参照リンクの定義らしい行がある（リンクの
+/// 解決が文書全体にまたがる）ときは `None`（全体を 1 回で解析する）。
+fn parse_windowed(src: &dyn LineSource, n: u32, window: u32, cancel: &CancelToken) -> Result<Option<Vec<LineData>>, Cancelled> {
+    if n <= window.saturating_mul(2) {
+        return Ok(None);
+    }
+    let mut out: Vec<LineData> = Vec::with_capacity(n as usize);
+    let (mut a, mut win) = (0u32, window);
+    let (mut text, mut buf) = (String::new(), String::new());
+    loop {
+        cancel.check()?;
+        let end = a.saturating_add(win).min(n);
+        text.clear();
+        for i in a..end {
+            push_line(src, i, i > a, &mut buf, &mut text);
+        }
+        let mut v = build(&text, Some(cancel))?;
+        v.resize((end - a) as usize, LineData::stale());
+        if v.iter().any(|l| l.has(L_REFDEF)) {
+            return Ok(None);
+        }
+        if end == n {
+            out.extend(v);
+            return Ok(Some(out));
+        }
+        // 最後の外側のブロックは、窓の端で切れているかもしれない。その手前までを採る
+        match (1..v.len()).rev().find(|&i| v[i].has(L_TOP)) {
+            Some(t) => {
+                out.extend(v.drain(..t));
+                a += t as u32;
+                win = window;
+            }
+            // 窓がひとつのブロックの中に収まった（長い ``` など）: 窓を広げてやり直す
+            None => win = win.saturating_mul(2),
+        }
     }
 }
 

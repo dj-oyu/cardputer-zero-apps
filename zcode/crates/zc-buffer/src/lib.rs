@@ -409,6 +409,12 @@ impl Buffer {
         Buffer::from_bytes_inner(&bytes, Some(cancel))
     }
 
+    /// バイト列から作る。[`Buffer::from_bytes`] と同じだが、`cancel` が古くなったら途中でやめる
+    /// （`Interrupted`）。すでに読んだバイト列を使うとき用。
+    pub fn from_bytes_cancellable(bytes: &[u8], cancel: &CancelToken) -> io::Result<Buffer> {
+        Buffer::from_bytes_inner(bytes, Some(cancel))
+    }
+
     // --- 版 ---
 
     /// 現在の版。

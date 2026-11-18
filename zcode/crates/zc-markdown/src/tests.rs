@@ -590,3 +590,56 @@ fn never_panics_on_odd_input() {
         }
     }
 }
+
+#[test]
+fn windowed_parse_agrees_with_whole_parse() {
+    let mut r = Rng(0x1234_5678_9abc_def1);
+    let never = CancelToken::never();
+    let (mut windowed, mut total) = (0u32, 0u32);
+    for _ in 0..1500 {
+        let n = 20 + r.below(260);
+        // 参照リンクの定義を含む行は、窓に分けない決まりなので、ここでは避ける
+        let lines: Vec<String> = (0..n)
+            .map(|_| loop {
+                let l = random_line(&mut r);
+                if !l.contains("]:") {
+                    break l;
+                }
+            })
+            .collect();
+        let d = Doc(lines);
+        let whole = parse_whole(&d, d.len_lines(), &never).unwrap();
+        let window = 2 + r.below(14) as u32;
+        total += 1;
+        if let Some(w) = parse_windowed(&d, d.len_lines(), window, &never).unwrap() {
+            windowed += 1;
+            assert_eq!(w.len(), whole.len());
+            for (i, (a, b)) in w.iter().zip(&whole).enumerate() {
+                assert_eq!(a, b, "window={window} line {i}: {:?}", d.0);
+            }
+        }
+    }
+    assert!(windowed * 10 > total * 8, "窓に分けられた文書が少なすぎる: {windowed}/{total}");
+}
+
+#[test]
+fn windowed_parse_falls_back_with_reference_definitions() {
+    let mut lines: Vec<String> = (0..100).map(|i| format!("line {i} [ref]")).collect();
+    lines.push("[ref]: http://x".into());
+    let d = Doc(lines);
+    assert!(parse_windowed(&d, d.len_lines(), 4, &CancelToken::never()).unwrap().is_none());
+}
+
+#[test]
+fn windowed_parse_handles_blocks_longer_than_a_window() {
+    let mut lines = vec!["intro".to_string(), String::new(), "```".to_string()];
+    lines.extend((0..200).map(|i| format!("code {i}")));
+    lines.push("```".into());
+    lines.push(String::new());
+    lines.extend((0..50).map(|i| format!("# h{i}")));
+    let d = Doc(lines);
+    let never = CancelToken::never();
+    let whole = parse_whole(&d, d.len_lines(), &never).unwrap();
+    let w = parse_windowed(&d, d.len_lines(), 8, &never).unwrap().expect("窓に分ける");
+    assert_eq!(w, whole);
+}

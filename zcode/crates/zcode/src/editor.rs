@@ -1344,14 +1344,16 @@ impl EditorScreen {
         let (backend, tx) = (self.cfg.backend, cx.results.clone());
         let note = self.saver.load_note();
         cx.workers.batch.submit(move || {
-            let result = match backend.load(&path, &CancelToken::never()) {
+            // 書き込み層に読んだ中身を知らせる（保存時の「変わっていなければ書かない」
+            // 「ほかのプログラムが変えた」の判定）。文書にしたのと同じバイト列で記録する
+            let note_fn = note.as_ref().map(|n| move |p: &Path, b: &[u8]| n(p, b));
+            let loaded = backend.load_noting(&path, &CancelToken::never(), note_fn.as_ref().map(|f| f as &dyn Fn(&Path, &[u8])));
+            let result = match loaded {
                 Ok(doc) => {
                     let words = WordIndex::build(doc.as_lines(), &CancelToken::never()).unwrap_or_else(|_| WordIndex::new());
-                    // 書き込み層に読んだ中身を知らせる（保存時の「変わっていなければ書かない」
-                    // 「ほかのプログラムが変えた」の判定）。読んだ直後なのでページキャッシュから読める
-                    if let (Some(note), Ok(bytes)) = (note, std::fs::read(&path)) {
-                        note(&path, &bytes);
-                    }
+                    // 読み込みで使った大きな一時領域（バイト列）は、batch スレッド専用のアリーナに
+                    // 残りやすい。常駐の RSS に残さないよう OS へ返す
+                    crate::doc::release_free_heap();
                     Ok((doc, words))
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((backend.empty(), WordIndex::new())),
@@ -3063,6 +3065,8 @@ impl EditorScreen {
             if let Ok(parsed) = MdDocument::parse(&*snap, &token) {
                 tx.send(AppEvent::MarkdownParsed { doc: id, parsed });
             }
+            // 解析の一時領域（全文・行の位置・途中の結果）は、batch スレッド専用のアリーナに残りやすい
+            crate::doc::release_free_heap();
         });
     }
 
