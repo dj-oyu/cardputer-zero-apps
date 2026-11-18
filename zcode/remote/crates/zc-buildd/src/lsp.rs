@@ -463,8 +463,32 @@ impl Ls {
                     self.broadcast(&mut st);
                 }
             }
+            // サーバーのエラー・警告の知らせ（showMessage は 1 エラー / 2 警告、logMessage はエラーだけ）
+            (Some(m @ ("window/showMessage" | "window/logMessage")), None) => {
+                let ty = v["params"]["type"].as_u64().unwrap_or(4);
+                if ty == 1 || (ty == 2 && m == "window/showMessage") {
+                    self.note(v["params"]["message"].as_str().unwrap_or(""));
+                }
+            }
             _ => {}
         }
+    }
+
+    /// サーバーが言ったエラーを、状態の理由（`lsp_state` の `message`）として実機へ流す。
+    /// Cloudflare のコンテナの中は外から見えないので、答えが空のときの手がかりにする
+    /// （2026-11-18、moon-lsp が Cloudflare でだけ答えなかったのを調べるために足した）。
+    /// 状態は変えない。同じ知らせは繰り返さない。
+    fn note(&self, message: &str) {
+        let m = cut(format!("{}: {}", self.spec.name, message.trim()), 400);
+        if message.trim().is_empty() {
+            return;
+        }
+        let mut st = self.st.lock().unwrap();
+        if !st.alive || st.message == m {
+            return;
+        }
+        st.message = m;
+        self.broadcast(&mut st);
     }
 
     fn on_response(&self, id: i64, v: &Value) {
@@ -992,6 +1016,11 @@ impl LspHub {
                 match r.read_line(&mut line) {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {
+                        // エラーらしい行は知らせにも（標準エラーにしか書かないサーバーがある）
+                        let low = line.to_ascii_lowercase();
+                        if ["error", "panic", "fatal", "exception", "failed", "not found"].iter().any(|k| low.contains(k)) {
+                            r3.note(&line);
+                        }
                         let mut t = r3.stderr_tail.lock().unwrap();
                         t.push_str(&line);
                         if t.len() > STDERR_TAIL {

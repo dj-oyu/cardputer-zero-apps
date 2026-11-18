@@ -162,7 +162,16 @@ fn ask(hub: &LspHub, store: &Store, m: &Manifest, rx: &mpsc::Receiver<ServerMsg>
         *id += 1;
         let want = *id;
         hub.query(store, "aa00bb11cc22dd33", m, Query { id: want, query, path: path.into(), line, col, text: text.into() }, tx);
-        let r = recv_until(rx, ANSWER_WAIT, |m| matches!(m, ServerMsg::LspResult { id: i, .. } if *i == want)).expect("答えが来ない");
+        let r = recv_until(rx, ANSWER_WAIT, |m| {
+            // サーバーのエラーの知らせ（状態の理由）は見えるように出す
+            if let ServerMsg::LspState { message, .. } = m {
+                if !message.is_empty() {
+                    eprintln!("  知らせ: {message}");
+                }
+            }
+            matches!(m, ServerMsg::LspResult { id: i, .. } if *i == want)
+        })
+        .expect("答えが来ない");
         if matches!(&r, ServerMsg::LspResult { error: Some(zc_wire::msg::ErrorCode::Unavailable), .. }) {
             last = Some(r);
             std::thread::sleep(Duration::from_secs(3));
