@@ -3,7 +3,7 @@
 //! 橋渡し（[`super`]）はどの言語でも同じで、言語ごとに違うところだけをここの [`Spec`] に書く:
 //! 起動のしかた・受け持つ拡張子・準備ができたと見なす合図・設定（`initializationOptions` と
 //! `workspace/configuration` の返事）・起動の前に木の外へ置くもの（仮の crate・`tsconfig.json`・
-//! `compile_flags.txt`）・環境変数。
+//! `compile_flags.txt`）・環境変数・サーバーが木の中に作るので消さないもの（`keep`）。
 //!
 //! **新しい言語の足し方**: (1) ここに `Spec` を 1 つ書いて [`SPECS`] に入れる、(2) ビルド係の
 //! イメージ（`remote/container/Dockerfile`）にサーバーを入れる、(3) 実機側の
@@ -58,6 +58,9 @@ pub struct Spec {
     pub exts: &'static [&'static str],
     pub ready: Ready,
     pub prepare: fn(&Setup<'_>) -> Result<Prepared, String>,
+    /// サーバーが木の根に作るので、木を目録にそろえるときに消さない名前（`_build` など）。
+    /// 消すと問い合わせのたびに作り直しになる（moon-lsp は別のパッケージの型を読めなくなった）。
+    pub keep: &'static [&'static str],
 }
 
 impl Spec {
@@ -131,7 +134,7 @@ fn write_if_changed(path: &Path, text: &str) -> Result<(), String> {
 
 // ───────────────────────── Rust（rust-analyzer） ─────────────────────────
 
-const RUST: Spec = Spec { name: "rust-analyzer", program: "rust-analyzer", args: &[], exts: &["rs"], ready: Ready::ServerStatus, prepare: prepare_rust };
+const RUST: Spec = Spec { name: "rust-analyzer", program: "rust-analyzer", args: &[], exts: &["rs"], ready: Ready::ServerStatus, prepare: prepare_rust, keep: &[] };
 
 /// rust-analyzer の設定（`initializationOptions` と `workspace/configuration` の返事）。
 /// 理由は docs/measurements.md §13。
@@ -178,7 +181,7 @@ fn prepare_rust(s: &Setup<'_>) -> Result<Prepared, String> {
 
 // ───────────────────────── Python（pyright） ─────────────────────────
 
-const PYTHON: Spec = Spec { name: "pyright", program: "pyright-langserver", args: &["--stdio"], exts: &["py", "pyi"], ready: Ready::Initialized, prepare: prepare_python };
+const PYTHON: Spec = Spec { name: "pyright", program: "pyright-langserver", args: &["--stdio"], exts: &["py", "pyi"], ready: Ready::Initialized, prepare: prepare_python, keep: &[] };
 
 fn prepare_python(_: &Setup<'_>) -> Result<Prepared, String> {
     // 診断は zc-buildd の check（pyright）が出すので、開いたファイルだけ見させる（木全体を解析しない）
@@ -189,7 +192,7 @@ fn prepare_python(_: &Setup<'_>) -> Result<Prepared, String> {
 // ───────────────────────── JavaScript / TypeScript（TypeScript 7 の tsc） ─────────────────────────
 
 /// TypeScript 7（Go 版）の `tsc` は `--lsp --stdio` で言語サーバーになる（イメージの check と同じもの）。
-const TYPESCRIPT: Spec = Spec { name: "tsc", program: "tsc", args: &["--lsp", "--stdio"], exts: &["ts", "mts", "cts", "js", "mjs", "cjs"], ready: Ready::Initialized, prepare: prepare_typescript };
+const TYPESCRIPT: Spec = Spec { name: "tsc", program: "tsc", args: &["--lsp", "--stdio"], exts: &["ts", "mts", "cts", "js", "mjs", "cjs"], ready: Ready::Initialized, prepare: prepare_typescript, keep: &[] };
 
 fn prepare_typescript(s: &Setup<'_>) -> Result<Prepared, String> {
     // tsconfig.json が無ければ、check と同じ既定（runner::node::TSC_DEFAULTS）を木の外（親）に置く。
@@ -210,7 +213,7 @@ fn prepare_typescript(s: &Setup<'_>) -> Result<Prepared, String> {
 
 // ───────────────────────── Go（gopls） ─────────────────────────
 
-const GO: Spec = Spec { name: "gopls", program: "gopls", args: &["serve"], exts: &["go"], ready: Ready::Initialized, prepare: prepare_go };
+const GO: Spec = Spec { name: "gopls", program: "gopls", args: &["serve"], exts: &["go"], ready: Ready::Initialized, prepare: prepare_go, keep: &[] };
 
 fn prepare_go(_: &Setup<'_>) -> Result<Prepared, String> {
     // ビルドと同じ対象（実機）で見る（build タグ・cgo の有無で見えるファイルが変わる）。
@@ -222,7 +225,7 @@ fn prepare_go(_: &Setup<'_>) -> Result<Prepared, String> {
 
 // ───────────────────────── Zig（zls） ─────────────────────────
 
-const ZIG: Spec = Spec { name: "zls", program: "zls", args: &[], exts: &["zig", "zon"], ready: Ready::Initialized, prepare: prepare_zig };
+const ZIG: Spec = Spec { name: "zls", program: "zls", args: &[], exts: &["zig", "zon"], ready: Ready::Initialized, prepare: prepare_zig, keep: &[".zig-cache", "zig-out"] };
 
 fn prepare_zig(_: &Setup<'_>) -> Result<Prepared, String> {
     // 診断は zc-buildd の check が出す。build.zig を走らせて診断を集める機能は使わない（重い）
@@ -239,6 +242,7 @@ const CLANGD: Spec = Spec {
     exts: &["c", "h", "cpp", "cc", "cxx", "c++", "hpp", "hh", "hxx"],
     ready: Ready::Initialized,
     prepare: prepare_clangd,
+    keep: &[".cache"],
 };
 
 fn prepare_clangd(s: &Setup<'_>) -> Result<Prepared, String> {
@@ -259,7 +263,7 @@ fn prepare_clangd(s: &Setup<'_>) -> Result<Prepared, String> {
 
 // ───────────────────────── Shell（bash-language-server） ─────────────────────────
 
-const BASH: Spec = Spec { name: "bash-language-server", program: "bash-language-server", args: &["start"], exts: &["sh", "bash"], ready: Ready::Initialized, prepare: prepare_bash };
+const BASH: Spec = Spec { name: "bash-language-server", program: "bash-language-server", args: &["start"], exts: &["sh", "bash"], ready: Ready::Initialized, prepare: prepare_bash, keep: &[] };
 
 fn prepare_bash(_: &Setup<'_>) -> Result<Prepared, String> {
     // 診断（shellcheck）は zc-buildd の check が出すので、こちらでは回さない
@@ -277,7 +281,7 @@ fn prepare_bash(_: &Setup<'_>) -> Result<Prepared, String> {
 /// 木の外に空の Gemfile を置いて `BUNDLE_GEMFILE` で渡す。クラス・モジュールの中のメソッドと定数は
 /// 追えるが、トップレベルの `def` の呼び出しは hover・定義へとも答えない（ruby-lsp の作り）。
 /// `tmp` という名前のフォルダの下は既定で索引から外す（置き場は `/var/lib/zc-buildd` なので当たらない）。
-const RUBY: Spec = Spec { name: "ruby-lsp", program: "ruby", args: &["-rruby_lsp/internal", "-e", "$stdin.binmode; $stdout.binmode; $stdout.sync = true; RubyLsp::Server.new.start"], exts: &["rb"], ready: Ready::Initialized, prepare: prepare_ruby };
+const RUBY: Spec = Spec { name: "ruby-lsp", program: "ruby", args: &["-rruby_lsp/internal", "-e", "$stdin.binmode; $stdout.binmode; $stdout.sync = true; RubyLsp::Server.new.start"], exts: &["rb"], ready: Ready::Initialized, prepare: prepare_ruby, keep: &[".ruby-lsp"] };
 
 fn prepare_ruby(s: &Setup<'_>) -> Result<Prepared, String> {
     let dir = s.pdir.join("ruby-lsp");
@@ -291,7 +295,7 @@ fn prepare_ruby(s: &Setup<'_>) -> Result<Prepared, String> {
 
 // ───────────────────────── MoonBit（moon-lsp） ─────────────────────────
 
-const MOONBIT: Spec = Spec { name: "moon-lsp", program: "moon-lsp", args: &[], exts: &["mbt"], ready: Ready::Initialized, prepare: |_| Ok(Prepared::default()) };
+const MOONBIT: Spec = Spec { name: "moon-lsp", program: "moon-lsp", args: &[], exts: &["mbt"], ready: Ready::Initialized, prepare: |_| Ok(Prepared::default()), keep: &["_build", ".mooncakes"] };
 
 // ───────────────────────── プロジェクトの外の場所 ─────────────────────────
 

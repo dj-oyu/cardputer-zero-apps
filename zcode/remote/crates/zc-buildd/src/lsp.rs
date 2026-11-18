@@ -331,7 +331,7 @@ impl Ls {
     /// 目録に合わせて lsp の木を写し、変わったところをサーバーに知らせる。
     fn sync(&self, store: &Store, manifest: &Manifest) -> Result<(), String> {
         let mut st = self.st.lock().unwrap();
-        store.sync_lsp_tree(&self.project, manifest).map_err(|e| format!("{} 用の木を作れない: {e}", self.spec.name))?;
+        store.sync_lsp_tree(&self.project, manifest, self.spec.keep).map_err(|e| format!("{} 用の木を作れない: {e}", self.spec.name))?;
         let new: HashMap<String, String> = manifest.files().iter().map(|f| (f.path.clone(), f.sha256.clone())).collect();
         let mut watched = Vec::new();
         let mut changed_src = Vec::new();
@@ -912,7 +912,7 @@ impl LspHub {
     fn spawn(&self, store: &Store, project: &str, manifest: &Manifest, spec: &'static Spec) -> Result<Arc<Ls>, String> {
         let name = spec.name;
         let program = servers::find(spec).ok_or_else(|| format!("{name} が無い（ビルド係のイメージに入っていない。イメージが古い）"))?;
-        store.sync_lsp_tree(project, manifest).map_err(|e| format!("{name} 用の木を作れない: {e}"))?;
+        store.sync_lsp_tree(project, manifest, spec.keep).map_err(|e| format!("{name} 用の木を作れない: {e}"))?;
         let root = store.lsp_dir(project).canonicalize().map_err(|e| format!("{name} 用の木が無い: {e}"))?;
         let pdir = root.parent().unwrap_or(&root).to_path_buf();
         let Prepared { init_options, settings, env } = (spec.prepare)(&Setup { root: &root, pdir: &pdir, manifest })?;

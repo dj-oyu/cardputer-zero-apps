@@ -199,6 +199,9 @@ buildScripts・procMacro・cachePriming は既定（有効）のまま。
   リンク・太字を外し、同じ段落は 1 度）。tsc は plaintext だとシグネチャと説明を区切らずにつなぐので Markdown にした
 - 同じ場所を 2 度返すサーバー（ruby-lsp）があるので、場所の一覧は（中・外・行・桁・名前）で重複を除く
 - 補完の小窓の札は、言語によらず「ls」（前は Rust だけで「rs」）
+- 受付は問い合わせのたびに lsp の木を目録にそろえる。サーバーが木の根に作るもの（moon-lsp の `_build`・zls の
+  `.zig-cache`・clangd の `.cache`・ruby-lsp の `.ruby-lsp`）は `Spec::keep` に書いて消さない。**消すと moon-lsp は
+  別のパッケージの型を読めず、何も答えなくなった**（2026-11-18、実機のサンプル `moonbit/cmd/main` で見つけた）
 
 ### 9.2 新しい言語の足し方
 

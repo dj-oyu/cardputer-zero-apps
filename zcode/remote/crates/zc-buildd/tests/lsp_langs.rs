@@ -110,8 +110,16 @@ const CASES: &[Case] = &[
     },
     Case {
         name: "moonbit",
-        files: &[("moon.mod", "name = \"t/s\"\n\nversion = \"0.1.0\"\n"), ("moon.pkg", ""), ("lib.mbt", "///|\n/// 2 倍にする。\npub fn twice(x : Int) -> Int {\n  x * 2\n}\n\n///|\npub fn four() -> Int {\n  twice(2)\n}\n")],
-        at: ("lib.mbt", 8, "twice"),
+        // 別のパッケージの関数（@s.twice）を呼ぶ形。moon-lsp は木の中の `_build` を読むので、木を
+        // そろえるときに消すと答えなくなる（Spec::keep。2026-11-18 に実機のサンプルで見つけた）
+        files: &[
+            ("moon.mod", "name = \"t/s\"\n\nversion = \"0.1.0\"\n"),
+            ("moon.pkg", ""),
+            ("lib.mbt", "///|\n/// 2 倍にする。\npub fn twice(x : Int) -> Int {\n  x * 2\n}\n"),
+            ("cmd/main/moon.pkg", "import {\n  \"t/s\" @s,\n}\n\npkgtype(kind: \"executable\")\n"),
+            ("cmd/main/main.mbt", "///|\nfn main {\n  println(@s.twice(2))\n}\n"),
+        ],
+        at: ("cmd/main/main.mbt", 2, "twice"),
         def: &[("lib.mbt", 2)],
         complete: None,
     },

@@ -265,14 +265,18 @@ impl Store {
     /// 写しは同時に 1 つだけ（中で待たせる）。走っているジョブがある間は呼ばない
     /// （台帳が順番を守る）。
     pub fn sync_tree(&self, project: &str, manifest: &Manifest) -> Result<SyncStats, StoreError> {
-        self.sync_entries(project, manifest.files(), "src", "tree.json")
+        self.sync_entries(project, manifest.files(), "src", "tree.json", &[])
     }
 
-    /// [`Store::sync_tree`] と同じ写しを、rust-analyzer 用の木（`proj/<project id>/lsp`）へ
+    /// [`Store::sync_tree`] と同じ写しを、言語サーバー用の木（`proj/<project id>/lsp`）へ
     /// （docs/lsp-design.md）。ジョブの作業の木とは別にするので、ジョブが走っている間に呼んでよい。
     /// 覚えは `lsp-tree.json`（掃除の「指されている中身」には数えない。木にコピーがあるため）。
-    pub fn sync_lsp_tree(&self, project: &str, manifest: &Manifest) -> Result<SyncStats, StoreError> {
-        self.sync_entries(project, manifest.files(), "lsp", "lsp-tree.json")
+    ///
+    /// `keep` は、言語サーバーが木の根に作るので、目録に無くても消さない名前（moon-lsp の
+    /// `_build`・zls の `.zig-cache` など。[`crate::lsp::Spec::keep`]）。消すと、サーバーは問い合わせの
+    /// たびに作り直しになり、moon-lsp は別のパッケージの型を読めなくなった（2026-11-18）。
+    pub fn sync_lsp_tree(&self, project: &str, manifest: &Manifest, keep: &[&str]) -> Result<SyncStats, StoreError> {
+        self.sync_entries(project, manifest.files(), "lsp", "lsp-tree.json", keep)
     }
 
     /// rust-analyzer 用の木（`proj/<project id>/lsp`）。
@@ -280,7 +284,7 @@ impl Store {
         self.project_dir(project).join("lsp")
     }
 
-    fn sync_entries(&self, project: &str, files: &[FileEntry], sub: &str, memo_name: &str) -> Result<SyncStats, StoreError> {
+    fn sync_entries(&self, project: &str, files: &[FileEntry], sub: &str, memo_name: &str, keep: &[&str]) -> Result<SyncStats, StoreError> {
         let lock = self.project_lock(project);
         let _g = lock.lock().unwrap();
         // 受付の中でももう一度確かめる（目録の検査を通らないものは来ない前提だが、木の外に
@@ -314,7 +318,8 @@ impl Store {
 
         let mut stats = SyncStats::default();
         // 1. 目録に無いもの（道具が作ったもの・消えたファイル・シンボリックリンク）を消す
-        self.prune(&src, "", &want, &want_dirs, &mut stats)?;
+        //    （根の `keep` の名前は残す）
+        self.prune(&src, "", &want, &want_dirs, keep, &mut stats)?;
 
         // 2. 目録のファイルを、中身が違うものだけ書く
         let mut memo = TreeMemo::default();
@@ -361,7 +366,8 @@ impl Store {
     }
 
     /// `dir`（木の中の `prefix`）の中で、目録に無いものを消す。シンボリックリンクはたどらない。
-    fn prune(&self, dir: &Path, prefix: &str, want: &HashMap<&str, &FileEntry>, want_dirs: &HashSet<String>, stats: &mut SyncStats) -> std::io::Result<()> {
+    /// 根（`prefix` が空）の `keep` の名前は、目録に無くてもそのまま残す（中も見ない）。
+    fn prune(&self, dir: &Path, prefix: &str, want: &HashMap<&str, &FileEntry>, want_dirs: &HashSet<String>, keep: &[&str], stats: &mut SyncStats) -> std::io::Result<()> {
         for e in fs::read_dir(dir)? {
             let e = e?;
             let name = e.file_name();
@@ -372,9 +378,12 @@ impl Store {
             };
             let rel = if prefix.is_empty() { name.to_string() } else { format!("{prefix}/{name}") };
             let ft = e.file_type()?;
+            if prefix.is_empty() && keep.contains(&name) && !want.contains_key(rel.as_str()) && !want_dirs.contains(&rel) && !ft.is_symlink() {
+                continue;
+            }
             if ft.is_dir() {
                 if want_dirs.contains(&rel) {
-                    self.prune(&e.path(), &rel, want, want_dirs, stats)?;
+                    self.prune(&e.path(), &rel, want, want_dirs, &[], stats)?;
                 } else {
                     remove_any(&e.path(), stats)?;
                 }

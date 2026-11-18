@@ -119,6 +119,35 @@ fn files_made_by_tools_are_removed_and_edits_are_undone() {
     assert_eq!(std::fs::read(src.join("src/main.rs")).unwrap(), b"fn main() {}\n");
 }
 
+/// 言語サーバー用の木: 根の `keep` の名前（サーバーが作ったもの）は消さない。ほかは今までどおり消し、
+/// 下のフォルダの同じ名前・シンボリックリンクは残さない。
+#[test]
+fn lsp_tree_keeps_what_the_server_made() {
+    let t = Tmp::new("keep");
+    let s = Store::open(&t.0).unwrap();
+    let m = manifest(&s, &[("moon.mod", b"name = \"t/s\"\n", false), ("cmd/main.mbt", b"fn main {}\n", false)]);
+    s.sync_lsp_tree(P, &m, &["_build"]).unwrap();
+    let lsp = s.lsp_dir(P);
+    std::fs::create_dir_all(lsp.join("_build/wasm")).unwrap();
+    std::fs::write(lsp.join("_build/wasm/x.mi"), "mi").unwrap();
+    std::fs::create_dir_all(lsp.join("cmd/_build")).unwrap();
+    std::fs::write(lsp.join("other.txt"), "x").unwrap();
+    // 消した数は other.txt の 1 つ（空のフォルダ cmd/_build は数えない）
+    let st = s.sync_lsp_tree(P, &m, &["_build"]).unwrap();
+    assert_eq!(st.removed, 1, "{st:?}");
+    assert!(lsp.join("_build/wasm/x.mi").is_file(), "根の _build は残る");
+    assert!(!lsp.join("cmd/_build").exists() && !lsp.join("other.txt").exists());
+    // keep でもシンボリックリンクは残さない（木の外を指させない）
+    std::fs::remove_dir_all(lsp.join("_build")).unwrap();
+    std::os::unix::fs::symlink("/", lsp.join("_build")).unwrap();
+    s.sync_lsp_tree(P, &m, &["_build"]).unwrap();
+    assert!(std::fs::symlink_metadata(lsp.join("_build")).is_err());
+    // keep を渡さなければ（ジョブの木と同じく）消す
+    std::fs::create_dir_all(lsp.join("_build")).unwrap();
+    s.sync_lsp_tree(P, &m, &[]).unwrap();
+    assert!(!lsp.join("_build").exists());
+}
+
 #[test]
 fn bad_blob_is_not_stored() {
     let t = Tmp::new("badblob");
