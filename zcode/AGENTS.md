@@ -571,3 +571,14 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - 正解画像: `focus-flash.png`（最初の段）と `folder-picker.png`。ステータスバーの現在地で、ステータスバーの出る
   正解画像は全部描き直した
 - 未確認: 実機での光の見え方と速さ、Ctrl+数字が実機のキーボードで届くか（ドライバの通常レイヤーの 1〜0）
+
+## 動作確認のサンプル（2026-11-18）
+
+- `samples/trial/` に言語ごとのサンプル（Python・Shell・Rust・C・C++・Go・Zig・MoonBit・Ruby・JS・TS・npm の依存つき TS・
+  JSON・TOML・Markdown）と、わざと間違えた `errors/` がある。中身と試すことは `samples/trial/README.md`
+- 実機の「zcode (dev)」は `~/.cache/zcode-dev/trial` を開く（`~/.config/zcode-dev/args`）。写すときは
+  `tar -C samples -cf - trial | ssh <実機> 'cd ~/.cache/zcode-dev && tar -xf -'`
+- 2026-11-18 に 2 号機で、F5・保存時の検査・F6（Rust・Go・Zig・MoonBit）が通り、`errors/` は全部エラーになることを
+  確かめた。Ruby の F5 は実機に `ruby` が要る（`sudo apt install ruby`、約 35MB）
+- MoonBit の `moon.mod` に `preferred_target = "native"` を書くと、ビルド係の check が `mooninfo` を呼んで落ちていた
+  （`--no-mbti` を付けて直した。`remote/crates/zc-buildd/src/runner/moonbit.rs`）

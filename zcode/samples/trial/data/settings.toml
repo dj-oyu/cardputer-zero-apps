@@ -1,0 +1,9 @@
+# TOML のハイライトの確認
+title = "動作確認"
+retries = 3
+ratio = 0.5
+started = 2026-11-18T09:00:00+09:00
+
+[led]
+pin = 18
+pattern = ["on", "off", "on"]

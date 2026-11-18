@@ -1,0 +1,9 @@
+[package]
+name = "trial"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+# zcode のリポジトリの中に置いてもワークスペースに数えられないように（このフォルダだけで完結）
+[workspace]
