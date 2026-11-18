@@ -606,4 +606,7 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   clangd は x86_64 の C++ の見出しが無いので `--target=aarch64-linux-gnu`。bash-language-server と ruby-lsp は開いた直後の
   hover が空のことがある
 - zc-remote は 0.3.0（`runtimes.lock` も）。補完の小窓の言語サーバーの札は「ls」（前は「rs」）
+- 実機（2 号機、Cloudflare 経由、2026-11-18）で serve に IPC で直接頼んで確かめた: Python・TS・JS・Go・C・Zig・Shell・Ruby は
+  hover と定義へが約 2 秒（最初の 1 回、サーバーの起動込み）、Rust は 12 秒（rust-analyzer の索引待ち）。MoonBit は、受付が木を
+  そろえるたびに moon-lsp の `_build` を消していて、別のパッケージの呼び出しに答えなかった → `Spec::keep` で直した
 - **未実施: deploy**（イメージ）。手元のイメージは `cz-builder:lsp-all`。Cloudflare の 1 vCPU での準備の時間、実機での見え方は未確認
