@@ -1,8 +1,9 @@
 //! フォルダを開く画面（ツリーで F11。ツリーの根を選び直す）。
 //!
-//! いまいるフォルダの中身を、フォルダは明るく・ファイルは薄く（選べない）並べる。先頭は `..`
-//! （上のフォルダ）。↑↓ で選び、Enter で入る、BS で上へ、Space で選んだフォルダに決める
-//! （ここは見た目と状態だけ。決めた後のことはエディタの画面が受け持つ）。
+//! いまいるフォルダの中身を、フォルダは明るく・ファイルは薄く（選べない）並べる。先頭は `.`
+//! （いまいるフォルダ。Enter でそこに決める）、次に `..`（上のフォルダ）。↑↓ で選び、Enter で
+//! 入る（`.` なら決める）、BS で上へ、Space で選んだフォルダに決める（ここは見た目と状態だけ。
+//! 決めた後のことはエディタの画面が受け持つ）。
 
 use crate::layout::{CODE_LINE_H, CODE_PX, TAB_H, UI_PX};
 use crate::tree::{display_path, list_dir, TreeNode};
@@ -11,7 +12,7 @@ use std::path::{Path, PathBuf};
 use zc_core::{palette, Color, Damage, Rect};
 use zc_font::TextStyle;
 
-/// 1 行（`..` は `path` が親のフォルダ）。
+/// 1 行（`.` は `path` がいまいるフォルダ、`..` は親のフォルダ）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Entry {
     name: String,
@@ -33,7 +34,7 @@ pub struct FolderPicker {
 }
 
 impl FolderPicker {
-    /// `current`（いまの根）の中身から始める。選択は最初のフォルダ（無ければ `..`）。
+    /// `current`（いまの根）の中身から始める。選択は最初のフォルダ（無ければ `.`）。
     pub fn new(current: &Path) -> FolderPicker {
         let mut p = FolderPicker {
             dir: current.to_path_buf(),
@@ -58,26 +59,26 @@ impl FolderPicker {
     pub fn dir(&self) -> &Path {
         &self.dir
     }
-    /// 選んでいる行のフォルダ（`..` なら上のフォルダ）。ファイルなら `None`。
+    /// 選んでいる行のフォルダ（`.` ならいまいるフォルダ、`..` なら上のフォルダ）。ファイルなら `None`。
     pub fn selected(&self) -> Option<&Path> {
         self.entries.get(self.sel).filter(|e| e.is_dir).map(|e| e.path.as_path())
     }
-    /// 並んでいる名前（試験用。`..` を含む）。
+    /// 並んでいる名前（試験用。`.`・`..` を含む）。
     pub fn names(&self) -> Vec<&str> {
         self.entries.iter().map(|e| e.name.as_str()).collect()
     }
 
     /// `dir` を読み直す。`select` があればその行を選ぶ（上へ戻ったとき、いたフォルダを選ぶ）。
     fn load(&mut self, select: Option<&Path>) {
-        let mut v = Vec::new();
+        let mut v = vec![Entry { name: ".".into(), path: self.dir.clone(), is_dir: true }];
         if let Some(parent) = self.dir.parent() {
             v.push(Entry { name: "..".into(), path: parent.to_path_buf(), is_dir: true });
         }
         v.extend(list_dir(&self.dir, 0).into_iter().map(|TreeNode { name, path, is_dir, .. }| Entry { name, path, is_dir }));
         self.entries = v;
         self.scroll = 0;
-        let first_dir = self.entries.iter().position(|e| e.is_dir && e.name != "..").unwrap_or(0);
-        self.sel = select.and_then(|s| self.entries.iter().position(|e| e.path == s && e.name != "..")).unwrap_or(first_dir);
+        let first_dir = self.entries.iter().position(|e| e.is_dir && !is_dot(&e.name)).unwrap_or(0);
+        self.sel = select.and_then(|s| self.entries.iter().position(|e| e.path == s && !is_dot(&e.name))).unwrap_or(first_dir);
         self.dirty = true;
     }
 
@@ -94,14 +95,21 @@ impl FolderPicker {
             self.dirty = true;
         }
     }
-    /// Enter: 選んだフォルダに入る（`..` なら上へ）。
+    /// 選んでいるのが `.`（いまいるフォルダ）か。
+    pub fn on_here(&self) -> bool {
+        self.entries.get(self.sel).is_some_and(|e| e.name == ".")
+    }
+    /// Enter: 選んだフォルダに入る（`..` なら上へ）。`.` は入る先が無いので何もしない
+    /// （決めるのは呼ぶ側。[`FolderPicker::on_here`] を見る）。
     pub fn enter(&mut self) {
         let Some(e) = self.entries.get(self.sel).filter(|e| e.is_dir).cloned() else { return };
-        if e.name == ".." {
-            self.up();
-        } else {
-            self.dir = e.path;
-            self.load(None);
+        match e.name.as_str() {
+            "." => {}
+            ".." => self.up(),
+            _ => {
+                self.dir = e.path;
+                self.load(None);
+            }
         }
     }
     /// BS: 上のフォルダへ（いたフォルダを選んだまま）。
@@ -149,7 +157,7 @@ impl Widget for FolderPicker {
             if on {
                 cx.canvas.stroke_rect(r, palette::STATUS);
             }
-            let label = if e.is_dir && e.name != ".." { format!("{}/", e.name) } else { e.name.clone() };
+            let label = if e.is_dir && !is_dot(&e.name) { format!("{}/", e.name) } else { e.name.clone() };
             let fg = if e.is_dir { palette::FG } else { palette::DIM };
             cx.text_in(Rect::new(r.x + 10, r.y, r.w.saturating_sub(12), r.h), &label, &self.font, fg, bg);
             if e.is_dir && e.name != ".." && e.path == self.current {
@@ -161,6 +169,11 @@ impl Widget for FolderPicker {
     fn invalidate(&mut self) {
         self.dirty = true;
     }
+}
+
+/// `.` か `..`（名前の後ろに `/` を付けない・戻ってきたときに選ばない行）。
+fn is_dot(name: &str) -> bool {
+    name == "." || name == ".."
 }
 
 #[cfg(test)]
@@ -183,7 +196,7 @@ mod tests {
         let d = tmp("walk");
         let blink = d.join("code/blink");
         let mut p = FolderPicker::new(&blink);
-        assert_eq!(p.names(), ["..", "lib", "main.py"]);
+        assert_eq!(p.names(), [".", "..", "lib", "main.py"]);
         assert_eq!(p.selected(), Some(blink.join("lib").as_path()));
         // ファイルは選べない（下へ動いても lib のまま）
         p.move_sel(1);
@@ -191,16 +204,26 @@ mod tests {
         // 上へ: いたフォルダ（blink）を選んだまま
         p.up();
         assert_eq!(p.dir(), d.join("code"));
-        assert_eq!(p.names(), ["..", "blink", "qr-test", "rust-hello", "todo.md"]);
+        assert_eq!(p.names(), [".", "..", "blink", "qr-test", "rust-hello", "todo.md"]);
         assert_eq!(p.selected(), Some(blink.as_path()));
         p.move_sel(1);
         p.enter();
         assert_eq!(p.dir(), d.join("code/qr-test"));
-        assert_eq!(p.names(), [".."]);
+        assert_eq!(p.names(), [".", ".."]);
+        // 下にフォルダが無ければ `.` を選ぶ（Enter でそこに決められる。入る先は無い）
+        assert!(p.on_here());
+        assert_eq!(p.selected(), Some(d.join("code/qr-test").as_path()));
+        p.enter();
+        assert_eq!(p.dir(), d.join("code/qr-test"));
         // `..` で上へ（いたフォルダを選んだまま）
+        p.move_sel(1);
         p.enter();
         assert_eq!(p.dir(), d.join("code"));
         assert_eq!(p.selected(), Some(d.join("code/qr-test").as_path()));
+        // 先頭まで上げると `.`（いまいるフォルダ）
+        p.move_sel(i32::MIN / 2);
+        assert!(p.on_here());
+        assert_eq!(p.selected(), Some(d.join("code").as_path()));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

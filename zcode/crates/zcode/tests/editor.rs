@@ -1355,6 +1355,16 @@ fn f11_on_the_tree_picks_a_new_root() {
     // F11 → Esc は何もせず戻る
     lp.keys(&mut ed, &[key(Key::F(11)), key(Key::Esc)]);
     assert_eq!((ed.maximized(), ed.root()), ((false, false), dir.join("other").as_path()));
+    // F11 → BS で上へ（other を選んだまま）→ ↑↑ で先頭の `.` → Enter でいまいるフォルダを根にする
+    lp.keys(&mut ed, &[key(Key::F(11)), key(Key::Backspace), key(Key::Up), key(Key::Up), key(Key::Enter)]);
+    assert_eq!((ed.maximized(), ed.root()), ((false, false), dir.as_path()));
+    // Enter で other に入る → 下にフォルダが無いので `.` が選ばれていて、Enter だけで決まる
+    lp.keys(&mut ed, &[key(Key::F(11)), key(Key::Enter)]);
+    assert_eq!(ed.maximized(), (false, true));
+    lp.keys(&mut ed, &[key(Key::Enter)]);
+    assert_eq!(ed.root(), dir.join("other"));
+    lp.keys(&mut ed, &[key(Key::F(11)), key(Key::Enter)]);
+    assert_eq!((ed.maximized(), ed.root()), ((false, false), dir.join("other").as_path()));
     let _ = fs::remove_dir_all(&dir);
 }
 

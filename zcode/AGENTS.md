@@ -366,6 +366,8 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 
 ## 型の情報（LSP、2026-11-17、ブランチ `zcode-lsp`、`docs/lsp-design.md`）
 
+> 2026-11-18 に全言語へ広げた（下の「型の情報を全言語へ」）。この節の「Rust だけ」は v1 の話。
+
 - **ユーザーの決定**: v1 は Rust（rust-analyzer）だけ。Rust のファイルを開いたら（`Warm`）ビルド係が
   そのプロジェクトの rust-analyzer を裏で起動する（コンテナと同じ寿命）。キーは Ctrl+H 型と説明・
   Ctrl+D 定義へ・Ctrl+R 使っている所・Ctrl+T 名前を探す・F8 / Shift+F8 次 / 前の診断（手元だけ・オフラインでも効く）。
@@ -553,7 +555,10 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
     フォーカスのある区画を閉じたらエディタへ。F12 をエディタから押しても、開いていれば閉じる（前は移った）
   - 最大化: F11 でいまの区画を最大化 / 戻す。エディタはツリーとパネルを隠すだけ（開閉の状態はそのまま、
     `editor_max`）、ターミナルは前からの全画面、ツリーは**フォルダを開く画面**（`zc_ui::FolderPicker`。
-    Enter 入る・BS 上へ・Space で選んだフォルダをツリーの根にする・Esc / F11 で戻る）。最大化の中で別の区画へ
+    Enter 入る・BS 上へ・Space で選んだフォルダをツリーの根にする・Esc / F11 で戻る）。
+    一覧の先頭は `.`（いまいるフォルダ。2026-11-18、ユーザーの要望）で、選んで Enter でそこを根にする。下にフォルダが
+    無いところでは `.` が最初から選ばれている（入って Enter だけで開ける）。`.` を選んでいる間はステータスバーの案内も
+    「Enter ここを開く」になる最大化の中で別の区画へ
     移る・開閉すると、最大化をやめてから動く
   - Ctrl+E は外した（Ctrl+1 と Ctrl+B で足りる）。Ctrl+B を押し違えた勘違いから Ctrl+E を案にしたが、ユーザーは
     今の Ctrl+B を残すと決めた
@@ -582,3 +587,23 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
   確かめた。Ruby の F5 は実機に `ruby` が要る（`sudo apt install ruby`、約 35MB）
 - MoonBit の `moon.mod` に `preferred_target = "native"` を書くと、ビルド係の check が `mooninfo` を呼んで落ちていた
   （`--no-mbti` を付けて直した。`remote/crates/zc-buildd/src/runner/moonbit.rs`）
+
+## 型の情報を全言語へ（2026-11-18、ユーザーの指示、`docs/lsp-design.md` §9）
+
+- 言語サーバーは `zc-buildd/src/lsp/servers.rs` の表（`Spec`）で決める。橋渡し（`lsp.rs`）はどの言語でも同じ。言語は
+  パスの拡張子で決めるので、zc-wire・IPC・Worker は変えていない。足し方は lsp-design.md §9.2
+- 対象: Rust（rust-analyzer）・Python（pyright）・JS / TS（TypeScript 7 の `tsc --lsp --stdio`）・Go（gopls）・Zig（zls）・
+  C / C++（clangd）・Shell（bash-language-server）・Ruby（ruby-lsp）・MoonBit（moon-lsp）。実機側は
+  `RemoteLang::has_lsp`。全部、本物のサーバーで hover と定義へを確かめた（`tests/lsp_langs.rs`、イメージの中で
+  `ZC_E2E_REQUIRE=1`）
+- **ビルド係のイメージは 1 つのまま**（ユーザーと確認。言語ごとに分けると温まっている間の費用が増え、冷えた起動も言語ごと）。
+  展開後 2.38 → 2.68GB（+300MB）。clangd は Debian の apt だと +270MB（libllvm19 ほか）なので、clangd/clangd の静的リンクの
+  配布物を strip して入れた（79MB）。distroless は、シェル・apt のクロスの gcc・ruby・`npm test` の `sh -c` に頼るので合わない
+  （ベースの層は gzip で約 29MB しかない）
+- 分かったこと: tsc は hover を plaintext で頼むとシグネチャと説明を区切らずにつなぐ（Markdown を頼んで受付で地の文にする）。
+  ruby-lsp は Gemfile が無いと索引を作らず（空の Gemfile を `BUNDLE_GEMFILE` で）、トップレベルの `def` は追わず、`tmp` という
+  フォルダの下は索引しない（試験の作業フォルダは HOME の下）。moon-lsp は `mooninfo` と core の wasm 版が無いと何も答えない。
+  clangd は x86_64 の C++ の見出しが無いので `--target=aarch64-linux-gnu`。bash-language-server と ruby-lsp は開いた直後の
+  hover が空のことがある
+- zc-remote は 0.3.0（`runtimes.lock` も）。補完の小窓の言語サーバーの札は「ls」（前は「rs」）
+- **未実施: deploy**（イメージ）。手元のイメージは `cz-builder:lsp-all`。Cloudflare の 1 vCPU での準備の時間、実機での見え方は未確認

@@ -142,7 +142,7 @@ pub trait RemoteLink {
         let _ = (ask, cx);
         None
     }
-    /// 先につないでおく（Rust のファイルを開いた。serve が rust-analyzer も起こす）。
+    /// 先につないでおく（言語サーバーのある言語のファイルを開いた。serve がサーバーも起こす）。
     fn warm(&mut self, file: PathBuf, cx: &mut LoopCx<'_>) {
         let _ = (file, cx);
     }
@@ -625,11 +625,11 @@ struct CompState {
     sel: usize,
     /// 置き換える単語の先頭部分（打った文字）。
     prefix: String,
-    /// rust-analyzer の候補（届いたら足す。小窓では単語補完より先に出す。docs/lsp-design.md）。
+    /// 言語サーバーの候補（届いたら足す。小窓では単語補完より先に出す。docs/lsp-design.md）。
     lsp: Vec<lsp::LspCand>,
 }
 
-/// 補完の小窓の 1 行（単語補完と rust-analyzer の候補を合わせたもの）。
+/// 補完の小窓の 1 行（単語補完と言語サーバーの候補を合わせたもの）。
 struct CompEntry {
     label: String,
     tag: &'static str,
@@ -642,12 +642,13 @@ struct CompEntry {
 }
 
 impl CompState {
-    /// 小窓に出す候補（rust-analyzer の分が先。単語補完の同じ語は除く）。`col` はカーソルの桁。
+    /// 小窓に出す候補（言語サーバーの分が先。単語補完の同じ語は除く）。`col` はカーソルの桁。
     fn entries(&self, col: u32) -> Vec<CompEntry> {
         let mut out: Vec<CompEntry> = self
             .lsp
             .iter()
-            .map(|c| CompEntry { label: c.label.clone(), tag: "rs", tag_color: palette::FUNCTION, insert: c.insert.clone(), start: c.start, hit: col.saturating_sub(c.start) as usize })
+            // 言語サーバーの候補の札（言語によらず「ls」。2026-11-18 まで Rust だけで「rs」だった）
+            .map(|c| CompEntry { label: c.label.clone(), tag: "ls", tag_color: palette::FUNCTION, insert: c.insert.clone(), start: c.start, hit: col.saturating_sub(c.start) as usize })
             .collect();
         let n = self.prefix.chars().count();
         for i in &self.items {
@@ -1108,6 +1109,13 @@ impl EditorScreen {
                 Motion::Right => f.enter(),
                 _ => {}
             },
+            // `.`（いまいるフォルダ）の Enter は、そこをツリーの根にする
+            Some(Command::Newline) if f.on_here() => {
+                if let Some(root) = f.selected().map(Path::to_path_buf) {
+                    self.set_folder_open(false);
+                    self.set_root(&root);
+                }
+            }
             Some(Command::Newline) => f.enter(),
             Some(Command::Backspace) => f.up(),
             Some(Command::Cancel) => self.set_folder_open(false),
@@ -1119,6 +1127,8 @@ impl EditorScreen {
             }
             _ => {}
         }
+        // 案内（`.` を選んでいるかで変わる）
+        self.status_due = true;
     }
     /// 押している / ロック中のモディファイア（ステータスバーの札）。
     pub fn set_mods(&mut self, mods: Mods) {
@@ -1573,7 +1583,7 @@ impl EditorScreen {
                 self.update_completion(false);
                 self.arm_lsp_completion(false, cx);
             }
-            // rust-analyzer はメソッド・パスの続きも出せる（単語補完には無い）
+            // 言語サーバーはメソッド・パスの続きも出せる（単語補完には無い）
             Command::InsertChar('.' | ':') => {
                 self.completion = None;
                 self.arm_lsp_completion(false, cx);
@@ -1838,7 +1848,7 @@ impl EditorScreen {
     /// カーソルの前の単語から候補を作り直す。`manual`（Ctrl+Space）なら 1 文字からでも出し、
     /// 候補が無ければそう知らせる。
     fn update_completion(&mut self, manual: bool) {
-        // rust-analyzer の候補は、打った文字で絞って残す（新しい答えが届けば替える）
+        // 言語サーバーの候補は、打った文字で絞って残す（新しい答えが届けば替える）
         let old_lsp = self.completion.take().map(|c| c.lsp).unwrap_or_default();
         if self.focus != Focus::Editor {
             return;
@@ -1865,7 +1875,7 @@ impl EditorScreen {
             }
             return;
         };
-        // rust-analyzer の候補が残っていれば、1 文字目から絞って出す
+        // 言語サーバーの候補が残っていれば、1 文字目から絞って出す
         if !manual && lsp.is_empty() && prefix.chars().count() < intel::AUTO_MIN_CHARS {
             return;
         }
@@ -1887,7 +1897,8 @@ impl EditorScreen {
         let keywords = tab.lang.info().map_or(&[][..], |i| i.keywords);
         let items = zc_intel::complete(&tab.words, keywords, &prefix, h, intel::MAX_ITEMS);
         if items.is_empty() && lsp.is_empty() {
-            if manual && tab.remote_lang() != Some(RemoteLang::Rust) {
+            // 言語サーバーのある言語は、サーバーの候補が後から届くかもしれない
+            if manual && !lsp::has_lsp(tab.remote_lang()) {
                 self.say(format!("「{prefix}」の候補は無い"), false);
             }
             return;
@@ -3122,8 +3133,9 @@ impl EditorScreen {
         };
         let map = PaneMap { focus: pane, open: [self.tree_open, true, self.panel_open] };
         self.status.set_panes((self.restore_offer.is_none() && self.shortcuts.is_none()).then_some(map));
-        if self.folder.is_some() {
-            self.status.set_left("Enter 入る  BS 上へ  Space ここを開く");
+        if let Some(f) = &self.folder {
+            // `.`（いまいるフォルダ）を選んでいる間は、Enter もそこを開く
+            self.status.set_left(if f.on_here() { "Enter ここを開く  BS 上へ" } else { "Enter 入る  BS 上へ  Space ここを開く" });
             self.status.set_right("F11 戻る");
             self.status.set_chips(Vec::new());
             self.status.set_bg(palette::STATUS);
@@ -3325,7 +3337,7 @@ impl Screen for EditorScreen {
                         }
                         t.sync_cursor();
                         self.status_due = true;
-                        // 定義へ飛んだ先なら、その桁へ。Rust なら rust-analyzer を先に起こしておく
+                        // 定義へ飛んだ先なら、その桁へ。言語サーバーのある言語なら先に起こしておく
                         self.lsp_opened(id);
                         self.lsp_warm(id, cx);
                     }

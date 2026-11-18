@@ -2,7 +2,9 @@
 //! （`EditorScreen` の中身に触るため）。
 //!
 //! 実機では LSP を動かさない（design.md §10）。問い合わせは専用スレッド（`RemoteLink::lsp`）→
-//! `zc-remote serve` → ビルド係の rust-analyzer へ。メインは頼むだけで待たない。
+//! `zc-remote serve` → ビルド係の言語サーバー（Rust は rust-analyzer、Python は pyright など。
+//! どれを使うかはビルド係が拡張子で決める）へ。メインは頼むだけで待たない。対象の言語は
+//! `RemoteLang::has_lsp`（`language.toml` の `remote` がある言語のうち、ビルド係にサーバーがあるもの）。
 //!
 //! | キー | 操作 | 答えの出し方 |
 //! |---|---|---|
@@ -11,7 +13,7 @@
 //! | Ctrl+R | 使っている所 | 一覧（アウトラインと同じ部品）。外の場所は薄く出して選べない |
 //! | Ctrl+T | 名前を探す | 一覧。検索欄の打鍵が止まったら頼み直す |
 //! | F8 / Shift+F8 | 次 / 前の診断 | 手元の診断（波線）だけ。オフラインでも効く。端まで行ったら反対の端へ |
-//! | （補完） | 補完の小窓に rust-analyzer の候補を足す | 打鍵が止まってから頼み、届いたら足す。単語補完はそのまますぐ出る |
+//! | （補完） | 補完の小窓に言語サーバーの候補を足す | 打鍵が止まってから頼み、届いたら足す。単語補完はそのまますぐ出る |
 //!
 //! - **古い答えは捨てる**: 頼んだときの文書の版（補完と hover はカーソルの位置も）が変わって
 //!   いたら、何もしない
@@ -28,13 +30,18 @@ use zc_core::{palette, DocId, Key, KeyEvent, Pos, Version};
 use zc_remote_ipc::{DoneStatus, LspItem, LspKind, LspState, RemoteLang};
 use zc_ui::{PickRow, PopupItem, Widget};
 
-/// 補完を rust-analyzer に頼むまで、打鍵が止まるのを待つ時間。
+/// 型の情報（言語サーバー）を頼める言語か。
+pub(super) fn has_lsp(lang: Option<RemoteLang>) -> bool {
+    lang.is_some_and(RemoteLang::has_lsp)
+}
+
+/// 補完を言語サーバーに頼むまで、打鍵が止まるのを待つ時間。
 pub const LSP_COMPLETE_IDLE: Duration = Duration::from_millis(300);
 /// 名前の検索を頼み直すまで、検索欄の打鍵が止まるのを待つ時間。
 pub const LSP_SYMBOLS_IDLE: Duration = Duration::from_millis(300);
 /// hover の小窓に出す行の数。
 pub const HOVER_LINES: usize = 8;
-/// 補完の小窓に足す rust-analyzer の候補の数。
+/// 補完の小窓に足す言語サーバーの候補の数。
 pub const LSP_COMPLETIONS: usize = 6;
 
 /// 行の中の文字の位置 → UTF-8 のバイト位置。
@@ -172,7 +179,7 @@ impl LocsState {
     }
 }
 
-/// rust-analyzer の補完の候補 1 つ（補完の小窓に足す）。
+/// 言語サーバーの補完の候補 1 つ（補完の小窓に足す）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct LspCand {
     pub label: String,
@@ -207,16 +214,16 @@ pub(super) struct LspUi {
 }
 
 impl EditorScreen {
-    /// 型の情報を使えるタブか（Rust のファイルで、保存先がある）。使えなければ理由を知らせる。
+    /// 型の情報を使えるタブか（言語サーバーのある言語のファイルで、保存先がある）。使えなければ理由を知らせる。
     fn lsp_target(&mut self, quiet: bool) -> Option<(DocId, Version, PathBuf, Pos, u32)> {
         let t = self.tabs.get(self.active)?;
         if t.loading {
             return None;
         }
-        let rust = t.remote_lang() == Some(RemoteLang::Rust);
-        let Some(path) = t.path.clone().filter(|_| rust) else {
+        let ok = has_lsp(t.remote_lang());
+        let Some(path) = t.path.clone().filter(|_| ok) else {
             if !quiet {
-                let msg = if rust { "型の情報: 先に保存する（ファイルの名前が要る）".to_string() } else { format!("型の情報は Rust だけ（{} は対象ではない）", t.lang.name) };
+                let msg = if ok { "型の情報: 先に保存する（ファイルの名前が要る）".to_string() } else { format!("型の情報: {} は対象ではない（ビルド係に言語サーバーが無い）", t.lang.name) };
                 self.say(msg, false);
             }
             return None;
@@ -249,10 +256,10 @@ impl EditorScreen {
         Some(req)
     }
 
-    /// Rust のファイルを開いた: rust-analyzer を先に起こしておく（ビルド係の設定がある人だけ）。
+    /// 言語サーバーのある言語のファイルを開いた: サーバーを先に起こしておく（ビルド係の設定がある人だけ）。
     pub(super) fn lsp_warm(&mut self, doc: DocId, cx: &mut LoopCx<'_>) {
         let Some(t) = self.tabs.iter().find(|t| t.id == doc) else { return };
-        if t.remote_lang() != Some(RemoteLang::Rust) {
+        if !has_lsp(t.remote_lang()) {
             return;
         }
         if let Some(p) = t.path.clone() {
@@ -422,9 +429,9 @@ impl EditorScreen {
         }
     }
 
-    /// 補完の小窓を開いた・打っている: 打鍵が止まったら rust-analyzer にも頼む。
+    /// 補完の小窓を開いた・打っている: 打鍵が止まったら言語サーバーにも頼む。
     pub(super) fn arm_lsp_completion(&mut self, now: bool, cx: &mut LoopCx<'_>) {
-        if self.focus != Focus::Editor || self.tabs.get(self.active).is_none_or(|t| t.remote_lang() != Some(RemoteLang::Rust)) {
+        if self.focus != Focus::Editor || self.tabs.get(self.active).is_none_or(|t| !has_lsp(t.remote_lang())) {
             return;
         }
         if now {
@@ -548,7 +555,7 @@ impl EditorScreen {
         self.status_due = true;
     }
 
-    /// rust-analyzer の候補を補完の小窓に足す（小窓が無ければ開く）。
+    /// 言語サーバーの候補を補完の小窓に足す（小窓が無ければ開く）。
     fn merge_lsp_completion(&mut self, items: &[LspItem]) {
         let Some(t) = self.tabs.get(self.active) else { return };
         let (_, h) = t.doc.selection();
@@ -583,7 +590,7 @@ impl EditorScreen {
         }
     }
 
-    /// rust-analyzer の状態が変わった。
+    /// 言語サーバーの状態が変わった。
     pub(super) fn on_lsp_state(&mut self, state: LspState, message: String) {
         match state {
             LspState::Ready if std::mem::take(&mut self.lsp.told_loading) => {

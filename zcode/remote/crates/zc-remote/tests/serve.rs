@@ -654,7 +654,9 @@ fn auto_check_sends_the_overlay_instead_of_the_disk() {
 fn lsp_answers_at_once_when_it_cannot_ask() {
     let sb = Sandbox::new("lspno");
     let _serve = sb.serve(&[], &[]);
-    let ts = sb.write("code/b/x.ts", "export {};\n");
+    let md = sb.write("code/b/x.md", "# x\n");
+    // package.json の無い TS（check は実機の tsc）も、型の情報はビルド係へ頼む
+    let ts = sb.write("code/c/x.ts", "export {};\n");
     let rs = sb.write("code/a/main.rs", "fn main() {}\n");
     let mut c = sb.client(ipc::ClientKind::Editor);
     let ask = |c: &mut Client, req: u32, file: &std::path::Path| {
@@ -664,10 +666,13 @@ fn lsp_answers_at_once_when_it_cannot_ask() {
             other => panic!("{other:?}"),
         }
     };
-    assert_eq!(ask(&mut c, 1, &ts).0, ipc::DoneStatus::NotApplicable);
-    let (status, message) = ask(&mut c, 2, &rs);
-    assert_eq!(status, ipc::DoneStatus::Auth);
-    assert!(message.contains("remote.json"), "{message}");
+    // 言語サーバーの無い種類は対象外。Rust 以外（TS）もビルド係へ頼む（ここでは設定が無い）
+    assert_eq!(ask(&mut c, 1, &md).0, ipc::DoneStatus::NotApplicable);
+    for (req, f) in [(2, &rs), (4, &ts)] {
+        let (status, message) = ask(&mut c, req, f);
+        assert_eq!(status, ipc::DoneStatus::Auth, "{f:?}");
+        assert!(message.contains("remote.json"), "{message}");
+    }
     c.send(&ipc::Request::Warm { file: rs.clone() });
     assert!(matches!(c.recv(WAIT), Some(ipc::Response::Status { .. })));
     assert_eq!(c.recv(Duration::from_millis(300)), None, "Warm には Status だけ");

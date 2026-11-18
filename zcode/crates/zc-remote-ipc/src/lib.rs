@@ -159,6 +159,28 @@ impl RemoteLang {
     pub fn has_tests(self) -> bool {
         matches!(self, RemoteLang::Rust | RemoteLang::Node | RemoteLang::Go | RemoteLang::Zig | RemoteLang::MoonBit)
     }
+
+    /// ビルド係に言語サーバーがあるか（型の情報: Ctrl+H・Ctrl+D・Ctrl+R・Ctrl+T・補完。
+    /// docs/lsp-design.md）。サーバーの表はビルド係の `zc_buildd::lsp::servers`。
+    ///
+    /// 新しい言語は、ビルド係の表とイメージにサーバーを入れてから `true` にする（`match` を網羅に
+    /// しているので、言語を足すとここで決めることになる）。
+    pub fn has_lsp(self) -> bool {
+        match self {
+            // rust-analyzer・clangd（C / C++）・tsc（TypeScript 7）・pyright・bash-language-server・
+            // gopls・ruby-lsp・zls・moon-lsp
+            RemoteLang::Rust
+            | RemoteLang::C
+            | RemoteLang::Node
+            | RemoteLang::Python
+            | RemoteLang::Shell
+            | RemoteLang::Cpp
+            | RemoteLang::Go
+            | RemoteLang::Ruby
+            | RemoteLang::Zig
+            | RemoteLang::MoonBit => true,
+        }
+    }
 }
 
 /// つないできた相手の種類。
@@ -278,7 +300,7 @@ pub enum LspKind {
     Completion = 5,
 }
 
-/// rust-analyzer の状態（[`Response::LspState`]）。
+/// 言語サーバーの状態（[`Response::LspState`]）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum LspState {
@@ -405,9 +427,9 @@ pub enum Response {
     Done { req: ReqId, tag: JobTag, status: DoneStatus, exit: i32, backend: Backend, elapsed_ms: u32, message: String },
     /// [`Request::Lsp`] への返事（版 3）。`status` は `Ok`（答え。何も無ければ `text` も `items` も空）、
     /// `NotApplicable`（Rust のプロジェクトではない）、`Offline`・`Auth`・`Clock`・`Limit`・`Error`
-    /// （`message` に理由。「rust-analyzer が準備中」も `Error`）、`Cancelled`（新しい問い合わせに替わった）。
+    /// （`message` に理由。「rust-analyzer が準備中」なども `Error`）、`Cancelled`（新しい問い合わせに替わった）。
     LspResult { req: ReqId, status: DoneStatus, message: String, text: String, items: Vec<LspItem> },
-    /// rust-analyzer の状態（版 3。`req` = 0。zcode の相手みんなへ）。`root` はプロジェクトの根。
+    /// 言語サーバーの状態（版 3。`req` = 0。zcode の相手みんなへ）。`root` はプロジェクトの根。
     LspState { root: PathBuf, state: LspState, message: String },
 }
 

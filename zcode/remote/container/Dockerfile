@@ -11,7 +11,8 @@
 # aarch64 のクロスの gcc）に、zstd・Node と npm・esbuild・TypeScript 7 の tsc・受付の
 # zc-buildd を足したもの。2026-11-17 に、pyright（Python の型検査。Node で動く）・ShellCheck・
 # aarch64 の g++・Go・Ruby・Zig・MoonBit と、LSP のための rust-analyzer と rust-src（std の索引用）を
-# 足した。Python の実行系・フォント・git は入れない。大きさは zcode/AGENTS.md と
+# 足した。2026-11-18 に、ほかの言語の言語サーバー（gopls・zls・clangd・bash-language-server・ruby-lsp・
+# moon-lsp）を足した。Python の実行系・フォント・git は入れない。大きさは zcode/AGENTS.md と
 # docs/measurements.md §13（言語・LSP を足す前は展開後 1.52GB、送る形で約 500MB）。
 #
 # 版はここの ARG で固定し、取ってきたものは SHA-256 で確かめる:
@@ -19,7 +20,8 @@
 #   - rustup-init は static.rust-lang.org の .sha256、Rust はその版の rustup の検査に任せる
 #   - Node は nodejs.org の SHASUMS256.txt の値
 #   - esbuild・TypeScript・pyright は remote/container/tools/package-lock.json の integrity（npm ci）
-#   - ShellCheck・Go・Zig・MoonBit は配布物の SHA-256（ARG）。g++ と ruby は Debian の apt
+#   - ShellCheck・Go・Zig・MoonBit・zls・clangd は配布物の SHA-256（ARG）。g++ と ruby は Debian の apt
+#   - gopls は go install（sum.golang.org）、ruby-lsp と依存の gem は 1 つずつの SHA-256（ARG）
 # 版を上げるときは、値を書き換えて run-pc.ps1 -Build で作り直し、中で試験を回す
 # （手順は zcode/AGENTS.md「ビルド係のイメージ」）。
 #
@@ -118,7 +120,10 @@ RUN curl -fsSLo /tmp/zig.tar.xz "https://ziglang.org/download/${ZIG_VERSION}/zig
 # MoonBit（cli.moonbitlang.com の版つきの配布物と core。SHA-256 は取ってきて確かめた値。
 # 版の名前の + は %2B）。検査・ビルド・試験に要るもの（moon・moonc・mooncake・tcc。moonrun は
 # native では使わないが、無いと moon の一部のコマンドが落ちるので残す）だけ残し、
-# core は native の分だけ束ねる。ライセンス: 道具は無償の配布物（CREDITS.md）、core は Apache-2.0
+# core は native の分だけ束ねる。ライセンス: 道具は無償の配布物（CREDITS.md）、core は Apache-2.0。
+# 2026-11-18、言語サーバーの moon-lsp のために moon-lsp・mooninfo を残し、core の wasm の分（約 20MB）も
+# 束ねる（moon-lsp は中で既定のターゲット = wasm の moon check を回し、mooninfo か core の wasm 版が
+# 無いと何も答えない）
 ARG MOONBIT_VERSION=0.10.20%2B65efd5b93
 ARG MOONBIT_SHA256=80d987523308fa490eba9f1baf98df996a5a7891e118357553b7c2608c0597c5
 ARG MOONBIT_CORE_SHA256=8ec2a2c01335501d703867bb4eef5f92d3cd7e1ae1ee5f7f14d54d16d2c7c2b5
@@ -133,7 +138,8 @@ RUN curl -fsSLo /tmp/moon.tar.gz "https://cli.moonbitlang.com/binaries/${MOONBIT
  && cd /opt/moon/bin \
  && chmod 0755 * internal/tcc \
  && MOON_HOME=/opt/moon ./moon -C /opt/moon/lib/core bundle --warn-list -a --target native \
- && rm -f moonc-prove moondoc moon-lsp moon-ide mooninfo moon_cove_report moon_cove.wasm moon-cram mooncram.wasm moonfmt moon-wasm-opt \
+ && MOON_HOME=/opt/moon ./moon -C /opt/moon/lib/core bundle --warn-list -a --target wasm \
+ && rm -f moonc-prove moondoc moon-ide moon_cove_report moon_cove.wasm moon-cram mooncram.wasm moonfmt moon-wasm-opt \
  && chmod -R a+rX,go-w /opt/moon \
  && MOON_HOME=/opt/moon moon version --all
 ENV MOON_HOME=/opt/moon \
@@ -146,7 +152,64 @@ COPY remote/container/tools/package.json remote/container/tools/package-lock.jso
 RUN cd /opt/tools \
  && npm ci --ignore-scripts --no-audit --no-fund --cache /tmp/npm-cache \
  && rm -rf /tmp/npm-cache \
- && node --version && npm --version && tsc --version && esbuild --version && pyright --version
+ && node --version && npm --version && tsc --version && esbuild --version && pyright --version \
+ && bash-language-server --version
+
+# 言語サーバー（型の情報。docs/lsp-design.md、表は zc-buildd の src/lsp/servers.rs）。2026-11-18 に足した。
+# rust-analyzer は rustup の component、tsc（--lsp）・pyright-langserver・bash-language-server は
+# /opt/tools、moon-lsp は MoonBit の配布物（上で残している）。ここで足すもの:
+#   - gopls: go install（モジュールの中身は sum.golang.org で確かめられる）。-s -w で小さく
+#   - zls: 配布物の SHA-256（zig と同じ 0.17 系）
+#   - clangd: clangd/clangd の配布物（LLVM を静的にリンクした 1 つの実行ファイル、依存は glibc だけ）の
+#     SHA-256。strip して約 62MB + builtin の見出し 17MB。Debian の apt の clangd-19 は libllvm19・
+#     libclang-cpp19・z3・grpc などを引き込んで約 270MB になったので使わない（測った値、2026-11-18）
+#   - ruby-lsp: gem を 1 つずつ取って SHA-256 を確かめ、--local で入れる。prism と rbs は C の拡張を
+#     作るので ruby-dev と make を一時的に入れ、入れ終わったら消す（clangd の zip を開く unzip も同じ）
+ARG GOPLS_VERSION=v0.24.0
+ARG CLANGD_VERSION=23.1.0
+ARG CLANGD_SHA256=e53b1a96196095faedb7642cf64964f7fb9ad4a0c1f00dd2c172a3d9dcbafdfd
+ARG ZLS_VERSION=0.17.0
+ARG ZLS_SHA256=dfa4514e1868803fdf2ae56832c88b9d400094d70ea6bb136b57bcc91af10258
+ARG RUBY_LSP_GEMS="ruby-lsp-0.26.11:4cc8f1587237ff8c9031680b5491df901a82559eeaa1ae96863ffe700b32583d \
+language_server-protocol-3.17.0.6:5ef2c0c138f8267e1bc631d3328347d354f96724b0af22f2c79516120443b7f0 \
+prism-1.9.0:7b530c6a9f92c24300014919c9dcbc055bf4cdf51ec30aed099b06cd6674ef85 \
+rbs-4.2.0:51f7b886dcc05bc09e10b901daa6a81829f6adc03101d6ca9ea4aac6103e0674 \
+logger-1.7.0:196edec7cc44b66cfb40f9755ce11b392f21f7967696af15d274dde7edff0203 \
+tsort-0.2.0:9650a793f6859a43b6641671278f79cfead60ac714148aabe4e3f0060480089f"
+RUN GOPATH=/tmp/gopath GOCACHE=/tmp/gocache GOBIN=/usr/local/bin \
+      go install -trimpath -ldflags="-s -w" "golang.org/x/tools/gopls@${GOPLS_VERSION}" \
+ && rm -rf /tmp/gopath /tmp/gocache \
+ && gopls version
+RUN curl -fsSLo /tmp/zls.tar.xz "https://github.com/zigtools/zls/releases/download/${ZLS_VERSION}/zls-x86_64-linux.tar.xz" \
+ && echo "${ZLS_SHA256}  /tmp/zls.tar.xz" | sha256sum -c - \
+ && tar -xJf /tmp/zls.tar.xz -C /tmp zls \
+ && install -m 0755 /tmp/zls /usr/local/bin/zls \
+ && rm -f /tmp/zls.tar.xz /tmp/zls \
+ && zls --version
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ruby-dev make unzip \
+ && curl -fsSLo /tmp/clangd.zip "https://github.com/clangd/clangd/releases/download/${CLANGD_VERSION}/clangd-linux-${CLANGD_VERSION}.zip" \
+ && echo "${CLANGD_SHA256}  /tmp/clangd.zip" | sha256sum -c - \
+ && unzip -q /tmp/clangd.zip -d /tmp \
+ && mkdir -p /opt/clangd/bin \
+ && strip -o /opt/clangd/bin/clangd "/tmp/clangd_${CLANGD_VERSION}/bin/clangd" \
+ && mv "/tmp/clangd_${CLANGD_VERSION}/lib" /opt/clangd/lib \
+ && rm -rf /tmp/clangd.zip "/tmp/clangd_${CLANGD_VERSION}" \
+ && chmod -R a+rX,go-w /opt/clangd \
+ && ln -s /opt/clangd/bin/clangd /usr/local/bin/clangd \
+ && mkdir /tmp/gems && cd /tmp/gems \
+ && for g in ${RUBY_LSP_GEMS}; do \
+      n="${g%%:*}"; h="${g##*:}"; \
+      curl -fsSLo "$n.gem" "https://rubygems.org/downloads/$n.gem" \
+      && echo "$h  $n.gem" | sha256sum -c - || exit 1; \
+    done \
+ && gem install --local --no-document ./*.gem \
+ && cd / && rm -rf /tmp/gems /var/lib/gems/*/cache /root/.local/share/gem \
+ && find /var/lib/gems -path '*/ext/*' \( -name '*.o' -o -name Makefile -o -name 'mkmf.log' \) -delete \
+ && apt-get purge -y --auto-remove ruby-dev make unzip \
+ && rm -rf /var/lib/apt/lists/* \
+ && clangd --version | head -1 \
+ && ruby -rruby_lsp/internal -e 'puts RubyLsp::VERSION'
 # sccache（docs/stage3-design.md §6.5 の段 3）は、スナップショット（段 2）を測ってから決める。
 
 COPY --from=build /usr/local/bin/zc-buildd /usr/local/bin/zc-buildd
