@@ -21,10 +21,11 @@
 #
 # zc-remote は zcode/remote/build.sh が作る out/zc-remote（aarch64。開発コンテナの中では、同じ
 # ソースから 2 回作って同じ SHA-256 になることを確かめた。2026-11-17、1,774,576 バイト。打鍵が止まったときの
-# 型検査（IPC 版 2）を足して作り直した）。
+# 型検査（IPC 版 2）を足して作り直した。2026-11-18、0.3.0 = 型の情報を Rust 以外の言語にも頼む版、1,840,112 バイト、
+# 2 回作って同じ SHA-256）。
 # **zc-remote・zc-wire・zc-core・zc-remote-ipc のソースか依存を変えたら SHA-256 は変わる**ので、
 # 作り直したら sha256sum out/zc-remote でこの行を書き換える（合わないファイルは入らない）。
 llrt        0.10.0-beta  63b260768a110d1641185674aecbfa4516dcf29116f89a845ccdfef848e2733f  llrt-0.10.0-beta-linux-a53-no-sdk   -
 llrt-types  0.10.0-beta  b20627c08926071143085179d8a0e98554e3a4f18824adc888a9459df7df4a0a  llrt-types-0.10.0-beta.tar          -
 tsc         7.0.2        c83d931ac9dd7549cde6e71246aa9d6a9812843023df3e277fe3b5dcf41dd0ea  typescript-linux-arm64-7.0.2.tgz    https://registry.npmjs.org/@typescript/typescript-linux-arm64/-/typescript-linux-arm64-7.0.2.tgz
-zc-remote   0.2.0        c30b7df485b2878186088acf97581c6497cc2702997371246305052e62e55a46  zc-remote                           -
+zc-remote   0.3.0        ecde89e7d4faf87dd87c69a42a58d9ac5bc3b386f2c3d9d0913a486056134304  zc-remote                           -

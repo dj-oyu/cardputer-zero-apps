@@ -41,7 +41,7 @@
 //!   文書の写しを取るだけ。バイト列にするのはこのスレッド。合計が
 //!   [`zc_remote_ipc::MAX_OVERLAY_BYTES`] を超えたら送らず、[`DoneStatus::NotApplicable`] で返す
 //! - LSP（docs/lsp-design.md）: [`RemoteClient::lsp`] の答えは [`RemoteEvent::LspResult`] で必ず
-//!   1 回届く（つなげない・切れた・`zc-remote` が無いときも）。rust-analyzer の状態は
+//!   1 回届く（つなげない・切れた・`zc-remote` が無いときも）。言語サーバーの状態は
 //!   [`RemoteEvent::LspState`]。どちらもすぐ送る（間引かない。打鍵 1 回に 1 つ程度）
 
 use crate::app::AppEvent;
@@ -202,9 +202,9 @@ pub enum RemoteEvent {
     /// ジョブが終わった。
     Done { req: Option<RemoteReq>, tag: JobTag, status: DoneStatus, exit: i32, backend: Backend, elapsed_ms: u32, message: String },
     /// LSP の問い合わせの答え（[`RemoteClient::lsp`] 1 つに必ず 1 回）。`status` が `Ok` でなければ
-    /// `message` に理由（「rust-analyzer が準備中」も `Error`）。
+    /// `message` に理由（「〜が準備中」も `Error`）。
     LspResult { req: RemoteReq, status: DoneStatus, message: String, text: String, items: Vec<LspItem> },
-    /// rust-analyzer の状態（`root` のプロジェクト）。
+    /// 言語サーバーの状態（`root` のプロジェクト）。
     LspState { root: PathBuf, state: LspState, message: String },
 }
 
@@ -275,7 +275,7 @@ impl RemoteClient {
         }
     }
 
-    /// 先につないでおく（Rust のプロジェクトを開いた・最初の保存）。待たない。
+    /// 先につないでおく（ビルド係を使う言語のファイルを開いた・最初の保存）。待たない。
     pub fn warm(&self, file: PathBuf) {
         self.send(Cmd::Warm(file));
     }

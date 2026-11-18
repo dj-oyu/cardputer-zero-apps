@@ -131,6 +131,7 @@ fn project(tag: &str, fake: &FakeLsp) -> (PathBuf, PathBuf, EditorScreen, Loop) 
     fs::write(proj.join("src/main.rs"), MAIN).unwrap();
     fs::write(proj.join("src/util.rs"), UTIL).unwrap();
     fs::write(proj.join("notes.py"), "x = 1\n").unwrap();
+    fs::write(proj.join("notes.md"), "# x\n").unwrap();
     let mut lp = Loop::new();
     let mut ed = EditorScreen::new(EditorConfig { backend: DocBackend::Buffer, root: dir.clone(), files: vec![proj.join("src/main.rs")] });
     ed.set_remote(Box::new(fake.clone()));
@@ -153,14 +154,18 @@ fn place(ed: &mut EditorScreen, lp: &mut Loop, line: u32, col: u32) {
 }
 
 #[test]
-fn opening_a_rust_file_warms_rust_analyzer() {
+fn opening_a_file_warms_its_language_server() {
     let fake = FakeLsp::default();
     let (dir, proj, mut ed, mut lp) = project("warm", &fake);
     assert_eq!(*fake.warmed.lock().unwrap(), [proj.join("src/main.rs")]);
-    // Rust でないファイルは起こさない
+    // Rust 以外でも言語サーバーのある言語（Python）は起こす
     lp.with(|cx| ed.open_path(&proj.join("notes.py"), cx));
     lp.pump(&mut ed);
-    assert_eq!(fake.warmed.lock().unwrap().len(), 1);
+    assert_eq!(*fake.warmed.lock().unwrap(), [proj.join("src/main.rs"), proj.join("notes.py")]);
+    // ビルド係を使わない言語（Markdown）は起こさない
+    lp.with(|cx| ed.open_path(&proj.join("notes.md"), cx));
+    lp.pump(&mut ed);
+    assert_eq!(fake.warmed.lock().unwrap().len(), 2);
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -339,13 +344,18 @@ fn failures_are_told_once_and_loading_every_time() {
     }
     lp.with(|cx| ed.on_event(AppEvent::Remote(RemoteEvent::LspState { root: proj.clone(), state: LspState::Ready, message: String::new() }), cx));
     assert_eq!(ed.message(), Some("型の情報: 準備できた"));
-    // Rust でないファイル
-    lp.with(|cx| ed.open_path(&proj.join("notes.py"), cx));
+    // 言語サーバーの無いファイル（Markdown）は頼まずに知らせる
+    lp.with(|cx| ed.open_path(&proj.join("notes.md"), cx));
     lp.pump(&mut ed);
     let n = fake.count();
     lp.keys(&mut ed, &[ctrl('h')]);
     assert_eq!(fake.count(), n);
-    assert!(ed.message().unwrap().contains("Rust だけ"), "{:?}", ed.message());
+    assert!(ed.message().unwrap().contains("対象ではない"), "{:?}", ed.message());
+    // Python は頼む
+    lp.with(|cx| ed.open_path(&proj.join("notes.py"), cx));
+    lp.pump(&mut ed);
+    lp.keys(&mut ed, &[ctrl('h')]);
+    assert_eq!(fake.count(), n + 1);
     let _ = fs::remove_dir_all(dir);
 }
 

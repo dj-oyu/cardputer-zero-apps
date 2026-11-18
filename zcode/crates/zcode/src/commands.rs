@@ -97,7 +97,7 @@ pub const BINDINGS: &[Binding] = &[
     b("Markdown", "太字", "Alt+B", Command::Bold),
     b("Markdown", "斜体", "Alt+I", Command::Italic),
     b("日本語入力", "かなモードへ", "Ctrl+J", Command::ImeOn),
-    // ビルド係の rust-analyzer（Rust だけ。docs/lsp-design.md）。F8 は手元の診断だけでオフラインでも効く
+    // ビルド係の言語サーバー（`RemoteLang::has_lsp` の言語。docs/lsp-design.md）。F8 は手元の診断だけでオフラインでも効く
     b("型の情報", "型と説明", "Ctrl+H", Command::Hover),
     b("型の情報", "定義へ", "Ctrl+D", Command::GotoDefinition),
     b("型の情報", "使っている所", "Ctrl+R", Command::FindReferences),

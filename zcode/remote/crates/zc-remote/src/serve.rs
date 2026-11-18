@@ -56,11 +56,12 @@
 //!   すぐ「対象ではない」。設定を読み直しても効く）
 //! - 相手の版は [`zc_remote_ipc::MIN_IPC_VERSION`] から受ける（返事の `Hello` は相手の版。
 //!   版 1 の zcode も、重ね無しでそのまま使える）
-//! - **LSP**（版 3。docs/lsp-design.md）: `Lsp` は Rust のプロジェクトだけ（ほかは「対象ではない」）。
+//! - **LSP**（版 3。docs/lsp-design.md）: `Lsp` は言語サーバーのある言語（`RemoteLang::has_lsp`）の
+//!   ファイルだけ（ほかは「対象ではない」）。根はその言語の check と同じ決め方（[`scan::find_project`]）。
 //!   走査して重ねを当てた目録を状態機械に渡し（`Session::lsp`）、答えを `LspResult` で返す。
-//!   場所は根からの相対を絶対パスに直す（外の場所は `label` だけ）。`Warm` が `.rs` のファイルなら、
-//!   同じく `lsp_warm` も頼む（rust-analyzer を先に起こす）。状態（`lsp_state`）は zcode の相手
-//!   みんなへ `LspState` で流す
+//!   場所は根からの相対を絶対パスに直す（外の場所は `label` だけ）。`Warm` がそういうファイルなら、
+//!   同じく `lsp_warm` も頼む（言語サーバーを先に起こす）。状態（`lsp_state`）は zcode の相手
+//!   みんなへ `LspState` で流す。どのサーバーを使うかはビルド係が拡張子で決める
 
 use crate::artifact::{self, ArtifactError, Dirs, LastGood, Meta, Placed, Receiver};
 use crate::auth::{AccessServiceToken, AuthError, Credential, NoCredential, Retry};
@@ -693,13 +694,19 @@ impl Core {
         if overlay.iter().map(|o| o.bytes.len()).sum::<usize>() > ipc::MAX_OVERLAY_BYTES {
             return reply(self, S::Limit, format!("未保存の中身が {}MiB を超えている", ipc::MAX_OVERLAY_BYTES >> 20));
         }
-        // v1 は Rust だけ（rust-analyzer）
-        if !file.extension().is_some_and(|e| e == "rs") {
-            return reply(self, S::NotApplicable, "LSP は Rust のファイルだけ".into());
-        }
-        let project = match scan::find_project(&file, wire::Lang::Rust) {
+        // 言語サーバーのある言語だけ（どのサーバーかはビルド係が拡張子で決める）
+        let Some(lang) = crate::cli::lang_of(&file).filter(|l| l.has_lsp()) else {
+            return reply(self, S::NotApplicable, "型の情報を出せない種類のファイル".into());
+        };
+        let project = match scan::find_project(&file, crate::cli::wire_lang(lang)) {
             Ok(p) => p,
-            Err(ProjectError::NotApplicable) => return reply(self, S::NotApplicable, "Rust のプロジェクトではない".into()),
+            // npm の依存の無い JS / TS（check は実機の tsc）: 型の情報はそのファイルだけで見る
+            Err(ProjectError::NotApplicable) if lang == ipc::RemoteLang::Node => match scan::single_file_project(&file, crate::cli::wire_lang(lang)) {
+                Ok(p) => p,
+                Err(ProjectError::Io(m)) => return reply(self, S::Error, m),
+                Err(ProjectError::NotApplicable) => return reply(self, S::NotApplicable, "プロジェクトの根が決まらない".into()),
+            },
+            Err(ProjectError::NotApplicable) => return reply(self, S::NotApplicable, "プロジェクトの根が決まらない".into()),
             Err(ProjectError::Io(m)) => return reply(self, S::Error, m),
         };
         if let Some(why) = self.cfg_err.clone().or_else(|| self.opts.config.unusable().map(str::to_owned)) {
@@ -1789,8 +1796,8 @@ impl Serve {
                 self.core.want_warm = true;
                 let st = status(self);
                 self.core.clients[ci].send(&st);
-                // Rust のファイルなら、rust-analyzer も先に起こす（返事は LspState で）
-                if file.extension().is_some_and(|e| e == "rs") && file.is_file() {
+                // 言語サーバーのある言語なら、サーバーも先に起こす（返事は LspState で）
+                if crate::cli::lang_of(&file).is_some_and(|l| l.has_lsp()) && file.is_file() {
                     self.core.on_lsp(now, None, LspAsk { req: ipc::ReqId::NONE, kind: None, file, line: 0, col: 0, text: String::new(), overlay: Vec::new() });
                 }
             }

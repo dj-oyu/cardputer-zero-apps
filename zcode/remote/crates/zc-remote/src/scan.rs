@@ -203,6 +203,16 @@ fn find_project_below(file: &Path, lang: Lang, stop: &Path) -> Result<Project, P
     }
 }
 
+/// `file` 1 つだけのプロジェクト（根はそのフォルダ、project id はファイルの絶対パスから）。
+/// npm の依存の無い JS / TS の LSP に使う（check は実機の tsc なので [`find_project`] は対象外と言う）。
+pub fn single_file_project(file: &Path, lang: Lang) -> Result<Project, ProjectError> {
+    let name = file.file_name().and_then(|n| n.to_str()).ok_or_else(|| ProjectError::Io(format!("ファイル名が無い: {}", file.display())))?.to_owned();
+    let parent = file.parent().ok_or_else(|| ProjectError::Io(format!("フォルダが無い: {}", file.display())))?;
+    let dir = fs::canonicalize(parent).map_err(|e| ProjectError::Io(format!("{}: {e}", parent.display())))?;
+    let path = dir.join(&name);
+    Ok(Project { id: zc_wire::tree::project_id(path.as_os_str().as_bytes()), root: dir, lang, entry: Some(name), shape: Shape::SingleFile })
+}
+
 /// [`Shape::Flat`] で送るファイルの拡張子。
 fn flat_exts(lang: Lang) -> &'static [&'static str] {
     match lang {

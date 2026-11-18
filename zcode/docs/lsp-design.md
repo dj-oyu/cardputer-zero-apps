@@ -1,4 +1,8 @@
-# zcode の型の情報（LSP、v1 = Rust・rust-analyzer）
+# zcode の型の情報（LSP。Rust から始め、2026-11-18 に全言語へ広げた）
+
+> **2026-11-18 の追記**: 言語サーバーを言語の表で動かす汎用の作りに替え、ビルド係を使う全部の言語
+> （Rust・Python・JS / TS・Go・Zig・C / C++・Shell・Ruby・MoonBit）で使えるようにした。§9 を先に読む。
+> 下の §1〜§8 は v1（Rust だけ）の記録で、「rust-analyzer」はほかの言語ではその言語のサーバーと読み替える。
 
 2026-11-17。ブランチ `zcode-lsp`。実機では LSP を動かさない（`design.md` §10: jedi でも初回 9〜11 秒・
 60MB。rust-analyzer は std の索引だけで約 700MB）。**rust-analyzer はビルド係（`stage3-design.md` の
@@ -162,3 +166,76 @@ buildScripts・procMacro・cachePriming は既定（有効）のまま。
 - 実機: Ctrl+H / Ctrl+D / Ctrl+R / Ctrl+T・F8（Fn+8）・Shift+F8 が押しやすいか、hover の小窓の読みやすさ
 - 実機の `zc-remote` を版 3 に入れ替えること（入れ替えの順は §4.2）
 - 戻る（定義へ飛ぶ前の場所へ）は v1 に入れていない
+
+## 9. 全言語への横展開（2026-11-18、ユーザーの指示）
+
+ユーザーの指示: Rust だけの型の情報を、言語サーバーのある言語全部に広げる。Rust 専用の作りなら汎用の部品に
+して、後から言語を足しやすくする。**ビルド係のイメージは 1 つのまま**（言語ごとにコンテナを分けない。
+分けると温まっている間の費用が言語の数だけ増え、冷えた起動も言語ごとに待つ）。
+
+### 9.1 言語サーバーの表
+
+| 言語（拡張子） | サーバー | 入れ方（`remote/container/Dockerfile`） | 準備の合図 | 木の外に置くもの・環境 |
+|---|---|---|---|---|
+| Rust（rs） | rust-analyzer | rustup の component | `experimental/serverStatus` の quiescent | 1 ファイルなら仮の crate（`lsp-single/`） |
+| Python（py・pyi） | pyright-langserver | npm `pyright`（`/opt/tools`） | initialize の返事 | 設定 `python.analysis.diagnosticMode=openFilesOnly` |
+| JS / TS（js・mjs・cjs・ts・mts・cts） | TypeScript 7 の `tsc --lsp --stdio` | npm `typescript`（check と同じもの） | 同上 | `tsconfig.json` が無ければ check と同じ既定を `proj/<id>/tsconfig.json`（`include: ["lsp"]`） |
+| Go（go） | gopls | `go install`（sum.golang.org） | 同上 | `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 GOFLAGS=-mod=mod`（ビルドと同じ対象） |
+| Zig（zig・zon） | zls 0.17.0 | 配布物の SHA-256 | 同上 | build on save を切る |
+| C / C++（c・h・cpp ほか） | clangd 23.1.0 | clangd/clangd の配布物の SHA-256、strip | 同上 | 無ければ `proj/<id>/compile_flags.txt`（`--target=aarch64-linux-gnu`。C++ のファイルがあれば `-xc++`） |
+| Shell（sh・bash） | bash-language-server | npm（`/opt/tools`） | 同上 | shellcheck は check に任せる |
+| Ruby（rb） | ruby-lsp（本体を直接起動） | gem を 1 つずつ SHA-256 で確かめて `--local` | 同上 | 空の `proj/<id>/ruby-lsp/Gemfile` を `BUNDLE_GEMFILE` で |
+| MoonBit（mbt） | moon-lsp | MoonBit の配布物（`mooninfo` と core の wasm 版も残す） | 同上 | — |
+
+- 表は `zc-buildd/src/lsp/servers.rs`（`Spec`）。橋渡し（`zc-buildd/src/lsp.rs`）はどの言語でも同じ:
+  JSON-RPC・UTF-16 ⇔ UTF-8 の桁・didOpen / didChange・答えの訳し方・CPU の数え方・同時に 1 つ
+- **言語は問い合わせのパスの拡張子で決める**。zc-wire・IPC・Worker の約束は変えていない（古い zc-remote とも
+  話せる）。パスの無い問い合わせ（名前を探す）は、同じプロジェクトの今のサーバー、無ければ目録の最初の受け持ちの
+  ファイル。同じプロジェクトでも別の言語のファイルに移れば、前のサーバーを止めて替える（同時に 1 つ）
+- 実機側の対象は `zc_remote_ipc::RemoteLang::has_lsp`（`match` を網羅にして、言語を足すとここで決めることになる）。
+  serve は `has_lsp` の言語なら、その言語の check と同じ決め方で根を決めて頼む。npm の依存の無い JS / TS
+  （check は実機の tsc）は、型の情報だけそのファイル 1 つで頼む（`scan::single_file_project`）
+- hover はサーバーに Markdown を先に頼み、受付が地の文にする（囲み・区切り線・見出し・インラインのコード・
+  リンク・太字を外し、同じ段落は 1 度）。tsc は plaintext だとシグネチャと説明を区切らずにつなぐので Markdown にした
+- 同じ場所を 2 度返すサーバー（ruby-lsp）があるので、場所の一覧は（中・外・行・桁・名前）で重複を除く
+- 補完の小窓の札は、言語によらず「ls」（前は Rust だけで「rs」）
+
+### 9.2 新しい言語の足し方
+
+1. `zc-buildd/src/lsp/servers.rs` に `Spec` を 1 つ書いて `SPECS` に入れる（拡張子が重ならないことは単体試験が見る）
+2. ビルド係のイメージにサーバーを入れる（版と SHA-256 を ARG で固定）。大きさを測って `zcode/AGENTS.md` に書く
+3. `zc_remote_ipc::RemoteLang::has_lsp` を `true` にする（言語そのものが新しければ、`RemoteLang`・`cli::lang_of`・
+   `scan::find_project` も）
+4. `zc-buildd/tests/lsp_langs.rs` の `CASES` に「関数を定義して別の所で使う」小さなプロジェクトを足し、イメージの
+   中で回す（hover と定義へは必ず通す）
+
+### 9.3 本物のサーバーで確かめたこと（`tests/lsp_langs.rs`、PC のイメージ、2026-11-18）
+
+10 言語すべてで、使っている所での hover（名前と説明が出る）と定義へ（定義の行へ）が通った。Python は補完も。
+
+| 言語 | 準備まで | 使っている所 | 名前を探す | 気づいたこと |
+|---|---|---|---|---|
+| Python | 0.1 秒 | 3 | 1 | |
+| TS / JS | 0.02 秒 | 3 / 2 | 1 | 型定義（`.d.ts`）の場所は npm の `<パッケージ>/…` で見せる |
+| Go | 0.02 秒 | 2 | 1 | |
+| Zig | 0.002 秒 | 2 | 0 | zls は workspace/symbol に答えない |
+| C / C++ | 0.003 秒 | 1 / 2 | 2 | イメージに x86_64 の C++ の見出しが無いので、clangd は aarch64（クロスの gcc の見出し）で見る |
+| Shell | 0.15 秒 | 2 | 1 | 開いた直後の hover は空のことがある（2 回目で出る）。シバンの行を説明に含める |
+| Ruby | 0.26 秒 | 2 | 1 | 開いた直後の hover は空のことがある。**トップレベルの `def` の呼び出しは追えない**（クラス・モジュールの中は追える）。`tmp` という名前のフォルダの下は索引しない |
+| MoonBit | 0.004 秒 | 0 | 0 | moon-lsp は中で既定のターゲット（wasm）の `moon check` を回すので、`mooninfo` と core の wasm 版が要る。名前を探す・使っている所は開いた直後は 0（索引の後なら出る） |
+
+- 準備までの時間は PC（wslc、制限なし）。Cloudflare の 1 vCPU では未計測
+- イメージの大きさ（展開後）: deploy 済みの版 2.38GB → **2.68GB（+300MB）**。clangd を Debian の apt で入れると
+  libllvm19・libclang-cpp19・z3・grpc などを引き込んで +270MB になったので、clangd/clangd の静的リンクの配布物を
+  strip して入れた（本体 62MB + 見出し 17MB）。ほか gopls 31MB・moon-lsp 23MB・zls 20MB・mooninfo 13MB・
+  core の wasm 版 20MB・ruby-lsp の gem 28MB・bash-language-server と依存 23MB
+- zc-remote は 0.3.0（serve が Rust 以外のファイルも頼む）。**zc-remote を先に入れ替え、`zc-remote stop` してから
+  zcode を入れる**（古い serve は Rust 以外を「対象ではない」で返すだけなので、壊れはしない）
+
+### 9.4 未確認
+
+- **deploy が要る**（イメージ）。deploy しないと、受付が Rust 以外のサーバーを知らず「型の情報を出せない種類のファイル」で返す
+- Cloudflare の 1 vCPU での各サーバーの準備の時間とメモリ（rust-analyzer 以外は測っていない。どれも rust-analyzer より
+  ずっと軽い見込み）、冷えた起動（イメージが +300MB 大きくなった分の取得）
+- 実機での表示（hover の小窓の折り返し、clangd の「Parameters:」のような長い説明）
+- 補完は Python 以外の候補の中身を確かめていない（受付の絞り込みはどの言語でも同じ）

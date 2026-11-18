@@ -1,11 +1,15 @@
-//! rust-analyzer の橋渡し（docs/lsp-design.md）。
+//! 言語サーバーの橋渡し（docs/lsp-design.md）。
 //!
-//! 実機では LSP を動かさない（design.md §10。メモリと CPU が足りない）。rust-analyzer は
+//! 実機では LSP を動かさない（design.md §10。メモリと CPU が足りない）。言語サーバーは
 //! ビルド係で動かし、実機とは zc-wire の `lsp_warm` / `lsp` / `lsp_state` / `lsp_result` で話す。
 //! この層が LSP（JSON-RPC・UTF-16 の位置・didOpen / didChange）との間を訳す。
 //!
+//! **どの言語でも同じ橋渡しを使う。** 言語ごとに違うこと（起動のしかた・拡張子・準備の合図・
+//! 設定・木の外に置くもの）は [`servers`] の表（[`servers::Spec`]）に書く。言語は問い合わせの
+//! パスの拡張子で決める。下の図と決めごとの「rust-analyzer」は、ほかの言語ではその言語のサーバー。
+//!
 //! ```text
-//!   接続のスレッド ── warm / query ──▶ LspHub ──▶ Ra（rust-analyzer 1 つ）
+//!   接続のスレッド ── warm / query ──▶ LspHub ──▶ Ls（言語サーバー 1 つ。例: rust-analyzer）
 //!                                                 ├ stdin  ← 依頼・知らせ（順番は st の錠で守る）
 //!                                                 ├ stdout → 読むスレッド → 返事を訳して Reply へ
 //!                                                 └ stderr → 末尾だけ覚える（落ちたときの理由）
@@ -13,28 +17,35 @@
 //!
 //! 決めたこと:
 //!
-//! - **rust-analyzer は同時に 1 つ**（3GiB のコンテナで、ripgrep 級で約 1.2GB。
-//!   docs/measurements.md §13）。別のプロジェクトが来たら前のを止める。コンテナが動いている間は
+//! - **言語サーバーは同時に 1 つ**（3GiB のコンテナで、rust-analyzer は ripgrep 級で約 1.2GB。
+//!   docs/measurements.md §13）。別のプロジェクト・別の言語が来たら前のを止める。コンテナが動いている間は
 //!   止めない（費用はメモリの割り当てで決まり、動いていても変わらない）
 //! - 木は**ジョブの作業の木とは別**（`proj/<id>/lsp`。[`Store::sync_lsp_tree`]）。走っている
 //!   ビルドの木を書き換えない。build script・proc-macro の出力も別の target
 //!   （`proj/<id>/lsp-target`。zc-buildd の cargo と `target/` のロックを取り合わない）
 //! - 未保存の中身は、実機が目録に重ねて送ってくる（打鍵が止まったときの check と同じ）。
-//!   こちらは目録のとおりに lsp の木へ写し、**rust-analyzer が起動してから変わった `.rs` は
+//!   こちらは目録のとおりに lsp の木へ写し、**サーバーが起動してから変わった受け持ちのファイルは
 //!   didOpen / didChange で中身ごと渡す**（ディスクの見張りの遅れに左右されない）。
 //!   増えた・消えたファイルと `Cargo.toml` は `workspace/didChangeWatchedFiles` で知らせる
-//! - 最初の索引が済む（`experimental/serverStatus` の `quiescent`）までは、問い合わせに
-//!   「準備中」（`unavailable`）と返す（読み込み前の rust-analyzer は空の答えを返すため）
+//! - rust-analyzer は最初の索引が済む（`experimental/serverStatus` の `quiescent`）までは、問い合わせに
+//!   「準備中」（`unavailable`）と返す（読み込み前の rust-analyzer は空の答えを返すため）。ほかの
+//!   サーバーは `initialize` の返事で準備済み（[`servers::Ready`]）
+//! - hover はコードの囲み（```）を外した文字列で返す（実機は Markdown を描かない）
 //! - 位置: 実機とは 0 始まりの行と UTF-8 のバイト位置、rust-analyzer とは UTF-16。どちらへも
 //!   その行の中身を読んで数え直す（診断と同じ決まり。stage3-design.md §4.4）
-//! - プロジェクトの外（std・crates.io の crate）の場所は、実機にファイルが無いので `ext` に
-//!   見せ方（`core/src/option.rs`・`regex-1.11.1/src/lib.rs`）を入れる
-//! - CPU: rust-analyzer とその子（proc-macro-srv・cargo・rustc）の CPU 時間を
+//! - プロジェクトの外（std・crates.io の crate・Go のモジュール・npm など）の場所は、実機に
+//!   ファイルが無いので `ext` に見せ方（`core/src/option.rs`・`regex-1.11.1/src/lib.rs`）を入れる
+//!   （[`servers::external_label`]）
+//! - CPU: 言語サーバーとその子（rust-analyzer なら proc-macro-srv・cargo・rustc）の CPU 時間を
 //!   `/proc/<pid>/stat` で数え、受付の起動からの通算（減らない）を `cpu_ms` に載せる
 //!   （DO が費用の計りに使う。worker/src/budget.ts）
 
-use crate::runner::{find_in_path, tool_env};
+pub mod servers;
+
+use crate::runner::tool_env;
 use crate::store::Store;
+pub use servers::{external_label, ra_config, spec_for, Spec, SPECS};
+use servers::{section_of, Prepared, Ready, Setup};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
@@ -72,52 +83,31 @@ pub struct Query {
     pub text: String,
 }
 
-/// rust-analyzer の設定（`initializationOptions` と `workspace/configuration` の返事）。
-/// 理由は docs/measurements.md §13。
-pub fn ra_config(target_dir: &Path, linked: Option<&Path>) -> Value {
-    let mut v = json!({
-        // zc-buildd の check があるので 2 重にしない
-        "checkOnSave": false,
-        // build script・proc-macro の出力は別の target（ロックを取り合わない）
-        "cargo": { "targetDir": target_dir },
-        // 変わったファイルはこちらから知らせる（inotify を使わない）
-        "files": { "watcher": "client" },
-        // 診断は zc-buildd の check（cargo）が出す
-        "diagnostics": { "enable": false },
-        // 実機の小窓は 1 行の文字列を入れるだけ（スニペット・別の行の編集は使わない）
-        "completion": { "autoimport": { "enable": false }, "callable": { "snippets": "none" }, "postfix": { "enable": false }, "limit": 100 },
-    });
-    if let Some(p) = linked {
-        v["linkedProjects"] = json!([p]);
-    }
-    v
-}
-
 // ───────────────────────── CPU の数え方 ─────────────────────────
 
-/// rust-analyzer たちの CPU 時間の通算（ms）。受付に 1 つ。
+/// 言語サーバーたちの CPU 時間の通算（ms）。受付に 1 つ。
 #[derive(Default)]
 struct Cpu {
-    /// 止めた・落ちた rust-analyzer の分。
+    /// 止めた・落ちたサーバーの分。
     dead_ms: AtomicU64,
-    /// 今の rust-analyzer の分（最後に見た値）。
+    /// 今のサーバーの分（最後に見た値）。
     live_ms: AtomicU64,
     /// 返したことのある最大（減らさない）。
     max_ms: AtomicU64,
 }
 
 impl Cpu {
-    /// 今の rust-analyzer（プロセスグループ `pgid`）を数え直して、通算を返す。
+    /// 今のサーバー（プロセスグループ `pgid`）を数え直して、通算を返す。
     fn total(&self, pgid: Option<u32>) -> u64 {
         if let Some(p) = pgid {
-            // 止めた直後に読むと 0 になる。減らさない（新しい rust-analyzer の分は retire で 0 から）
+            // 止めた直後に読むと 0 になる。減らさない（新しいサーバーの分は retire で 0 から）
             self.live_ms.fetch_max(group_cpu_ms(p), Ordering::SeqCst);
         }
         let t = self.dead_ms.load(Ordering::SeqCst) + self.live_ms.load(Ordering::SeqCst);
         self.max_ms.fetch_max(t, Ordering::SeqCst).max(t)
     }
 
-    /// 今の rust-analyzer が終わった（最後に見た値を通算へ移す）。
+    /// 今のサーバーが終わった（最後に見た値を通算へ移す）。
     fn retire(&self, pgid: u32) {
         let last = group_cpu_ms(pgid).max(self.live_ms.load(Ordering::SeqCst));
         self.dead_ms.fetch_add(last, Ordering::SeqCst);
@@ -224,32 +214,6 @@ pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsString::from_vec(out)))
 }
 
-/// プロジェクトの外の場所の見せ方: crates.io の crate は `<名前>-<版>/…`、std は
-/// `core/src/…`、ほかは末尾の 3 つ。
-pub fn external_label(p: &Path) -> String {
-    let s = p.to_string_lossy();
-    if let Some(i) = s.find("/registry/src/") {
-        // registry/src/<index>-<hash>/<crate>-<版>/…
-        let after = &s[i + "/registry/src/".len()..];
-        if let Some(j) = after.find('/') {
-            return after[j + 1..].to_string();
-        }
-    }
-    if let Some(i) = s.find("/lib/rustlib/src/rust/library/") {
-        return s[i + "/lib/rustlib/src/rust/library/".len()..].to_string();
-    }
-    if let Some(i) = s.find("/git/checkouts/") {
-        // git/checkouts/<名前>-<hash>/<rev>/…
-        let parts: Vec<&str> = s[i + "/git/checkouts/".len()..].splitn(3, '/').collect();
-        if parts.len() == 3 {
-            return format!("{}/{}", parts[0], parts[2]);
-        }
-    }
-    let parts: Vec<&str> = s.rsplitn(4, '/').collect();
-    let n = parts.len().min(3);
-    parts[..n].iter().rev().copied().collect::<Vec<_>>().join("/")
-}
-
 /// 文字の境目で切る。
 fn cut(mut s: String, max: usize) -> String {
     if s.len() > max {
@@ -262,7 +226,7 @@ fn cut(mut s: String, max: usize) -> String {
     s
 }
 
-// ───────────────────────── rust-analyzer 1 つ ─────────────────────────
+// ───────────────────────── 言語サーバー 1 つ ─────────────────────────
 
 /// 返事を待っている依頼。
 struct Pending {
@@ -275,7 +239,7 @@ struct Pending {
     col: u32,
 }
 
-struct RaState {
+struct LsState {
     next_id: i64,
     pending: HashMap<i64, Pending>,
     phase: LspPhase,
@@ -294,15 +258,17 @@ struct RaState {
     alive: bool,
 }
 
-struct Ra {
+struct Ls {
     project: String,
+    spec: &'static Spec,
     /// lsp の木（`proj/<id>/lsp`）。
     root: PathBuf,
-    config: Value,
+    /// `workspace/configuration` で聞かれたら返す設定。
+    settings: Value,
     pgid: u32,
     child: Mutex<Option<Child>>,
     stdin: Mutex<ChildStdin>,
-    st: Mutex<RaState>,
+    st: Mutex<LsState>,
     stderr_tail: Mutex<String>,
     cpu: Arc<Cpu>,
 }
@@ -314,9 +280,9 @@ fn frame(v: &Value) -> Vec<u8> {
     out
 }
 
-impl Ra {
+impl Ls {
     /// 書く（initialize の返事の前なら、ためる）。`st` の錠を持ったまま呼ぶ（順番を守る）。
-    fn send(&self, st: &mut RaState, v: Value) {
+    fn send(&self, st: &mut LsState, v: Value) {
         let bytes = frame(&v);
         if !st.initialized {
             st.outbox.push(bytes);
@@ -328,7 +294,7 @@ impl Ra {
         }
     }
 
-    fn notify(&self, st: &mut RaState, method: &str, params: Value) {
+    fn notify(&self, st: &mut LsState, method: &str, params: Value) {
         self.send(st, json!({ "jsonrpc": "2.0", "method": method, "params": params }));
     }
 
@@ -341,46 +307,47 @@ impl Ra {
     }
 
     /// 今の状態を `lsp_state` にする。
-    fn state_msg(&self, st: &RaState) -> ServerMsg {
+    fn state_msg(&self, st: &LsState) -> ServerMsg {
         ServerMsg::LspState { cpu_ms: self.cpu.total(Some(self.pgid)), project: self.project.clone(), state: st.phase, message: st.message.clone(), error: None }
     }
 
-    fn broadcast(&self, st: &mut RaState) {
+    fn broadcast(&self, st: &mut LsState) {
         let m = self.state_msg(st);
         st.subs.retain(|(_, s)| s.send(m.clone()).is_ok());
     }
 
     /// 文書を開いておく（開いていなければ中身ごと didOpen）。
-    fn ensure_open(&self, st: &mut RaState, rel: &str) {
-        if rel.is_empty() || !rel.ends_with(".rs") || st.open.contains_key(rel) || !st.files.contains_key(rel) {
+    fn ensure_open(&self, st: &mut LsState, rel: &str) {
+        if rel.is_empty() || !self.spec.handles(rel) || st.open.contains_key(rel) || !st.files.contains_key(rel) {
             return;
         }
         let text = self.read_rel(rel);
         st.open.insert(rel.to_string(), 1);
         let uri = self.uri(rel);
-        self.notify(st, "textDocument/didOpen", json!({ "textDocument": { "uri": uri, "languageId": "rust", "version": 1, "text": text } }));
+        let language_id = servers::language_id(rel);
+        self.notify(st, "textDocument/didOpen", json!({ "textDocument": { "uri": uri, "languageId": language_id, "version": 1, "text": text } }));
     }
 
-    /// 目録に合わせて lsp の木を写し、変わったところを rust-analyzer に知らせる。
+    /// 目録に合わせて lsp の木を写し、変わったところをサーバーに知らせる。
     fn sync(&self, store: &Store, manifest: &Manifest) -> Result<(), String> {
         let mut st = self.st.lock().unwrap();
-        store.sync_lsp_tree(&self.project, manifest).map_err(|e| format!("rust-analyzer 用の木を作れない: {e}"))?;
+        store.sync_lsp_tree(&self.project, manifest).map_err(|e| format!("{} 用の木を作れない: {e}", self.spec.name))?;
         let new: HashMap<String, String> = manifest.files().iter().map(|f| (f.path.clone(), f.sha256.clone())).collect();
         let mut watched = Vec::new();
-        let mut changed_rs = Vec::new();
+        let mut changed_src = Vec::new();
         for (p, h) in &new {
             match st.files.get(p) {
                 Some(old) if old == h => {}
                 Some(_) => {
                     watched.push(json!({ "uri": self.uri(p), "type": 2 }));
-                    if p.ends_with(".rs") {
-                        changed_rs.push(p.clone());
+                    if self.spec.handles(p) {
+                        changed_src.push(p.clone());
                     }
                 }
                 None => {
                     watched.push(json!({ "uri": self.uri(p), "type": 1 }));
-                    if p.ends_with(".rs") {
-                        changed_rs.push(p.clone());
+                    if self.spec.handles(p) {
+                        changed_src.push(p.clone());
                     }
                 }
             }
@@ -399,8 +366,8 @@ impl Ra {
         if !watched.is_empty() {
             self.notify(&mut st, "workspace/didChangeWatchedFiles", json!({ "changes": watched }));
         }
-        changed_rs.sort();
-        for p in changed_rs {
+        changed_src.sort();
+        for p in changed_src {
             match st.open.get(&p).copied() {
                 Some(v) => {
                     let text = self.read_rel(&p);
@@ -421,10 +388,10 @@ impl Ra {
             let _ = reply.send(ServerMsg::LspResult { cpu_ms: self.cpu.total(Some(self.pgid)), id: q.id, error: Some(code), message: message.into(), text: String::new(), items: vec![], retry_after_s: None });
         };
         if !st.alive {
-            return fail(ErrorCode::Unavailable, "rust-analyzer が動いていない");
+            return fail(ErrorCode::Unavailable, &format!("{} が動いていない", self.spec.name));
         }
         if !st.ready {
-            return fail(ErrorCode::Unavailable, "rust-analyzer が準備中（プロジェクトを読んでいる）");
+            return fail(ErrorCode::Unavailable, &format!("{} が準備中（プロジェクトを読んでいる）", self.spec.name));
         }
         let (method, params) = if q.query == LspQuery::Symbols {
             ("workspace/symbol", json!({ "query": q.text }))
@@ -454,24 +421,27 @@ impl Ra {
         self.send(&mut st, json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
     }
 
-    /// rust-analyzer から 1 メッセージ届いた（読むスレッド）。
+    /// サーバーから 1 メッセージ届いた（読むスレッド）。
     fn on_message(&self, v: Value) {
         let method = v.get("method").and_then(Value::as_str);
         let id = v.get("id").cloned();
         match (method, id) {
             (None, Some(id)) => self.on_response(id.as_i64().unwrap_or(-1), &v),
             (Some(m), Some(id)) => {
-                // サーバからの依頼: 設定だけ答え、ほかは null（登録・進み具合の作成など）
+                // サーバからの依頼: 設定だけ答え（項目ごとに `section` でたどる）、ほかは null
+                // （登録・進み具合の作成など）
                 let result = if m == "workspace/configuration" {
-                    let n = v["params"]["items"].as_array().map_or(1, Vec::len);
-                    Value::Array(vec![self.config.clone(); n])
+                    let items = v["params"]["items"].as_array().cloned().unwrap_or_else(|| vec![json!({})]);
+                    Value::Array(items.iter().map(|it| section_of(&self.settings, it["section"].as_str())).collect())
+                } else if m == "workspace/workspaceFolders" {
+                    json!([{ "uri": path_to_uri(&self.root), "name": "zc" }])
                 } else {
                     Value::Null
                 };
                 let mut st = self.st.lock().unwrap();
                 self.send(&mut st, json!({ "jsonrpc": "2.0", "id": id, "result": result }));
             }
-            (Some("experimental/serverStatus"), None) => {
+            (Some("experimental/serverStatus"), None) if self.spec.ready == Ready::ServerStatus => {
                 let p = &v["params"];
                 let quiescent = p["quiescent"].as_bool().unwrap_or(false);
                 let health = p["health"].as_str().unwrap_or("ok");
@@ -501,6 +471,18 @@ impl Ra {
         let mut st = self.st.lock().unwrap();
         if id == INIT_ID {
             st.initialized = true;
+            if let Some(e) = v.get("error") {
+                // 起動はしたが initialize を断った（設定の誤りなど）
+                st.alive = false;
+                st.phase = LspPhase::Failed;
+                st.message = cut(format!("{} が initialize を断った: {}", self.spec.name, e["message"].as_str().unwrap_or("?")), 400);
+                self.broadcast(&mut st);
+                return;
+            }
+            if self.spec.ready == Ready::Initialized {
+                st.ready = true;
+                st.phase = LspPhase::Ready;
+            }
             let init = frame(&json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
             let queued = std::mem::take(&mut st.outbox);
             let mut w = self.stdin.lock().unwrap();
@@ -510,6 +492,10 @@ impl Ra {
             }
             if !(ok && w.flush().is_ok()) {
                 st.alive = false;
+            }
+            drop(w);
+            if st.ready {
+                self.broadcast(&mut st);
             }
             return;
         }
@@ -521,9 +507,9 @@ impl Ra {
             Some(e) => {
                 let code = e["code"].as_i64().unwrap_or(0);
                 let (code, message) = if code == -32801 || code == -32800 {
-                    (ErrorCode::Unavailable, "rust-analyzer が変わったところを読み直している。もう一度".to_string())
+                    (ErrorCode::Unavailable, format!("{} が変わったところを読み直している。もう一度", self.spec.name))
                 } else {
-                    (ErrorCode::Internal, cut(format!("rust-analyzer の失敗: {}", e["message"].as_str().unwrap_or("?")), 400))
+                    (ErrorCode::Internal, cut(format!("{} の失敗: {}", self.spec.name, e["message"].as_str().unwrap_or("?")), 400))
                 };
                 ServerMsg::LspResult { cpu_ms, id: p.wire_id, error: Some(code), message, text: String::new(), items: vec![], retry_after_s: None }
             }
@@ -536,7 +522,7 @@ impl Ra {
         let _ = p.reply.send(msg);
     }
 
-    /// rust-analyzer が終わった（読むスレッドが EOF を見た）。
+    /// サーバーが終わった（読むスレッドが EOF を見た）。
     fn on_exit(&self) {
         let code = self.child.lock().unwrap().as_mut().and_then(|c| c.wait().ok()).and_then(|s| s.code());
         let tail = self.stderr_tail.lock().unwrap().clone();
@@ -548,11 +534,11 @@ impl Ra {
         st.alive = false;
         st.phase = LspPhase::Failed;
         let last = tail.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").to_string();
-        st.message = cut(format!("rust-analyzer が終わった（終了コード {}）{}", code.map_or("?".into(), |c| c.to_string()), if last.is_empty() { String::new() } else { format!(": {last}") }), 400);
+        st.message = cut(format!("{} が終わった（終了コード {}）{}", self.spec.name, code.map_or("?".into(), |c| c.to_string()), if last.is_empty() { String::new() } else { format!(": {last}") }), 400);
         eprintln!("zc-buildd: {}", st.message);
         let cpu_ms = self.cpu.total(None);
         for (_, p) in st.pending.drain() {
-            let _ = p.reply.send(ServerMsg::LspResult { cpu_ms, id: p.wire_id, error: Some(ErrorCode::Unavailable), message: "rust-analyzer が終わった".into(), text: String::new(), items: vec![], retry_after_s: None });
+            let _ = p.reply.send(ServerMsg::LspResult { cpu_ms, id: p.wire_id, error: Some(ErrorCode::Unavailable), message: format!("{} が終わった", self.spec.name), text: String::new(), items: vec![], retry_after_s: None });
         }
         self.broadcast(&mut st);
     }
@@ -566,10 +552,10 @@ impl Ra {
             }
             st.alive = false;
             st.phase = LspPhase::Failed;
-            st.message = "止めた（ほかのプロジェクトに替えた）".into();
+            st.message = "止めた（ほかのプロジェクト・言語に替えた）".into();
             let cpu_ms = self.cpu.total(Some(self.pgid));
             for (_, p) in st.pending.drain() {
-                let _ = p.reply.send(ServerMsg::LspResult { cpu_ms, id: p.wire_id, error: Some(ErrorCode::Unavailable), message: "rust-analyzer を止めた".into(), text: String::new(), items: vec![], retry_after_s: None });
+                let _ = p.reply.send(ServerMsg::LspResult { cpu_ms, id: p.wire_id, error: Some(ErrorCode::Unavailable), message: format!("{} を止めた", self.spec.name), text: String::new(), items: vec![], retry_after_s: None });
             }
         }
         self.cpu.retire(self.pgid);
@@ -610,6 +596,13 @@ impl Texts {
     }
 }
 
+/// 同じ場所を 2 度返すサーバーがある（ruby-lsp は `root//a.rb` と `root/a.rb` の両方で索引する）。
+/// 場所（中・外と行・桁）と名前が同じものは最初の 1 つだけ残す。
+fn dedup(items: Vec<LspItem>) -> Vec<LspItem> {
+    let mut seen = HashSet::new();
+    items.into_iter().filter(|i| seen.insert((i.path.clone(), i.ext.clone(), i.line, i.col, i.name.clone()))).collect()
+}
+
 fn convert(root: &Path, files: &HashSet<String>, p: &Pending, result: &Value) -> (String, Vec<LspItem>) {
     let mut texts = Texts(HashMap::new());
     let mut loc = |uri: &str, range: &Value| texts.loc(root, files, uri, range);
@@ -622,7 +615,7 @@ fn convert(root: &Path, files: &HashSet<String>, p: &Pending, result: &Value) ->
                 Value::Array(a) => a.iter().map(|x| x.as_str().map(str::to_owned).unwrap_or_else(|| x["value"].as_str().unwrap_or("").to_string())).collect::<Vec<_>>().join("\n"),
                 _ => String::new(),
             };
-            (cut(text.trim().to_string(), MAX_LSP_TEXT), vec![])
+            (cut(plain_hover(&text), MAX_LSP_TEXT), vec![])
         }
         LspQuery::Definition | LspQuery::References => {
             let arr = match result {
@@ -639,7 +632,7 @@ fn convert(root: &Path, files: &HashSet<String>, p: &Pending, result: &Value) ->
                 };
                 items.extend(it);
             }
-            (String::new(), items)
+            (String::new(), dedup(items))
         }
         LspQuery::Symbols => {
             let mut items = Vec::new();
@@ -653,7 +646,7 @@ fn convert(root: &Path, files: &HashSet<String>, p: &Pending, result: &Value) ->
                     items.push(it);
                 }
             }
-            (String::new(), items)
+            (String::new(), dedup(items))
         }
         LspQuery::Completion => {
             let list = match result {
@@ -701,6 +694,104 @@ fn convert(root: &Path, files: &HashSet<String>, p: &Pending, result: &Value) ->
     }
 }
 
+/// hover の文字列を実機に出す形に（実機は Markdown を描かない。plaintext を頼んでも Markdown で返す
+/// サーバーがある: pyright・gopls・zls・moon-lsp・ruby-lsp・tsc など）:
+///
+/// - コードの囲み（```。行の途中にあるものも。tsc は閉じの直後に説明を続ける）を改行にする
+/// - 区切り線（`---`）の行を外す
+/// - リンク `[文字](URL)` は文字だけ、太字の `**` を外す（ruby-lsp は定義の場所を `file://` のリンクで書く）
+/// - 囲みの外の見出しの `### ` とインラインのコードの「`」を外す（clangd は `### function \`twice\``）
+/// - 同じ段落（空行で区切ったまとまり）は 1 度だけ（ruby-lsp は同じ説明を 2 度書くことがある）
+/// - 続く空行は 1 つにし、前後の空白を落とす
+///
+/// サーバーには Markdown を先に頼む（tsc は plaintext だとシグネチャと説明を区切らずにつなぐ）。
+fn plain_hover(text: &str) -> String {
+    // 囲みの外（偶数番目の区間）だけ、見出しとインラインのコードの印を外す
+    let text: String = text
+        .split("```")
+        .enumerate()
+        .map(|(i, part)| if i % 2 == 0 { prose_marks_off(part) } else { part.to_string() })
+        .collect::<Vec<_>>()
+        .join("```");
+    let text = text.as_str();
+    let mut s = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("```") {
+        s.push_str(&rest[..i]);
+        s.push('\n');
+        // 開きの後ろの言語名（```typescript）も外す。行の残りが言語名だけのときに限る
+        // （tsc の閉じ ```2 倍… の「2」は説明の一部）
+        let after = &rest[i + 3..];
+        let eol = after.find('\n').unwrap_or(after.len());
+        let is_lang = after[..eol].chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '+' || c == '#');
+        rest = if is_lang { &after[eol..] } else { after };
+    }
+    s.push_str(rest);
+    let s = strip_links(&s).replace("**", "");
+
+    let mut paras: Vec<String> = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    let flush = |cur: &mut Vec<&str>, paras: &mut Vec<String>| {
+        if !cur.is_empty() {
+            let p = cur.join("\n");
+            if !paras.contains(&p) {
+                paras.push(p);
+            }
+            cur.clear();
+        }
+    };
+    for l in s.lines() {
+        let t = l.trim();
+        if t.len() >= 3 && t.chars().all(|c| c == '-') {
+            flush(&mut cur, &mut paras);
+            continue;
+        }
+        if t.is_empty() {
+            flush(&mut cur, &mut paras);
+        } else {
+            cur.push(l.trim_end());
+        }
+    }
+    flush(&mut cur, &mut paras);
+    paras.join("\n\n").trim().to_string()
+}
+
+/// 地の文の Markdown の印を外す: 行頭の見出し（`# `〜`###### `）とインラインのコードの「`」。
+fn prose_marks_off(part: &str) -> String {
+    let lines: Vec<String> = part
+        .split('\n')
+        .map(|l| {
+            let hashes = l.chars().take_while(|&c| c == '#').count();
+            let l = if (1..=6).contains(&hashes) && l[hashes..].starts_with(' ') { l[hashes..].trim_start() } else { l };
+            l.replace('`', "")
+        })
+        .collect();
+    lines.join("\n")
+}
+
+/// `[文字](URL)` を `文字` にする（入れ子は見ない）。
+fn strip_links(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('[') {
+        let after = &rest[i + 1..];
+        match after.find("](").and_then(|j| after[j + 2..].find(')').map(|k| (j, j + 2 + k))) {
+            // URL らしいもの（`:`・`/`・`#` を含む）だけ。`a[0](x)` のようなコードはそのまま
+            Some((j, end)) if !after[..j].contains(['[', '\n']) && !after[j + 2..end].contains([' ', '\n']) && after[j + 2..end].contains([':', '/', '#']) => {
+                out.push_str(&rest[..i]);
+                out.push_str(&after[..j]);
+                rest = &after[end + 1..];
+            }
+            _ => {
+                out.push_str(&rest[..=i]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// LSP のメッセージを 1 つ読む（`Content-Length` の頭 + 本体）。EOF・壊れていれば `None`。
 fn read_message(r: &mut impl BufRead) -> Option<Value> {
     let mut len: Option<usize> = None;
@@ -731,10 +822,10 @@ fn read_message(r: &mut impl BufRead) -> Option<Value> {
 
 // ───────────────────────── 受付に 1 つ ─────────────────────────
 
-/// rust-analyzer の持ち主（受付に 1 つ）。
+/// 言語サーバーの持ち主（受付に 1 つ。同時に動かすのは 1 つ）。
 #[derive(Default)]
 pub struct LspHub {
-    current: Mutex<Option<Arc<Ra>>>,
+    current: Mutex<Option<Arc<Ls>>>,
     cpu: Arc<Cpu>,
 }
 
@@ -743,13 +834,13 @@ impl LspHub {
         LspHub::default()
     }
 
-    /// rust-analyzer たちが使った CPU の通算（ms。減らない）。
+    /// 言語サーバーたちが使った CPU の通算（ms。減らない）。
     pub fn cpu_ms(&self) -> u64 {
         let pgid = self.current.lock().unwrap().as_ref().filter(|r| r.st.lock().unwrap().alive).map(|r| r.pgid);
         self.cpu.total(pgid)
     }
 
-    /// 今の rust-analyzer の状態（`/v1/status` 用）。
+    /// 今のサーバーの状態（`/v1/status` 用）。
     pub fn state(&self) -> Option<(String, LspPhase)> {
         self.current.lock().unwrap().as_ref().map(|r| (r.project.clone(), r.st.lock().unwrap().phase))
     }
@@ -757,7 +848,7 @@ impl LspHub {
     /// 先に起こしておく。今の状態をすぐ `reply` へ送り、状態が変わったときにも送る。
     /// `conn` は接続の番号（同じ接続を 2 回数えない）。
     pub fn warm(&self, store: &Store, project: &str, manifest: &Manifest, path: &str, conn: u64, reply: &Reply) {
-        match self.ensure(store, project, manifest) {
+        match self.ensure(store, project, manifest, path) {
             Ok(ra) => {
                 let mut st = ra.st.lock().unwrap();
                 ra.ensure_open(&mut st, path);
@@ -774,7 +865,7 @@ impl LspHub {
 
     /// 問い合わせる（答えは必ず 1 つ `reply` へ届く）。
     pub fn query(&self, store: &Store, project: &str, manifest: &Manifest, q: Query, reply: &Reply) {
-        match self.ensure(store, project, manifest) {
+        match self.ensure(store, project, manifest, &q.path) {
             Ok(ra) => ra.query(q, reply),
             Err(message) => {
                 let _ = reply.send(ServerMsg::LspResult { cpu_ms: self.cpu_ms(), id: q.id, error: Some(ErrorCode::Unavailable), message, text: String::new(), items: vec![], retry_after_s: None });
@@ -789,11 +880,21 @@ impl LspHub {
         }
     }
 
-    /// そのプロジェクトの rust-analyzer を用意し、目録に合わせる。
-    fn ensure(&self, store: &Store, project: &str, manifest: &Manifest) -> Result<Arc<Ra>, String> {
+    /// そのプロジェクト・その言語のサーバーを用意し、目録に合わせる。言語は `path` の拡張子で
+    /// 決める（パスの無い問い合わせ = 名前を探すは、同じプロジェクトの今のサーバー、無ければ目録の
+    /// 最初の受け持ちのファイル）。
+    fn ensure(&self, store: &Store, project: &str, manifest: &Manifest, path: &str) -> Result<Arc<Ls>, String> {
         let mut cur = self.current.lock().unwrap();
+        let spec = match spec_for(path) {
+            Some(s) => s,
+            None if path.is_empty() => match cur.as_ref().filter(|r| r.project == project) {
+                Some(r) => r.spec,
+                None => servers::spec_for_manifest(manifest).ok_or("型の情報を出せる言語のファイルが無い")?,
+            },
+            None => return Err(format!("型の情報を出せない種類のファイル（{path}）")),
+        };
         if let Some(ra) = cur.as_ref() {
-            if ra.project == project && ra.st.lock().unwrap().alive {
+            if ra.project == project && std::ptr::eq(ra.spec, spec) && ra.st.lock().unwrap().alive {
                 let ra = ra.clone();
                 drop(cur);
                 ra.sync(store, manifest)?;
@@ -803,45 +904,29 @@ impl LspHub {
         if let Some(old) = cur.take() {
             old.stop();
         }
-        let ra = self.spawn(store, project, manifest)?;
+        let ra = self.spawn(store, project, manifest, spec)?;
         *cur = Some(ra.clone());
         Ok(ra)
     }
 
-    fn spawn(&self, store: &Store, project: &str, manifest: &Manifest) -> Result<Arc<Ra>, String> {
-        let program = find_in_path("rust-analyzer").ok_or("rust-analyzer が無い（ビルド係のイメージに入っていない）")?;
-        store.sync_lsp_tree(project, manifest).map_err(|e| format!("rust-analyzer 用の木を作れない: {e}"))?;
-        let root = store.lsp_dir(project).canonicalize().map_err(|e| format!("rust-analyzer 用の木が無い: {e}"))?;
+    fn spawn(&self, store: &Store, project: &str, manifest: &Manifest, spec: &'static Spec) -> Result<Arc<Ls>, String> {
+        let name = spec.name;
+        let program = servers::find(spec).ok_or_else(|| format!("{name} が無い（ビルド係のイメージに入っていない。イメージが古い）"))?;
+        store.sync_lsp_tree(project, manifest).map_err(|e| format!("{name} 用の木を作れない: {e}"))?;
+        let root = store.lsp_dir(project).canonicalize().map_err(|e| format!("{name} 用の木が無い: {e}"))?;
         let pdir = root.parent().unwrap_or(&root).to_path_buf();
-        let target = pdir.join("lsp-target");
-        let _ = std::fs::create_dir_all(&target);
-        // Cargo.toml の無い「1 ファイルだけ」: zc-buildd のジョブと同じ仮の crate を、木の外に作る
-        let linked = if manifest.files().iter().any(|f| f.path == "Cargo.toml") {
-            None
-        } else {
-            let entry = manifest.files().iter().find(|f| f.path.ends_with(".rs")).ok_or("Rust のファイルが無い")?;
-            let dir = pdir.join("lsp-single");
-            std::fs::create_dir_all(&dir).map_err(|e| format!("仮の crate を作れない: {e}"))?;
-            let toml = format!(
-                "# zc-buildd が rust-analyzer のために作った仮の crate\n[package]\nname = \"zc-single\"\nversion = \"0.0.0\"\nedition = \"2021\"\npublish = false\n\n[[bin]]\nname = \"main\"\npath = {}\n\n[workspace]\n",
-                serde_json::to_string(&root.join(&entry.path).to_string_lossy()).expect("JSON にできる")
-            );
-            let m = dir.join("Cargo.toml");
-            std::fs::write(&m, toml).map_err(|e| format!("仮の crate を作れない: {e}"))?;
-            Some(m)
-        };
-        let config = ra_config(&target, linked.as_deref());
+        let Prepared { init_options, settings, env } = (spec.prepare)(&Setup { root: &root, pdir: &pdir, manifest })?;
 
         let mut cmd = Command::new(program);
-        cmd.current_dir(&root).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
+        cmd.args(spec.args).envs(env).current_dir(&root).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
         tool_env(&mut cmd);
-        let mut child = cmd.spawn().map_err(|e| format!("rust-analyzer を起動できない: {e}"))?;
+        let mut child = cmd.spawn().map_err(|e| format!("{name} を起動できない: {e}"))?;
         let stdin = child.stdin.take().expect("piped");
         let stdout = child.stdout.take().expect("piped");
         let stderr = child.stderr.take().expect("piped");
         let pgid = child.id();
         let files = manifest.files().iter().map(|f| (f.path.clone(), f.sha256.clone())).collect();
-        let st = RaState {
+        let st = LsState {
             next_id: 1,
             pending: HashMap::new(),
             phase: LspPhase::Loading,
@@ -854,8 +939,8 @@ impl LspHub {
             open: HashMap::new(),
             alive: true,
         };
-        let ra = Arc::new(Ra { project: project.to_string(), root: root.clone(), config: config.clone(), pgid, child: Mutex::new(Some(child)), stdin: Mutex::new(stdin), st: Mutex::new(st), stderr_tail: Mutex::new(String::new()), cpu: self.cpu.clone() });
-        eprintln!("zc-buildd: rust-analyzer を起動した（プロジェクト {}）", &project[..project.len().min(8)]);
+        let ra = Arc::new(Ls { project: project.to_string(), spec, root: root.clone(), settings, pgid, child: Mutex::new(Some(child)), stdin: Mutex::new(stdin), st: Mutex::new(st), stderr_tail: Mutex::new(String::new()), cpu: self.cpu.clone() });
+        eprintln!("zc-buildd: {name} を起動した（プロジェクト {}）", &project[..project.len().min(8)]);
 
         // initialize はすぐ書く（ほかは返事が来るまで outbox にためる）
         let init = json!({
@@ -869,20 +954,23 @@ impl LspHub {
                 "capabilities": {
                     "general": { "positionEncodings": ["utf-16"] },
                     "window": { "workDoneProgress": false },
-                    "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true }, "symbol": {} },
+                    "workspace": { "configuration": true, "workspaceFolders": true, "didChangeWatchedFiles": { "dynamicRegistration": true }, "symbol": {} },
                     "textDocument": {
-                        "hover": { "contentFormat": ["plaintext"] },
+                        // Markdown を先に（tsc は plaintext だとシグネチャと説明を区切らずにつなぐ）。
+                        // 囲み・リンクは plain_hover で外す
+                        "hover": { "contentFormat": ["markdown", "plaintext"] },
+                        "synchronization": { "didSave": false },
                         "definition": { "linkSupport": false },
                         "completion": { "completionItem": { "snippetSupport": false } },
                     },
                     "experimental": { "serverStatusNotification": true },
                 },
-                "initializationOptions": config,
+                "initializationOptions": init_options,
             }
         });
         {
             let mut w = ra.stdin.lock().unwrap();
-            w.write_all(&frame(&init)).and_then(|()| w.flush()).map_err(|e| format!("rust-analyzer に書けない: {e}"))?;
+            w.write_all(&frame(&init)).and_then(|()| w.flush()).map_err(|e| format!("{name} に書けない: {e}"))?;
         }
         let r2 = ra.clone();
         std::thread::Builder::new()
@@ -985,6 +1073,29 @@ mod tests {
         assert_eq!(external_label(Path::new("/h/.cargo/git/checkouts/foo-0123/abcdef/src/lib.rs")), "foo-0123/src/lib.rs");
         assert_eq!(external_label(Path::new("/a/b/c/d/e.rs")), "c/d/e.rs");
         assert_eq!(external_label(Path::new("/e.rs")), "/e.rs");
+    }
+
+    /// hover の整形（実物の形: tsc・ruby-lsp・moon-lsp・pyright）。
+    #[test]
+    fn hover_text_is_made_plain() {
+        // tsc: 閉じの直後に説明
+        assert_eq!(plain_hover("```typescript\n(alias) function twice(x: number): number\n```2 倍にする。"), "(alias) function twice(x: number): number\n\n2 倍にする。");
+        // ruby-lsp: リンクと太字、同じ段落が 2 度
+        assert_eq!(
+            plain_hover("```ruby\ntwice(x)\n```\n\n**Definitions**: [calc.rb](file:///p/lsp//calc.rb#L3,3-3,28) | [calc.rb](file:///p/lsp/calc.rb#L3,3-3,28)\n\n\n\n2 倍にする。\n\n2 倍にする。"),
+            "twice(x)\n\nDefinitions: calc.rb | calc.rb\n\n2 倍にする。"
+        );
+        // moon-lsp: 区切り線
+        assert_eq!(plain_hover("```moonbit\nfn twice(x : Int) -> Int\n```\n---\n\n 2 倍にする。"), "fn twice(x : Int) -> Int\n\n 2 倍にする。");
+        // clangd: 見出しとインラインのコード。囲みの中の # は残す
+        assert_eq!(
+            plain_hover("### function `twice`\n\n→ `int`\n\n---\n```cpp\n#include <x>\n// In twice\nstatic int twice(int x)\n```"),
+            "function twice\n\n→ int\n\n#include <x>\n// In twice\nstatic int twice(int x)"
+        );
+        // 囲みの無いもの・角括弧だけのものはそのまま
+        assert_eq!(plain_hover("  let v: [i32; 3]  "), "let v: [i32; 3]");
+        assert_eq!(plain_hover("a[0](x) と [b](c d)"), "a[0](x) と [b](c d)");
+        assert_eq!(strip_links("[x](https://u) [y](#v) [z](w)"), "x y [z](w)");
     }
 
     #[test]
