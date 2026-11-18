@@ -18,6 +18,23 @@ const HIT_YELLOW: Color = Color::hex(0xffd479);
 /// 検索欄の地の色。
 const SEARCH_BG: Color = Color::hex(0x3c3c3c);
 
+/// 小窓の 1 行目の札の代わりに描く印（型の情報の問い合わせ中。2026-11-18）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PopupMark {
+    /// 印なし（札の文字を描く）。
+    #[default]
+    None,
+    /// 点の輪（7×7、8 個の点）。数は先頭の点の位置（0〜7。コマごとに 1 つ進める）。
+    Spin(u8),
+    /// 失敗（赤い ×）。
+    Failed,
+}
+
+/// 点の輪の点の位置（7×7 の中。12 時から時計回り）。
+const RING: [(i32, i32); 8] = [(3, 0), (5, 1), (6, 3), (5, 5), (3, 6), (1, 5), (0, 3), (1, 1)];
+/// 点の輪の色（明るい青。モックの #4fc1ff）。
+const SPIN_BLUE: Color = Color::hex(0x4fc1ff);
+
 /// 補完の候補 1 つ。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PopupItem {
@@ -36,7 +53,10 @@ pub struct PopupItem {
 pub struct CompletionPopup {
     items: Vec<PopupItem>,
     sel: usize,
+    /// 下の案内の行（空なら案内の行を出さない）。
     footer: &'static str,
+    /// 1 行目の札の代わりの印。
+    mark: PopupMark,
     dirty: bool,
     /// 前回描いた矩形。
     drawn: Option<Rect>,
@@ -61,6 +81,21 @@ impl CompletionPopup {
     }
     pub fn items(&self) -> &[PopupItem] {
         &self.items
+    }
+    /// 1 行目の札の代わりの印。変わったときだけ描き直す。
+    pub fn set_mark(&mut self, mark: PopupMark) {
+        if self.mark != mark {
+            self.mark = mark;
+            self.dirty = true;
+        }
+    }
+    /// 案内の行の高さ（案内が空なら 0）。
+    fn foot_h(&self) -> u16 {
+        if self.footer.is_empty() {
+            0
+        } else {
+            FOOT_H
+        }
     }
     pub fn selected(&self) -> usize {
         self.sel
@@ -87,7 +122,7 @@ impl CompletionPopup {
         let label_w = self.items.iter().map(|i| cx.fonts.measure(&i.label, &code)).max().unwrap_or(0);
         let foot_w = cx.fonts.measure(self.footer, &small) + 8;
         let w = (2 + tag_w + label_w + 6).max(foot_w).min(bounds.w as i32) as u16;
-        let h = self.items.len() as u16 * ITEM_H + FOOT_H + 2;
+        let h = self.items.len() as u16 * ITEM_H + self.foot_h() + 2;
         let x = (word_x - 2 - tag_w).clamp(bounds.x as i32, (bounds.right() - w as i32).max(bounds.x as i32));
         let below = caret.bottom() + 1;
         let y = if below + h as i32 <= bounds.bottom() { below } else { (caret.y as i32 - h as i32 - 1).max(bounds.y as i32) };
@@ -114,7 +149,13 @@ impl CompletionPopup {
             let bg = if i == self.sel { palette::LIST_FOCUS } else { POPUP_BG };
             cx.canvas.fill_rect(row, bg);
             let tag_area = Rect::new(row.x + 2, row.y, tag_w as u16, row.h);
-            cx.text_in(tag_area, it.tag, &small, it.tag_color, bg);
+            match (i, self.mark) {
+                (0, PopupMark::Spin(head)) => draw_ring(cx, tag_area, head, bg),
+                (0, PopupMark::Failed) => draw_cross(cx, tag_area),
+                _ => {
+                    cx.text_in(tag_area, it.tag, &small, it.tag_color, bg);
+                }
+            }
             let base = row.y as i32 + cx.baseline_in(&code, row.h);
             let split = it.label.char_indices().nth(it.hit_chars).map_or(it.label.len(), |(b, _)| b);
             let (hit, rest) = it.label.split_at(split);
@@ -124,12 +165,32 @@ impl CompletionPopup {
             cx.text(x, base, rest, &code, fg, bg, row);
         }
         let foot_y = inner.y as i32 + self.items.len() as i32 * ITEM_H as i32;
-        if foot_y < inner.bottom() {
+        if !self.footer.is_empty() && foot_y < inner.bottom() {
             cx.canvas.hline(inner.x as i32, foot_y, inner.w, FOOT_LINE);
             let foot = Rect::new(inner.x + 4, (foot_y + 1) as i16, inner.w.saturating_sub(4), FOOT_H - 1).intersect(&inner);
             cx.text_in(foot, self.footer, &small, palette::DIM, POPUP_BG);
         }
         Damage::range(rect.rows(), Priority::Cursor)
+    }
+}
+
+/// 点の輪を `area` の左寄せ・上下の中ほどに描く。先頭（`head`）がいちばん明るく、後ろへ薄くなる。
+fn draw_ring(cx: &mut RenderCx<'_>, area: Rect, head: u8, bg: Color) {
+    let (x0, y0) = (area.x as i32 + 1, area.y as i32 + (area.h as i32 - 7) / 2);
+    for (k, (dx, dy)) in RING.iter().enumerate() {
+        let age = (head as usize + RING.len() - k) % RING.len();
+        // 先頭から 0 / 1 / 2 / それより後ろ: 明るさ 100% / 70% / 45% / 20%
+        let t = [255u8, 180, 115, 50][age.min(3)];
+        cx.canvas.put(x0 + dx, y0 + dy, bg.mix(SPIN_BLUE, t));
+    }
+}
+
+/// 赤い × を `area` の左寄せ・上下の中ほどに描く（7×7）。
+fn draw_cross(cx: &mut RenderCx<'_>, area: Rect) {
+    let (x0, y0) = (area.x as i32 + 1, area.y as i32 + (area.h as i32 - 7) / 2);
+    for d in 0..7 {
+        cx.canvas.put(x0 + d, y0 + d, palette::ERROR);
+        cx.canvas.put(x0 + 6 - d, y0 + d, palette::ERROR);
     }
 }
 

@@ -713,6 +713,10 @@ pub struct EditorScreen {
     lsp: lsp::LspUi,
     /// hover の小窓（補完の小窓と同じ部品）。
     hover_popup: CompletionPopup,
+    /// 型の情報の問い合わせ中の小窓（案内の行なし）。
+    wait_popup: CompletionPopup,
+    /// 問い合わせ中の小窓を閉じた・置き直す（下の行を描き直す）。
+    wait_stale: bool,
     /// hover の小窓の下の行を描き直してから、置き直す（閉じたときも）。
     hover_stale: bool,
     /// アウトライン（開いているあいだは本文の全体を覆う）。
@@ -831,6 +835,8 @@ impl EditorScreen {
             popup_stale: false,
             lsp: lsp::LspUi::default(),
             hover_popup: CompletionPopup::new("Esc 閉じる"),
+            wait_popup: CompletionPopup::new(""),
+            wait_stale: false,
             hover_stale: false,
             outline: None,
             picker: PickerList::new("アウトライン"),
@@ -1183,6 +1189,10 @@ impl EditorScreen {
     pub fn hover(&self) -> Option<Vec<String>> {
         self.hover_items().map(|v| v.into_iter().map(|i| i.label).collect())
     }
+    /// 問い合わせ中の小窓の文字と、失敗の × か（出していなければ `None`。テスト用）。
+    pub fn lsp_wait(&self) -> Option<(String, bool)> {
+        self.wait_items().map(|(items, mark)| (items[0].label.clone(), mark == zc_ui::PopupMark::Failed))
+    }
     /// 開いている「使っている所」・「名前を探す」の一覧の行（名前、選べない行か）と選んでいる位置（テスト用）。
     pub fn locs_rows(&self) -> Option<(String, Vec<(String, bool)>, usize)> {
         self.lsp.locs.as_ref().map(|s| (s.title.clone(), s.rows.iter().map(|(r, i)| (r.name.clone(), i.is_none())).collect(), s.sel))
@@ -1295,6 +1305,8 @@ impl EditorScreen {
         self.popup.forget();
         self.lsp.hover = None;
         self.hover_popup.forget();
+        self.lsp.wait = None;
+        self.wait_popup.forget();
         self.skk.reset();
         self.cand_popup.forget();
     }
@@ -1493,6 +1505,8 @@ impl EditorScreen {
         if self.message.take().is_some() {
             self.status_due = true;
         }
+        // 問い合わせ中の小窓は、どの打鍵でも消す（動いた・書いた後の答えはもともと捨てる）
+        self.clear_wait();
         // hover の小窓は次の打鍵で閉じる（Esc は閉じるだけ）
         if self.lsp.hover.is_some() {
             self.close_hover();
@@ -3477,6 +3491,7 @@ impl Screen for EditorScreen {
                 }
             }
             TimerId::FocusFlash => self.step_flash(cx),
+            TimerId::LspSpinner => self.lsp_wait_timer(cx),
             TimerId::CursorBlink => {
                 if self.blinks_left > 0 {
                     self.blinks_left -= 1;
@@ -3505,6 +3520,7 @@ impl Screen for EditorScreen {
         self.picker.invalidate();
         self.popup.invalidate();
         self.hover_popup.invalidate();
+        self.wait_popup.invalidate();
         self.panel.invalidate();
         self.empty_drawn = None;
         if let Some(t) = self.tabs.get_mut(self.active) {
@@ -3594,6 +3610,7 @@ impl Screen for EditorScreen {
         self.pump_highlight(None);
         let want_popup = self.completion.is_some() && self.focus == Focus::Editor;
         let hover = if want_popup { None } else { self.hover_items() };
+        let wait = if want_popup || hover.is_some() { None } else { self.wait_items() };
         match self.tabs.get_mut(self.active) {
             Some(t) => {
                 // 小窓を閉じる・置き直すときは、下にあった行を描き直させる
@@ -3610,6 +3627,13 @@ impl Screen for EditorScreen {
                     }
                 }
                 self.hover_stale = false;
+                if let Some(old) = self.wait_popup.drawn() {
+                    if wait.is_none() || std::mem::take(&mut self.wait_stale) {
+                        t.view.invalidate_rows(old.y as i32, old.bottom());
+                        self.wait_popup.forget();
+                    }
+                }
+                self.wait_stale = false;
                 if let Some(old) = self.cand_popup.drawn() {
                     if cand.is_none() || std::mem::take(&mut self.cand_stale) {
                         t.view.invalidate_rows(old.y as i32, old.bottom());
@@ -3645,6 +3669,13 @@ impl Screen for EditorScreen {
                     self.hover_popup.set(items, usize::MAX);
                     let rect = self.hover_popup.place(cx, caret, caret.x as i32, regions.editor);
                     damage |= self.hover_popup.render_at(cx, rect, !view_damage.is_empty());
+                }
+                // 型の情報の問い合わせ中: 答えが出る場所（カーソルの下）に、点の輪の小窓
+                if let (Some((items, mark)), Some(caret)) = (wait, t.view.caret_rect()) {
+                    self.wait_popup.set(items, usize::MAX);
+                    self.wait_popup.set_mark(mark);
+                    let rect = self.wait_popup.place(cx, caret, caret.x as i32, regions.editor);
+                    damage |= self.wait_popup.render_at(cx, rect, !view_damage.is_empty());
                 }
                 // SKK の候補一覧（モック 8）。▼ の語の下（登録欄の中の変換なら登録欄の上）
                 if let (false, Some((rows, sel, page))) = (cand_on_panel, cand.clone()) {

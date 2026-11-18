@@ -20,6 +20,11 @@
 //! - 「上限」「オフライン」「認証」「設定が無い」は、同じ理由が続く間 1 回だけ知らせる（補完では
 //!   何も出さない）。答えが 1 つ届いたら忘れる
 //! - 位置: 文書の `Pos` の桁は文字の数、ビルド係とは UTF-8 のバイト位置で話す
+//! - **問い合わせ中の小窓**（2026-11-18、ユーザーの決定。モックは Artifact「zcode 問い合わせ中のスピナー」の案 C）:
+//!   Ctrl+H・Ctrl+D・Ctrl+R を押して [`WAIT_DELAY`] たっても答えが無ければ、答えが出る場所（カーソルの下）に
+//!   小窓を出し、点の輪を回す（[`WAIT_STEP`] ごとに 1 コマ）。答えが来たら消して答えに替える。打鍵があれば
+//!   消す（動いた・書いた後の答えはもともと捨てる）。失敗・時間切れは [`WAIT_FAIL`] だけ赤い × にしてから消す
+//!   （理由はステータスバー）。「準備中」はすぐ返るので × にしない。操作は止めない
 
 use super::{EditorScreen, Focus};
 use crate::app::{LoopCx, TimerId};
@@ -28,7 +33,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use zc_core::{palette, DocId, Key, KeyEvent, Pos, Version};
 use zc_remote_ipc::{DoneStatus, LspItem, LspKind, LspState, RemoteLang};
-use zc_ui::{PickRow, PopupItem, Widget};
+use zc_ui::{PickRow, PopupItem, PopupMark, Widget};
 
 /// 型の情報（言語サーバー）を頼める言語か。
 pub(super) fn has_lsp(lang: Option<RemoteLang>) -> bool {
@@ -43,6 +48,12 @@ pub const LSP_SYMBOLS_IDLE: Duration = Duration::from_millis(300);
 pub const HOVER_LINES: usize = 8;
 /// 補完の小窓に足す言語サーバーの候補の数。
 pub const LSP_COMPLETIONS: usize = 6;
+/// 問い合わせ中の小窓を出すまでの時間（これより早く答えが来たら出さない。ちらつかせない）。
+pub const WAIT_DELAY: Duration = Duration::from_millis(250);
+/// 点の輪の 1 コマ（描き直すのは小窓の行だけ）。
+pub const WAIT_STEP: Duration = Duration::from_millis(120);
+/// 失敗の × を出しておく時間。
+pub const WAIT_FAIL: Duration = Duration::from_millis(1000);
 
 /// 行の中の文字の位置 → UTF-8 のバイト位置。
 pub(super) fn byte_col(line: &str, char_col: u32) -> u32 {
@@ -198,10 +209,28 @@ pub(super) struct Pending {
     pub pos: Pos,
 }
 
+/// 問い合わせ中の小窓（1 つだけ。新しく押したら替わる）。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Wait {
+    pub req: RemoteReq,
+    pub kind: LspKind,
+    pub doc: DocId,
+    pub version: Version,
+    pub pos: Pos,
+    /// 出している（[`WAIT_DELAY`] が過ぎた）。
+    pub shown: bool,
+    /// 点の輪の先頭の位置。
+    pub frame: u8,
+    /// 失敗した（× を出している）。
+    pub failed: bool,
+}
+
 /// 型の情報の状態。
 #[derive(Default)]
 pub(super) struct LspUi {
     pub pending: Vec<Pending>,
+    /// 問い合わせ中の小窓。
+    pub wait: Option<Wait>,
     /// 出している hover（文書・版・行）。
     pub hover: Option<(DocId, Version, Vec<String>)>,
     pub locs: Option<LocsState>,
@@ -253,6 +282,12 @@ impl EditorScreen {
         // 同じ種類の前の問い合わせ（答えはまだ）は捨てる（serve も、まだ送っていなければ取り消す）
         self.lsp.pending.retain(|p| p.kind != kind);
         self.lsp.pending.push(Pending { req, kind, doc, version, pos });
+        // 自分で押した問い合わせは、遅ければカーソルの下に問い合わせ中の小窓を出す
+        if !quiet && matches!(kind, LspKind::Hover | LspKind::Definition | LspKind::References) {
+            self.clear_wait();
+            self.lsp.wait = Some(Wait { req, kind, doc, version, pos, shown: false, frame: 0, failed: false });
+            cx.timers.set_after(TimerId::LspSpinner, WAIT_DELAY);
+        }
         Some(req)
     }
 
@@ -423,6 +458,70 @@ impl EditorScreen {
         t.sync_cursor();
     }
 
+    /// 問い合わせ中の小窓を消す（下の行を描き直させる）。
+    pub(super) fn clear_wait(&mut self) {
+        if self.lsp.wait.take().is_some_and(|w| w.shown) {
+            self.wait_stale = true;
+        }
+    }
+
+    /// [`TimerId::LspSpinner`]: 出し始める・1 コマ進める・失敗の × を消す。
+    pub(super) fn lsp_wait_timer(&mut self, cx: &mut LoopCx<'_>) {
+        let Some(mut w) = self.lsp.wait else { return };
+        if w.failed {
+            self.clear_wait();
+            return;
+        }
+        // 答えを待っていて、頼んだときと同じ文書・版・カーソルのときだけ（違えば答えは捨てる）
+        let still = self.focus == Focus::Editor
+            && self.lsp.pending.iter().any(|p| p.req == w.req)
+            && self.tabs.get(self.active).is_some_and(|t| t.id == w.doc && t.doc.version() == w.version && t.doc.selection().1 == w.pos);
+        if !still {
+            self.clear_wait();
+            return;
+        }
+        if w.shown {
+            w.frame = (w.frame + 1) % 8;
+        } else {
+            w.shown = true;
+        }
+        self.lsp.wait = Some(w);
+        cx.timers.set_after(TimerId::LspSpinner, WAIT_STEP);
+    }
+
+    /// 答えが来た: 問い合わせ中の小窓を消す。失敗なら（出していれば）しばらく × にする。
+    fn end_wait(&mut self, req: RemoteReq, failed: bool, cx: &mut LoopCx<'_>) {
+        let Some(mut w) = self.lsp.wait.filter(|w| w.req == req) else { return };
+        if failed && w.shown {
+            w.failed = true;
+            self.lsp.wait = Some(w);
+            cx.timers.set_after(TimerId::LspSpinner, WAIT_FAIL);
+        } else {
+            self.clear_wait();
+        }
+    }
+
+    /// 問い合わせ中の小窓の項目と印（出していなければ `None`）。
+    pub(super) fn wait_items(&self) -> Option<(Vec<PopupItem>, PopupMark)> {
+        let w = self.lsp.wait.filter(|w| w.shown)?;
+        let t = self.tabs.get(self.active)?;
+        if t.id != w.doc || t.doc.version() != w.version || self.focus != Focus::Editor {
+            return None;
+        }
+        let label = if w.failed {
+            "問い合わせできなかった"
+        } else {
+            match w.kind {
+                LspKind::Hover => "型と説明を問い合わせ中",
+                LspKind::Definition => "定義を問い合わせ中",
+                LspKind::References => "使っている所を問い合わせ中",
+                _ => "問い合わせ中",
+            }
+        };
+        let mark = if w.failed { PopupMark::Failed } else { PopupMark::Spin(w.frame) };
+        Some((vec![PopupItem { tag: "", tag_color: palette::STATUS, label: label.to_string(), hit_chars: 0 }], mark))
+    }
+
     pub(super) fn close_hover(&mut self) {
         if self.lsp.hover.take().is_some() {
             self.hover_stale = true;
@@ -470,6 +569,9 @@ impl EditorScreen {
     pub(super) fn on_lsp_result(&mut self, req: RemoteReq, status: DoneStatus, message: String, text: String, items: Vec<LspItem>, cx: &mut LoopCx<'_>) {
         let Some(i) = self.lsp.pending.iter().position(|p| p.req == req) else { return };
         let p = self.lsp.pending.remove(i);
+        // 「準備中」はすぐ返る（ステータスバーで知らせる）ので × にしない
+        let failed = !matches!(status, DoneStatus::Ok | DoneStatus::Cancelled) && !message.contains("準備中");
+        self.end_wait(req, failed, cx);
         let quiet = p.kind == LspKind::Completion || (p.kind == LspKind::Symbols && self.lsp.locs.as_ref().is_none_or(|s| s.waiting != Some(req)));
         if status != DoneStatus::Ok {
             if status == DoneStatus::Cancelled || quiet {

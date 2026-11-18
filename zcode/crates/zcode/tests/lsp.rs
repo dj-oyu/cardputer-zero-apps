@@ -412,3 +412,57 @@ fn check_golden(ed: &mut EditorScreen, name: &str) {
     }
 }
 
+
+/// 問い合わせ中の小窓（案 C、2026-11-18）: 早い答えには出さない。遅ければカーソルの下に出して点の輪を
+/// 回し、答えが来たら答えに替わる。打鍵で消える。失敗は × を出してから消える。
+#[test]
+fn waiting_popup_while_asking() {
+    let fake = FakeLsp::default();
+    let (dir, _proj, mut ed, mut lp) = project("wait", &fake);
+    let line = MAIN.split('\n').nth(2).unwrap();
+    let ch = line[..line.find("helper").unwrap()].chars().count() as u32 + 2;
+    place(&mut ed, &mut lp, 2, ch);
+    // 早い答え（出す前に届いた）: 小窓は出さず、そのまま答え
+    lp.keys(&mut ed, &[ctrl('h')]);
+    assert_eq!(ed.lsp_wait(), None);
+    let (req, _) = fake.last();
+    lp.answer(&mut ed, req, DoneStatus::Ok, "", "p::util", vec![]);
+    lp.fire(&mut ed, TimerId::LspSpinner);
+    assert_eq!((ed.lsp_wait(), ed.hover()), (None, Some(vec!["p::util".to_string()])));
+    lp.keys(&mut ed, &[key(Key::Esc)]);
+    // 遅い答え: 小窓を出し、コマを進めても出したまま、答えが来たら答えの小窓に替わる
+    lp.keys(&mut ed, &[ctrl('h')]);
+    let (req, _) = fake.last();
+    lp.fire(&mut ed, TimerId::LspSpinner);
+    assert_eq!(ed.lsp_wait(), Some(("型と説明を問い合わせ中".to_string(), false)));
+    check_golden(&mut ed, "lsp-waiting.png");
+    lp.fire(&mut ed, TimerId::LspSpinner);
+    assert!(ed.lsp_wait().is_some());
+    lp.answer(&mut ed, req, DoneStatus::Ok, "", "p::util", vec![]);
+    assert_eq!((ed.lsp_wait(), ed.hover()), (None, Some(vec!["p::util".to_string()])));
+    lp.keys(&mut ed, &[key(Key::Esc)]);
+    // 打鍵で消える（動いた後の答えはもともと捨てる）
+    lp.keys(&mut ed, &[ctrl('d')]);
+    lp.fire(&mut ed, TimerId::LspSpinner);
+    assert_eq!(ed.lsp_wait(), Some(("定義を問い合わせ中".to_string(), false)));
+    lp.keys(&mut ed, &[key(Key::Right)]);
+    assert_eq!(ed.lsp_wait(), None);
+    // 失敗（時間切れ・オフラインなど）: × を出し、次のタイマーで消える
+    lp.keys(&mut ed, &[key(Key::Left), ctrl('h')]);
+    let (req, _) = fake.last();
+    lp.fire(&mut ed, TimerId::LspSpinner);
+    lp.answer(&mut ed, req, DoneStatus::Offline, "ネットワークが無い", "", vec![]);
+    assert_eq!(ed.lsp_wait(), Some(("問い合わせできなかった".to_string(), true)));
+    // 前の画像の後なので、全体を描き直させてから撮る（render_screen はまっさらな画面に描く）
+    ed.on_glyphs_ready();
+    check_golden(&mut ed, "lsp-waiting-failed.png");
+    lp.fire(&mut ed, TimerId::LspSpinner);
+    assert_eq!(ed.lsp_wait(), None);
+    // 「準備中」はすぐ返るので × にしない（ステータスバーの知らせだけ）
+    lp.keys(&mut ed, &[ctrl('h')]);
+    let (req, _) = fake.last();
+    lp.fire(&mut ed, TimerId::LspSpinner);
+    lp.answer(&mut ed, req, DoneStatus::Error, "rust-analyzer が準備中（プロジェクトを読んでいる）", "", vec![]);
+    assert_eq!(ed.lsp_wait(), None);
+    let _ = fs::remove_dir_all(dir);
+}
