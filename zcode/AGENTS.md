@@ -608,5 +608,7 @@ VS Code 風のコードエディタ（APPLaunch アプリ）。**Rust** で書�
 - zc-remote は 0.3.0（`runtimes.lock` も）。補完の小窓の言語サーバーの札は「ls」（前は「rs」）
 - 実機（2 号機、Cloudflare 経由、2026-11-18）で serve に IPC で直接頼んで確かめた: Python・TS・JS・Go・C・Zig・Shell・Ruby は
   hover と定義へが約 2 秒（最初の 1 回、サーバーの起動込み）、Rust は 12 秒（rust-analyzer の索引待ち）。MoonBit は、受付が木を
-  そろえるたびに moon-lsp の `_build` を消していて、別のパッケージの呼び出しに答えなかった → `Spec::keep` で直した
+  そろえるたびに moon-lsp の `_build` を消していて、別のパッケージの呼び出しに答えなかった → `Spec::keep` で直した。直した後（#18・#19 の deploy の後）は
+  Cloudflare 経由で別のパッケージの hover・定義へも 0.1 秒で答えた。ただし冷えたコンテナの最初の 1 回の hover は 25 秒の時間切れになった
+  （moon-lsp の最初の検査が 1 vCPU で遅いと思われる。2 回目から速い）。言語サーバーのエラーの知らせは `lsp_state` の `message` で実機へ届く
 - **未実施: deploy**（イメージ）。手元のイメージは `cz-builder:lsp-all`。Cloudflare の 1 vCPU での準備の時間、実機での見え方は未確認

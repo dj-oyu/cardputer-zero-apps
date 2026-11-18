@@ -869,6 +869,11 @@ impl LspHub {
         self.current.lock().unwrap().as_ref().map(|r| (r.project.clone(), r.st.lock().unwrap().phase))
     }
 
+    /// 今のサーバーの名前（知らせの文に使う。無ければ「言語サーバー」）。
+    pub fn server_name(&self) -> &'static str {
+        self.current.lock().unwrap().as_ref().map_or("言語サーバー", |r| r.spec.name)
+    }
+
     /// 先に起こしておく。今の状態をすぐ `reply` へ送り、状態が変わったときにも送る。
     /// `conn` は接続の番号（同じ接続を 2 回数えない）。
     pub fn warm(&self, store: &Store, project: &str, manifest: &Manifest, path: &str, conn: u64, reply: &Reply) {

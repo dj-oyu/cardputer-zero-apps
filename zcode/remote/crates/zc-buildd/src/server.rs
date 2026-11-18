@@ -856,7 +856,7 @@ impl Conn<'_> {
             keep
         });
         for id in expired {
-            let m = ServerMsg::LspResult { cpu_ms: self.sh.lsp.cpu_ms(), id, error: Some(ErrorCode::Internal), message: "rust-analyzer が答えない（時間切れ）".into(), text: String::new(), items: vec![], retry_after_s: None };
+            let m = ServerMsg::LspResult { cpu_ms: self.sh.lsp.cpu_ms(), id, error: Some(ErrorCode::Internal), message: format!("{} が答えない（時間切れ。冷えた起動の最初の 1 回は遅いことがある）", self.sh.lsp.server_name()), text: String::new(), items: vec![], retry_after_s: None };
             self.send(&m);
         }
     }
