@@ -35,7 +35,7 @@ pub mod widgets;
 pub use folder::FolderPicker;
 pub use editor::{EditorView, LineMark, NoSpans, PreeditSeg, PreeditStyle, PreeditView, RenderStats, SpanSource, Viewport};
 pub use mdlayout::MdLayouter;
-pub use picker::{CompletionPopup, PickRow, PickerList, PopupItem};
+pub use picker::{CompletionPopup, PickRow, PickerList, PopupItem, PopupMark};
 pub use shortcuts::{ShortcutList, ShortcutRow};
 pub use skkui::{CandidatePopup, CandidateRow, MiniBuffer, MINI_H};
 pub use status::{Chip, EditorStatus, ImeMode, PaneMap, StatusBar, TitleBar, PANE_MAP_W};
