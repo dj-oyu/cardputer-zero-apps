@@ -202,6 +202,9 @@ buildScripts・procMacro・cachePriming は既定（有効）のまま。
 - 受付は問い合わせのたびに lsp の木を目録にそろえる。サーバーが木の根に作るもの（moon-lsp の `_build`・zls の
   `.zig-cache`・clangd の `.cache`・ruby-lsp の `.ruby-lsp`）は `Spec::keep` に書いて消さない。**消すと moon-lsp は
   別のパッケージの型を読めず、何も答えなくなった**（2026-11-18、実機のサンプル `moonbit/cmd/main` で見つけた）
+- サーバーのエラーの知らせ（`window/showMessage` のエラー・警告、`window/logMessage` のエラー、標準エラーのエラーらしい行）は、
+  状態（`lsp_state`）の `message` として実機へ流す（状態は変えない）。Cloudflare のコンテナの中は外から見えないので、答えが空の
+  ときの手がかりにする
 
 ### 9.2 新しい言語の足し方
 
