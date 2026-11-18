@@ -72,7 +72,14 @@ pub struct WordIndex {
     free: Vec<u32>,
     /// 行ごとの単語（`words` の添字）。
     lines: Vec<Vec<u32>>,
+    /// 行数が [`MAX_INDEXED_LINES`] を超える文書では索引を持たない（編集の通知も無視する）。
+    disabled: bool,
 }
+
+/// 索引する文書の最大の行数。超えたら単語補完は文書の単語を出さない（キーワードは出る）。
+/// 行ごとに `Vec` を持つので、10 万行・約 6.5MB のファイルで索引だけで 7MB 以上になる
+/// （実機のメモリは 200MB 前後しか空いていない）。
+pub const MAX_INDEXED_LINES: u32 = 50_000;
 
 impl WordIndex {
     pub fn new() -> WordIndex {
@@ -80,9 +87,14 @@ impl WordIndex {
     }
 
     /// 全体から作り直す。**batch スレッドで呼べる**（256 行ごとに `cancel` を見る）。
+    /// 行数が [`MAX_INDEXED_LINES`] を超えるなら、空の（以後も増えない）索引を返す。
     pub fn build(src: &dyn LineSource, cancel: &CancelToken) -> Result<WordIndex, Cancelled> {
         let mut idx = WordIndex::new();
         let n = src.len_lines();
+        if n > MAX_INDEXED_LINES {
+            idx.disabled = true;
+            return Ok(idx);
+        }
         let mut buf = String::new();
         idx.lines.reserve(n as usize);
         for l in 0..n {
@@ -138,6 +150,17 @@ impl WordIndex {
     /// 行数が合わなくなっていたら（通知の取りこぼし）、全体を作り直す。
     pub fn edited(&mut self, src: &dyn LineSource, change: LineChange) {
         let n = src.len_lines() as usize;
+        if self.disabled {
+            // 行数が上限を下回るまで縮んだら、作り直して使い始める
+            if n <= MAX_INDEXED_LINES as usize {
+                self.rebuild(src);
+            }
+            return;
+        }
+        if n > MAX_INDEXED_LINES as usize {
+            self.rebuild(src); // 上限を超えた: 索引を捨てる
+            return;
+        }
         let old_start = (change.old.start as usize).min(self.lines.len());
         let old_end = (change.old.end as usize).min(self.lines.len()).max(old_start);
         let expected = self.lines.len() - (old_end - old_start) + change.new.len() as usize;
@@ -394,6 +417,29 @@ mod tests {
         let tok = vc.token();
         vc.bump();
         assert!(WordIndex::build(&L(text.as_slice()), &tok).is_err());
+    }
+
+    #[test]
+    fn huge_documents_get_no_index() {
+        let big: Vec<&str> = vec!["word_one word_two"; MAX_INDEXED_LINES as usize + 1];
+        let mut idx = index(&big);
+        assert_eq!(idx.lines(), 0);
+        assert_eq!(idx.distinct_words(), 0);
+        // 編集を知らせても作り直さない（索引は空のまま、補完はキーワードだけ）
+        let change = LineChange { old: LineRange::new(0, 1), new: LineRange::new(0, 1) };
+        idx.edited(&L(big.as_slice()), change);
+        assert_eq!(idx.lines(), 0);
+        assert_eq!(labels(&complete(&idx, &["word_kw"], "wor", Pos::new(0, 0), 5)), ["word_kw"]);
+        // 上限ちょうどなら索引する
+        let ok: Vec<&str> = vec!["word_one"; MAX_INDEXED_LINES as usize];
+        assert_eq!(index(&ok).lines(), MAX_INDEXED_LINES as usize);
+        // 縮んで上限以下になったら、次の編集で索引を作り直す
+        let mut idx = index(&big);
+        idx.edited(&L(ok.as_slice()), change);
+        assert_eq!(idx.lines(), MAX_INDEXED_LINES as usize);
+        // 上限を超えたら索引を捨てる
+        idx.edited(&L(big.as_slice()), change);
+        assert_eq!(idx.lines(), 0);
     }
 
     #[test]
